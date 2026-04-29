@@ -1,5 +1,7 @@
 export type MemoryType = 'note' | 'decision' | 'bug' | 'pattern' | 'gotcha' | 'todo'
 
+export type ImportanceSource = 'default' | 'user' | 'llm'
+
 export interface Memory {
   id: string
   session_id: string
@@ -12,10 +14,13 @@ export interface Memory {
   last_accessed: number | null
   access_count: number
   vec_rowid: number | null
+  importance_source?: ImportanceSource
+  importance_model?: string | null
+  importance_prompt_version?: string | null
+  importance_scored_at?: number | null
 }
 
 export interface SearchResult extends Memory {
-  /** Composite score from query-adaptive signal weighting (AttnRes Phase 1) */
   score: number
 }
 
@@ -27,6 +32,7 @@ export interface StoreMemoryInput {
   importance?: number
   tags?: string[]
   adjudicateSync?: boolean
+  importanceProvided?: boolean
 }
 
 export interface ListMemoriesFilter {

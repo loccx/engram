@@ -5,6 +5,7 @@ import { MemorySearch } from '../memory/search.js'
 import { SessionManager } from '../session/manager.js'
 import { resolveNamespace } from '../namespace/resolver.js'
 import { getAdjudicationQueue } from '../contradictions/runtime.js'
+import { getImportanceQueue } from '../importance/runtime.js'
 import { enrichMemories, enrichSearchResults, type RecallSignal } from '../memory/enrichment.js'
 import type { MemoryType, StoreMemoryInput } from '../memory/types.js'
 import { SCHEMAS } from './schemas.js'
@@ -27,9 +28,10 @@ function err(message: string): ToolResult {
 function getInstances() {
   const dbm = getDatabase()
   const queue = getAdjudicationQueue(dbm.db, dbm.vectorsAvailable)
+  const importanceQueue = getImportanceQueue(dbm.db)
   return {
     db: dbm.db,
-    store: new MemoryStore(dbm.db, dbm.vectorsAvailable, queue),
+    store: new MemoryStore(dbm.db, dbm.vectorsAvailable, queue, importanceQueue),
     search: new MemorySearch(dbm.db, dbm.vectorsAvailable),
     sessions: new SessionManager(dbm.db),
   }
@@ -80,14 +82,16 @@ export async function handleTool(
           sessionId = current?.id ?? (await sessions.start({ project_path })).id
         }
 
+        const importanceProvided = typeof args.importance === 'number'
         const input: StoreMemoryInput = {
           content,
           session_id: sessionId,
           project_path,
           type: (args.type as MemoryType) || 'note',
-          importance: typeof args.importance === 'number' ? args.importance : 0.5,
+          importance: importanceProvided ? (args.importance as number) : 0.5,
           tags: Array.isArray(args.tags) ? (args.tags as string[]) : [],
           adjudicateSync: args.adjudicate_sync === true,
+          importanceProvided,
         }
         const memory = await store.store(input)
         const [enriched] = enrichMemories(db, [memory])

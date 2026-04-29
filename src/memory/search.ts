@@ -32,14 +32,37 @@ interface MemoryRow {
   last_accessed: number | null
   access_count: number
   vec_rowid: number | null
+  importance_source?: string | null
+  importance_model?: string | null
+  importance_prompt_version?: string | null
+  importance_scored_at?: number | null
 }
 
 function rowToMemory(row: MemoryRow): Memory {
-  return {
-    ...row,
+  const base: Memory = {
+    id: row.id,
+    session_id: row.session_id,
+    project_path: row.project_path,
+    content: row.content,
     type: row.type as MemoryType,
+    importance: row.importance,
     tags: JSON.parse(row.tags) as string[],
+    created_at: row.created_at,
+    last_accessed: row.last_accessed,
+    access_count: row.access_count,
+    vec_rowid: row.vec_rowid,
   }
+  if (row.importance_source != null) {
+    base.importance_source = row.importance_source as Memory['importance_source']
+  }
+  if (row.importance_model !== undefined) base.importance_model = row.importance_model
+  if (row.importance_prompt_version !== undefined) {
+    base.importance_prompt_version = row.importance_prompt_version
+  }
+  if (row.importance_scored_at !== undefined) {
+    base.importance_scored_at = row.importance_scored_at
+  }
+  return base
 }
 
 /**

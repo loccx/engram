@@ -1,10 +1,18 @@
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
-import type { Memory, StoreMemoryInput, ListMemoriesFilter, MemoryType, LinkType } from './types.js'
+import type {
+  Memory,
+  StoreMemoryInput,
+  ListMemoriesFilter,
+  MemoryType,
+  LinkType,
+  ImportanceSource,
+} from './types.js'
 import { getEmbedding, LINK_DISTANCE_THRESHOLD } from '../embeddings/pipeline.js'
 import type { AdjudicationQueue } from '../contradictions/queue.js'
 import { withTimeout } from '../contradictions/queue.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
+import type { BackgroundJobQueue } from '../queue/background-queue.js'
 
 const ADJUDICATE_SYNC_TIMEOUT_MS = 2000
 
@@ -20,40 +28,72 @@ interface MemoryRow {
   last_accessed: number | null
   access_count: number
   vec_rowid: number | null
+  importance_source?: string | null
+  importance_model?: string | null
+  importance_prompt_version?: string | null
+  importance_scored_at?: number | null
 }
 
 function rowToMemory(row: MemoryRow): Memory {
-  return {
-    ...row,
+  const memory: Memory = {
+    id: row.id,
+    session_id: row.session_id,
+    project_path: row.project_path,
+    content: row.content,
     type: row.type as MemoryType,
+    importance: row.importance,
     tags: JSON.parse(row.tags) as string[],
+    created_at: row.created_at,
+    last_accessed: row.last_accessed,
+    access_count: row.access_count,
+    vec_rowid: row.vec_rowid,
   }
+  if (row.importance_source != null) {
+    memory.importance_source = row.importance_source as ImportanceSource
+  }
+  if (row.importance_model !== undefined) memory.importance_model = row.importance_model
+  if (row.importance_prompt_version !== undefined) {
+    memory.importance_prompt_version = row.importance_prompt_version
+  }
+  if (row.importance_scored_at !== undefined) {
+    memory.importance_scored_at = row.importance_scored_at
+  }
+  return memory
 }
 
 export class MemoryStore {
   constructor(
     private readonly db: Database.Database,
     private readonly vectorsAvailable: boolean = false,
-    private readonly adjudicationQueue: AdjudicationQueue | null = null
+    private readonly adjudicationQueue: AdjudicationQueue | null = null,
+    private readonly importanceQueue: BackgroundJobQueue<string> | null = null
   ) {}
 
-  /**
-   * Store a memory. Computes a local embedding (if available) and auto-links
-   * to semantically related memories (Zettelkasten method, A-MEM 2502.12110).
-   */
   async store(input: StoreMemoryInput): Promise<Memory> {
     const id = randomUUID()
     const now = Date.now()
     const tags = JSON.stringify(input.tags ?? [])
     const type = input.type ?? 'note'
     const importance = input.importance ?? 0.5
+    const importanceSource: ImportanceSource = input.importanceProvided ? 'user' : 'default'
 
     this.db
       .prepare(
-        `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, importance_source)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
-      .run(id, input.session_id, input.project_path, input.project_path, input.content, type, importance, tags, now)
+      .run(
+        id,
+        input.session_id,
+        input.project_path,
+        input.project_path,
+        input.content,
+        type,
+        importance,
+        tags,
+        now,
+        importanceSource
+      )
 
     // Compute embedding and link to related memories (non-blocking on failure)
     if (this.vectorsAvailable) {
@@ -81,6 +121,10 @@ export class MemoryStore {
       if (input.adjudicateSync) {
         await withTimeout(job.promise, ADJUDICATE_SYNC_TIMEOUT_MS, `adjudicate:${id}`)
       }
+    }
+
+    if (this.importanceQueue && !input.importanceProvided) {
+      this.importanceQueue.enqueue(id)
     }
 
     return this.getById(id)!

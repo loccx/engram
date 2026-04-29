@@ -1,6 +1,7 @@
-import { logger } from '../utils/logger.js'
+import { BackgroundJobQueue, withTimeout as bgWithTimeout } from '../queue/background-queue.js'
+import type { BackgroundQueueOptions, JobHandler as BgJobHandler } from '../queue/background-queue.js'
 
-export type JobHandler = (memoryId: string) => Promise<void>
+export type JobHandler = BgJobHandler<string>
 
 export interface AdjudicationJob {
   memoryId: string
@@ -13,93 +14,33 @@ export interface QueueOptions {
 }
 
 export class AdjudicationQueue {
-  private readonly handler: JobHandler
-  private readonly maxConcurrency: number
-  private readonly onError: (memoryId: string, err: unknown) => void
-  private readonly pending = new Map<string, Promise<void>>()
-  private inflight = 0
-  private waiting: Array<{ memoryId: string; resolve: () => void; reject: (e: unknown) => void }> = []
-  private draining = false
+  private readonly inner: BackgroundJobQueue<string>
 
   constructor(handler: JobHandler, options: QueueOptions = {}) {
-    this.handler = handler
-    this.maxConcurrency = Math.max(1, options.maxConcurrency ?? 2)
-    this.onError =
-      options.onError ?? ((memoryId, err) => logger.warn({ memoryId, err }, 'adjudication job failed'))
+    const innerOptions: BackgroundQueueOptions<string> = {
+      maxConcurrency: options.maxConcurrency,
+      name: 'adjudication',
+    }
+    if (options.onError) innerOptions.onError = options.onError
+    this.inner = new BackgroundJobQueue<string>(handler, innerOptions)
   }
 
   enqueue(memoryId: string): AdjudicationJob {
-    if (this.draining) {
-      const noop = Promise.resolve()
-      return { memoryId, promise: noop }
-    }
-    const existing = this.pending.get(memoryId)
-    if (existing) return { memoryId, promise: existing }
-
-    const promise = new Promise<void>((resolve, reject) => {
-      this.waiting.push({ memoryId, resolve, reject })
-      this.pump()
-    }).finally(() => {
-      this.pending.delete(memoryId)
-    })
-
-    this.pending.set(memoryId, promise)
-    return { memoryId, promise }
+    const job = this.inner.enqueue(memoryId)
+    return { memoryId: job.key, promise: job.promise }
   }
 
   size(): number {
-    return this.pending.size
+    return this.inner.size()
   }
 
   async drain(): Promise<void> {
-    this.draining = true
-    const all = Array.from(this.pending.values())
-    await Promise.allSettled(all)
+    await this.inner.drain()
   }
 
   reset(): void {
-    this.pending.clear()
-    this.waiting = []
-    this.inflight = 0
-    this.draining = false
-  }
-
-  private pump(): void {
-    while (this.inflight < this.maxConcurrency && this.waiting.length > 0) {
-      const next = this.waiting.shift()!
-      this.inflight++
-      void this.run(next.memoryId)
-        .then(() => next.resolve())
-        .catch((err) => {
-          this.onError(next.memoryId, err)
-          next.resolve()
-        })
-        .finally(() => {
-          this.inflight--
-          this.pump()
-        })
-    }
-  }
-
-  private async run(memoryId: string): Promise<void> {
-    await this.handler(memoryId)
+    this.inner.reset()
   }
 }
 
-export function withTimeout<T>(promise: Promise<T>, ms: number, label = 'operation'): Promise<T | null> {
-  return new Promise<T | null>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      logger.debug({ ms, label }, 'timeout reached, returning null')
-      resolve(null)
-    }, ms)
-    promise
-      .then((value) => {
-        clearTimeout(timer)
-        resolve(value)
-      })
-      .catch((err) => {
-        clearTimeout(timer)
-        reject(err)
-      })
-  })
-}
+export const withTimeout = bgWithTimeout

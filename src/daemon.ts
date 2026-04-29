@@ -7,6 +7,7 @@ import { backfillNamespaces } from './db/workers/backfill.js'
 import { reembedStaleMemories } from './db/workers/reembed.js'
 import { MODEL_ID } from './embeddings/pipeline.js'
 import { drainAdjudicationQueue } from './contradictions/runtime.js'
+import { drainImportanceQueue } from './importance/runtime.js'
 
 async function runStartupWorkers(): Promise<void> {
   const dbm = getDatabase()
@@ -57,11 +58,11 @@ export async function startDaemon(port: number = 8888): Promise<void> {
     logger.info({ signal }, 'Shutting down Engram daemon')
     try {
       await Promise.race([
-        drainAdjudicationQueue(),
+        Promise.allSettled([drainAdjudicationQueue(), drainImportanceQueue()]),
         new Promise((resolve) => setTimeout(resolve, 5000)),
       ])
     } catch (err) {
-      logger.warn({ err }, 'error draining adjudication queue on shutdown')
+      logger.warn({ err }, 'error draining background queues on shutdown')
     }
     removePid()
     process.exit(0)

@@ -47,16 +47,19 @@ describe('migration runner', () => {
 
     const result = runMigrations(db, dbPath, migrations, () => undefined)
 
+    const latestVersion = migrations[migrations.length - 1].version
     expect(result.startingVersion).toBe(0)
-    expect(result.finalVersion).toBe(1)
-    expect(result.applied).toHaveLength(1)
-    expect(result.applied[0].version).toBe(1)
+    expect(result.finalVersion).toBe(latestVersion)
+    expect(result.applied).toHaveLength(migrations.length)
+    expect(result.applied.map((m) => m.version)).toEqual(migrations.map((m) => m.version))
     expect(columnExists(db, 'memories', 'namespace')).toBe(true)
     expect(columnExists(db, 'memories', 'embedding_model')).toBe(true)
     expect(columnExists(db, 'memory_links', 'confidence')).toBe(true)
 
     const auditRows = db.prepare('SELECT version, description FROM schema_migrations ORDER BY version').all()
-    expect(auditRows).toEqual([{ version: 1, description: migrations[0].description }])
+    expect(auditRows).toEqual(
+      migrations.map((m) => ({ version: m.version, description: m.description }))
+    )
 
     db.close()
     rmSync(dir, { recursive: true, force: true })
@@ -98,8 +101,9 @@ describe('migration runner', () => {
     const result2 = runMigrations(db, dbPath, migrations, () => undefined)
     const filesAfterSecond = readdirSync(dir)
 
-    expect(result2.startingVersion).toBe(1)
-    expect(result2.finalVersion).toBe(1)
+    const latestVersion = migrations[migrations.length - 1].version
+    expect(result2.startingVersion).toBe(latestVersion)
+    expect(result2.finalVersion).toBe(latestVersion)
     expect(result2.applied).toHaveLength(0)
     expect(result2.backupPath).toBeNull()
     expect(filesAfterSecond.length).toBe(filesAfterFirst.length)
@@ -163,7 +167,7 @@ describe('migration runner', () => {
     const result = runMigrations(db, ':memory:', migrations, () => undefined)
 
     expect(result.backupPath).toBeNull()
-    expect(result.finalVersion).toBe(1)
+    expect(result.finalVersion).toBe(migrations[migrations.length - 1].version)
     db.close()
   })
 })
