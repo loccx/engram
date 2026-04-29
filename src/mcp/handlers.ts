@@ -111,6 +111,8 @@ export async function handleTool(
             limit: typeof args.limit === 'number' ? args.limit : 10,
             type: args.type as MemoryType | undefined,
             include_superseded: args.include_superseded === true,
+            use_reranker: args.use_reranker === true,
+            rerank_top_n: typeof args.rerank_top_n === 'number' ? args.rerank_top_n : undefined,
           },
           breakdown
         )

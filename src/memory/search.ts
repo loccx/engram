@@ -18,6 +18,7 @@
 import type Database from 'better-sqlite3'
 import type { Memory, SearchResult, MemoryType } from './types.js'
 import { getEmbedding } from '../embeddings/pipeline.js'
+import { rerank as rerankCrossEncoder } from '../embeddings/reranker.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
 
 interface MemoryRow {
@@ -121,7 +122,11 @@ export interface SearchOptions {
   limit?: number
   type?: MemoryType
   include_superseded?: boolean
+  use_reranker?: boolean
+  rerank_top_n?: number
 }
+
+export const DEFAULT_RERANK_TOP_N = 20
 
 export class MemorySearch {
   constructor(
@@ -142,7 +147,7 @@ export class MemorySearch {
   async hybridSearch(
     query: string,
     options: SearchOptions = {},
-    signalBreakdown?: Map<string, Record<'fts' | 'vec' | 'recency' | 'access' | 'importance', number>>
+    signalBreakdown?: Map<string, Record<'fts' | 'vec' | 'recency' | 'access' | 'importance' | 'reranker', number>>
   ): Promise<SearchResult[]> {
     const limit = options.limit ?? 10
     const overFetch = Math.max(limit * 5, 50)
@@ -217,6 +222,7 @@ export class MemorySearch {
           recency: contribRecency,
           access: contribAccess,
           importance: contribImportance,
+          reranker: 0,
         })
       }
       return {
@@ -225,7 +231,35 @@ export class MemorySearch {
       }
     })
 
-    const top = results.sort((a, b) => b.score - a.score).slice(0, limit)
+    let ranked = results.sort((a, b) => b.score - a.score)
+
+    if (options.use_reranker && ranked.length > 1) {
+      const topN = options.rerank_top_n ?? DEFAULT_RERANK_TOP_N
+      const window = ranked.slice(0, topN)
+      const tail = ranked.slice(topN)
+      const rerankScores = await rerankCrossEncoder(
+        query,
+        window.map((r) => r.content)
+      )
+      if (rerankScores) {
+        const reordered = rerankScores.map((rs) => ({
+          result: window[rs.index],
+          rerankScore: rs.score,
+        }))
+        if (signalBreakdown) {
+          for (const { result, rerankScore } of reordered) {
+            const existing = signalBreakdown.get(result.id)
+            if (existing) existing.reranker = rerankScore
+          }
+        }
+        ranked = [
+          ...reordered.map(({ result, rerankScore }) => ({ ...result, score: rerankScore })),
+          ...tail,
+        ]
+      }
+    }
+
+    const top = ranked.slice(0, limit)
 
     // Record access on returned results so Ebbinghaus spacing effect works:
     // memories that get retrieved strengthen over time instead of decaying.

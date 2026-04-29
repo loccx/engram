@@ -20,6 +20,8 @@ export const SearchMemoriesSchema = z.object({
   project_path: z.string().optional(),
   namespace: z.string().optional(),
   include_superseded: z.boolean().optional().default(false),
+  use_reranker: z.boolean().optional().default(false),
+  rerank_top_n: z.number().int().min(2).max(100).optional(),
 })
 
 export const GetContextSchema = z.object({

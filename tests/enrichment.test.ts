@@ -269,7 +269,7 @@ describe('enrichSearchResults', () => {
     const result: SearchResult = { ...memory, score: 0.42 }
 
     const breakdown = new Map<string, Record<RecallSignal, number>>([
-      [id, { fts: 0.05, vec: 0.3, recency: 0.02, access: 0.01, importance: 0.04 }],
+      [id, { fts: 0.05, vec: 0.3, recency: 0.02, access: 0.01, importance: 0.04, reranker: 0 }],
     ])
 
     const [enriched] = enrichSearchResults(dbm.db, [result], breakdown)
@@ -296,7 +296,7 @@ describe('enrichSearchResults', () => {
     const memory = loadMemory(dbm.db, id)
     const result: SearchResult = { ...memory, score: 0.5 }
     const breakdown = new Map<string, Record<RecallSignal, number>>([
-      [id, { fts: 0.05, vec: 0.05, recency: 0.05, access: 0.05, importance: 0.4 }],
+      [id, { fts: 0.05, vec: 0.05, recency: 0.05, access: 0.05, importance: 0.4, reranker: 0 }],
     ])
 
     const [enriched] = enrichSearchResults(dbm.db, [result], breakdown)
@@ -305,7 +305,7 @@ describe('enrichSearchResults', () => {
 })
 
 describe('hybridSearch breakdown integration', () => {
-  it('populates breakdown map keyed by memory id with all 5 signals', async () => {
+  it('populates breakdown map keyed by memory id with all 6 signals', async () => {
     const dbm = createTestDb()
     const { MemorySearch } = await import('../src/memory/search.js')
     const search = new MemorySearch(dbm.db, false)
@@ -323,5 +323,6 @@ describe('hybridSearch breakdown integration', () => {
     expect(entry).toHaveProperty('recency')
     expect(entry).toHaveProperty('access')
     expect(entry).toHaveProperty('importance')
+    expect(entry).toHaveProperty('reranker')
   })
 })

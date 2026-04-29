@@ -3,7 +3,7 @@ import type { Memory, SearchResult } from './types.js'
 import { SUPERSEDES_FILTER_THRESHOLD } from '../contradictions/supersession.js'
 
 export type Tier = 'pinned' | 'hot' | 'warm' | 'cold'
-export type RecallSignal = 'fts' | 'vec' | 'recency' | 'access' | 'importance'
+export type RecallSignal = 'fts' | 'vec' | 'recency' | 'access' | 'importance' | 'reranker'
 
 export interface SupersedesCounts {
   supersedes: number

@@ -64,7 +64,7 @@ export const tools = [
   {
     name: 'search_memories',
     description:
-      'Hybrid full-text + semantic search. Combines FTS5 (lexical) and local vector embeddings via Reciprocal Rank Fusion, re-ranked by query archetype + Ebbinghaus decay. Hides superseded memories by default.',
+      'Hybrid full-text + semantic search. Combines FTS5 (lexical) and local vector embeddings via Reciprocal Rank Fusion, re-ranked by query archetype + Ebbinghaus decay. Hides superseded memories by default. Set use_reranker=true to refine the top window with a cross-encoder (requires ENGRAM_RERANKER_ENABLED=1; adds ~500-1000ms latency).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -74,6 +74,15 @@ export const tools = [
         project_path: projectPathField,
         namespace: namespaceField,
         include_superseded: includeSupersededField,
+        use_reranker: {
+          type: 'boolean',
+          description:
+            'Apply bge-reranker-v2-m3 cross-encoder to the top hybrid candidates (default: false; requires ENGRAM_RERANKER_ENABLED=1 to take effect).',
+        },
+        rerank_top_n: {
+          type: 'number',
+          description: 'How many top hybrid results to feed the reranker (default: 20, range 2-100).',
+        },
       },
       required: ['query'],
     },
