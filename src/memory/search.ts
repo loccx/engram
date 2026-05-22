@@ -16,55 +16,22 @@
  */
 
 import type Database from 'better-sqlite3'
-import type { Memory, SearchResult, MemoryType } from './types.js'
+import type { Memory, SearchResult, MemoryType, MemoryCluster } from './types.js'
 import { getEmbedding } from '../embeddings/pipeline.js'
 import { rerank as rerankCrossEncoder } from '../embeddings/reranker.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
+import { rowToMemory, type MemoryRow } from './row.js'
 
-interface MemoryRow {
-  id: string
-  session_id: string
+interface ClusterRow {
+  id: number
   project_path: string
-  content: string
-  type: string
-  importance: number
-  tags: string
+  member_ids: string
+  summary: string
+  is_extractive: number
   created_at: number
-  last_accessed: number | null
-  access_count: number
-  vec_rowid: number | null
-  importance_source?: string | null
-  importance_model?: string | null
-  importance_prompt_version?: string | null
-  importance_scored_at?: number | null
+  updated_at: number
 }
 
-function rowToMemory(row: MemoryRow): Memory {
-  const base: Memory = {
-    id: row.id,
-    session_id: row.session_id,
-    project_path: row.project_path,
-    content: row.content,
-    type: row.type as MemoryType,
-    importance: row.importance,
-    tags: JSON.parse(row.tags) as string[],
-    created_at: row.created_at,
-    last_accessed: row.last_accessed,
-    access_count: row.access_count,
-    vec_rowid: row.vec_rowid,
-  }
-  if (row.importance_source != null) {
-    base.importance_source = row.importance_source as Memory['importance_source']
-  }
-  if (row.importance_model !== undefined) base.importance_model = row.importance_model
-  if (row.importance_prompt_version !== undefined) {
-    base.importance_prompt_version = row.importance_prompt_version
-  }
-  if (row.importance_scored_at !== undefined) {
-    base.importance_scored_at = row.importance_scored_at
-  }
-  return base
-}
 
 /**
  * Ebbinghaus forgetting curve: R = exp(-t / S)
@@ -121,6 +88,7 @@ export interface SearchOptions {
   project_path?: string
   limit?: number
   type?: MemoryType
+  before?: number
   include_superseded?: boolean
   use_reranker?: boolean
   rerank_top_n?: number
@@ -129,10 +97,27 @@ export interface SearchOptions {
 export const DEFAULT_RERANK_TOP_N = 20
 
 export class MemorySearch {
+  private readonly stmtGetContextDefault: Database.Statement
+  private readonly stmtGetClusters: Database.Statement
+
   constructor(
     private readonly db: Database.Database,
     private readonly vectorsAvailable: boolean = false
-  ) {}
+  ) {
+    this.stmtGetContextDefault = this.db.prepare(
+      `SELECT * FROM memories
+       WHERE COALESCE(namespace, project_path) = ?
+         AND ${notSupersededClause('memories.id')}
+       ORDER BY
+         CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
+         (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
+         created_at DESC
+       LIMIT ?`
+    )
+    this.stmtGetClusters = this.db.prepare(
+      'SELECT * FROM memory_clusters WHERE project_path = ? ORDER BY updated_at DESC LIMIT 20'
+    )
+  }
 
   /**
    * Hybrid search with query-adaptive signal weighting.
@@ -308,6 +293,10 @@ export class MemorySearch {
       conditions.push('m.type = ?')
       values.push(options.type)
     }
+    if (options.before !== undefined) {
+      conditions.push('m.valid_from <= ?')
+      values.push(options.before)
+    }
     if (!options.include_superseded) {
       conditions.push(notSupersededClause('m.id'))
     }
@@ -351,6 +340,10 @@ export class MemorySearch {
       sql += ' AND m.type = ?'
       values.push(options.type)
     }
+    if (options.before !== undefined) {
+      sql += ' AND m.valid_from <= ?'
+      values.push(options.before)
+    }
     if (!options.include_superseded) {
       sql += ` AND ${notSupersededClause('m.id')}`
     }
@@ -371,27 +364,62 @@ export class MemorySearch {
   getContext(
     project_path: string,
     limit: number = 20,
-    options: { include_superseded?: boolean } = {}
+    options: { include_superseded?: boolean; before?: number } = {}
   ): Memory[] {
     const now = Date.now()
     const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
+
+    if (!options.include_superseded && options.before === undefined) {
+      const rows = this.stmtGetContextDefault.all(project_path, thirtyDaysAgo, limit) as MemoryRow[]
+      return rows.map(rowToMemory)
+    }
 
     const supersededFilter = options.include_superseded
       ? ''
       : ` AND ${notSupersededClause('memories.id')}`
 
+    const beforeFilter = options.before !== undefined ? ' AND valid_from <= ?' : ''
+    const params: unknown[] = [project_path]
+    if (options.before !== undefined) params.push(options.before)
+    params.push(thirtyDaysAgo, limit)
+
     const rows = this.db
       .prepare(
         `SELECT * FROM memories
-         WHERE COALESCE(namespace, project_path) = ?${supersededFilter}
-         ORDER BY
-           (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
-           created_at DESC
-         LIMIT ?`
+         WHERE COALESCE(namespace, project_path) = ?${supersededFilter}${beforeFilter}
+          ORDER BY
+            CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
+            (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
+            created_at DESC
+          LIMIT ?`
       )
-      .all(project_path, thirtyDaysAgo, limit) as MemoryRow[]
+      .all(...params) as MemoryRow[]
 
     return rows.map(rowToMemory)
+  }
+
+  getClusters(projectPath: string): MemoryCluster[] {
+    const rows = this.stmtGetClusters.all(projectPath) as ClusterRow[]
+
+    return rows.map((r) => {
+      let memberIds: string[] = []
+      try {
+        const parsed = JSON.parse(r.member_ids)
+        if (Array.isArray(parsed)) {
+          memberIds = parsed.filter((v): v is string => typeof v === 'string')
+        }
+      } catch {
+      }
+      return {
+        id: r.id,
+        project_path: r.project_path,
+        member_ids: memberIds,
+        summary: r.summary,
+        is_extractive: r.is_extractive === 1,
+        created_at: r.created_at,
+        updated_at: r.updated_at,
+      }
+    })
   }
 
   /**
@@ -444,6 +472,140 @@ export class MemorySearch {
     }))
   }
 
+  pprSearch(
+    seedIds: string[],
+    limit: number = 20,
+    options: { include_superseded?: boolean } = {}
+  ): Array<Memory & { similarity: number; link_type: string; hops: number }> {
+    const uniqueSeeds = [...new Set(seedIds.filter((s) => s.length > 0))]
+    if (uniqueSeeds.length === 0) return []
+
+    const seedValues = uniqueSeeds.map(() => '(?)').join(',')
+    const reachableRows = this.db
+      .prepare(
+        `WITH RECURSIVE
+           seeds(id) AS (VALUES ${seedValues}),
+           traverse(source_id, target_id, hops, path) AS (
+             SELECT ml.source_id, ml.target_id, 1,
+                    ',' || ml.source_id || ',' || ml.target_id || ','
+             FROM memory_links ml
+             JOIN seeds s ON s.id = ml.source_id
+             UNION ALL
+             SELECT t.target_id, ml.target_id, t.hops + 1,
+                    t.path || ml.target_id || ','
+             FROM traverse t
+             JOIN memory_links ml ON ml.source_id = t.target_id
+             WHERE t.hops < 3 AND instr(t.path, ',' || ml.target_id || ',') = 0
+           )
+         SELECT DISTINCT id FROM (
+           SELECT id FROM seeds
+           UNION
+           SELECT source_id AS id FROM traverse
+           UNION
+           SELECT target_id AS id FROM traverse
+         )`
+      )
+      .all(...uniqueSeeds) as Array<{ id: string }>
+
+    const reachableIds = [...new Set(reachableRows.map((r) => r.id))]
+    if (reachableIds.length < 3) {
+      const fallback = new Map<string, Memory & { similarity: number; link_type: string; hops: number }>()
+      for (const seed of uniqueSeeds) {
+        const walked = this.traverseGraph(seed, 3, limit, options)
+        for (const row of walked) {
+          const prev = fallback.get(row.id)
+          if (!prev || row.similarity > prev.similarity) fallback.set(row.id, row)
+        }
+      }
+      return [...fallback.values()]
+        .sort((a, b) => b.similarity - a.similarity)
+        .slice(0, limit)
+    }
+
+    const nodePlaceholders = reachableIds.map(() => '?').join(',')
+    const edgeRows = this.db
+      .prepare(
+        `SELECT source_id, target_id
+         FROM memory_links
+         WHERE source_id IN (${nodePlaceholders})
+           AND target_id IN (${nodePlaceholders})`
+      )
+      .all(...reachableIds, ...reachableIds) as Array<{ source_id: string; target_id: string }>
+
+    const adjacency = new Map<string, { targets: string[]; outDeg: number }>()
+    const reverse = new Map<string, string[]>()
+    for (const id of reachableIds) {
+      adjacency.set(id, { targets: [], outDeg: 0 })
+      reverse.set(id, [])
+    }
+    for (const { source_id, target_id } of edgeRows) {
+      const outgoing = adjacency.get(source_id)
+      if (outgoing) {
+        outgoing.targets.push(target_id)
+        outgoing.outDeg = outgoing.targets.length
+      }
+      const incoming = reverse.get(target_id)
+      if (incoming) incoming.push(source_id)
+    }
+
+    const damping = 0.85
+    const iterations = 20
+    const seedWeight = 1 / uniqueSeeds.length
+    const p = new Map<string, number>()
+    let score = new Map<string, number>()
+    for (const id of reachableIds) {
+      const v = uniqueSeeds.includes(id) ? seedWeight : 0
+      p.set(id, v)
+      score.set(id, v)
+    }
+
+    for (let i = 0; i < iterations; i++) {
+      const next = new Map<string, number>()
+      for (const id of reachableIds) {
+        const incoming = reverse.get(id) ?? []
+        let sum = 0
+        for (const u of incoming) {
+          const outDeg = adjacency.get(u)?.outDeg ?? 0
+          if (outDeg > 0) sum += (score.get(u) ?? 0) / outDeg
+        }
+        const personal = p.get(id) ?? 0
+        next.set(id, (1 - damping) * personal + damping * sum)
+      }
+      score = next
+    }
+
+    let candidates = reachableIds.filter((id) => !uniqueSeeds.includes(id))
+    if (!options.include_superseded && candidates.length > 0) {
+      const placeholders = candidates.map(() => '?').join(',')
+      const validRows = this.db
+        .prepare(`SELECT id FROM memories WHERE id IN (${placeholders}) AND ${notSupersededClause('id')}`)
+        .all(...candidates) as Array<{ id: string }>
+      const valid = new Set(validRows.map((r) => r.id))
+      candidates = candidates.filter((id) => valid.has(id))
+    }
+
+    const rankedIds = candidates
+      .sort((a, b) => (score.get(b) ?? 0) - (score.get(a) ?? 0))
+      .slice(0, limit)
+    if (rankedIds.length === 0) return []
+
+    const placeholders = rankedIds.map(() => '?').join(',')
+    const rows = this.db
+      .prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
+      .all(...rankedIds) as MemoryRow[]
+    const byId = new Map(rows.map((r) => [r.id, r]))
+
+    return rankedIds
+      .map((id) => byId.get(id))
+      .filter((r): r is MemoryRow => r != null)
+      .map((row) => ({
+        ...rowToMemory(row),
+        similarity: score.get(row.id) ?? 0,
+        link_type: 'semantic',
+        hops: 1,
+      }))
+  }
+
   /**
    * Find near-duplicate memories using vector similarity.
    * Returns candidate groups for consolidation.
@@ -460,8 +622,6 @@ export class MemorySearch {
     if (!this.vectorsAvailable) return []
 
     const threshold = options.threshold ?? 0.95 // cosine_sim > 0.95
-    // Convert cosine threshold to L2 distance: d = sqrt(2*(1 - cos_sim))
-    const distThreshold = Math.sqrt(2 * (1 - threshold))
     const limit = options.limit ?? 50
 
     const conditions: string[] = []

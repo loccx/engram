@@ -1,4 +1,4 @@
-export const MEMORY_TYPES = ['note', 'decision', 'bug', 'pattern', 'gotcha', 'todo'] as const
+export const MEMORY_TYPES = ['note', 'decision', 'bug', 'pattern', 'gotcha', 'todo', 'procedure'] as const
 
 const memoryTypeEnum = {
   type: 'string' as const,
@@ -50,6 +50,15 @@ export const tools = [
           description:
             'Wait synchronously (up to 2s) for contradiction adjudication to complete before returning. Default false: adjudication runs in background.',
         },
+        procedure_meta: {
+          type: 'object',
+          description: 'Structured procedure metadata (only for type=procedure)',
+          properties: {
+            preconditions: { type: 'array', items: { type: 'string' } },
+            steps: { type: 'array', items: { type: 'string' } },
+            postconditions: { type: 'array', items: { type: 'string' } },
+          },
+        },
       },
       required: ['content'],
     },
@@ -73,6 +82,10 @@ export const tools = [
         type: { ...memoryTypeEnum },
         project_path: projectPathField,
         namespace: namespaceField,
+        before: {
+          type: 'number',
+          description: 'Unix timestamp (ms). Restrict results to facts valid at/before this time.',
+        },
         include_superseded: includeSupersededField,
         use_reranker: {
           type: 'boolean',
@@ -104,11 +117,41 @@ export const tools = [
         project_path: projectPathField,
         namespace: namespaceField,
         limit: { type: 'number', description: 'Max memories to return (default: 20)' },
+        before: {
+          type: 'number',
+          description: 'Unix timestamp (ms). Restrict context to facts valid at/before this time.',
+        },
         include_superseded: includeSupersededField,
       },
     },
     annotations: {
       title: 'Get session context',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'search_by_entity',
+    description:
+      'Find all memories mentioning a specific code entity (file path, function name, class, library, etc). More precise than semantic search for exact symbol lookups.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        entity: {
+          type: 'string',
+          description: 'Entity to search for (e.g. "auth.ts", "getUserById", "express")',
+        },
+        limit: { type: 'number', description: 'Max results (default: 10)' },
+        project_path: projectPathField,
+        namespace: namespaceField,
+        include_superseded: includeSupersededField,
+      },
+      required: ['entity'],
+    },
+    annotations: {
+      title: 'Search by entity',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -279,6 +322,28 @@ export const tools = [
     annotations: {
       title: 'Unpin memory',
       readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'get_stats',
+    description:
+      'Usage statistics: search hit rate, tokens served, estimated context savings in USD. Supports namespace and time-range filters. Use for cross-instance aggregation via install_id.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        namespace: namespaceField,
+        since: {
+          type: 'number',
+          description: 'Unix timestamp (ms) to filter events from. Omit for all-time stats.',
+        },
+      },
+    },
+    annotations: {
+      title: 'Get usage stats',
+      readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: false,

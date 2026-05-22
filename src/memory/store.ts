@@ -4,70 +4,50 @@ import type {
   Memory,
   StoreMemoryInput,
   ListMemoriesFilter,
-  MemoryType,
   LinkType,
   ImportanceSource,
+  ExtractedEntity,
 } from './types.js'
+import { rowToMemory, type MemoryRow } from './row.js'
 import { getEmbedding, LINK_DISTANCE_THRESHOLD } from '../embeddings/pipeline.js'
 import type { AdjudicationQueue } from '../contradictions/queue.js'
 import { withTimeout } from '../contradictions/queue.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
 import type { BackgroundJobQueue } from '../queue/background-queue.js'
+import { extractEntities } from './entities.js'
 
 const ADJUDICATE_SYNC_TIMEOUT_MS = 2000
 
-interface MemoryRow {
-  id: string
-  session_id: string
-  project_path: string
-  content: string
-  type: string
-  importance: number
-  tags: string
-  created_at: number
-  last_accessed: number | null
-  access_count: number
-  vec_rowid: number | null
-  importance_source?: string | null
-  importance_model?: string | null
-  importance_prompt_version?: string | null
-  importance_scored_at?: number | null
-}
-
-function rowToMemory(row: MemoryRow): Memory {
-  const memory: Memory = {
-    id: row.id,
-    session_id: row.session_id,
-    project_path: row.project_path,
-    content: row.content,
-    type: row.type as MemoryType,
-    importance: row.importance,
-    tags: JSON.parse(row.tags) as string[],
-    created_at: row.created_at,
-    last_accessed: row.last_accessed,
-    access_count: row.access_count,
-    vec_rowid: row.vec_rowid,
-  }
-  if (row.importance_source != null) {
-    memory.importance_source = row.importance_source as ImportanceSource
-  }
-  if (row.importance_model !== undefined) memory.importance_model = row.importance_model
-  if (row.importance_prompt_version !== undefined) {
-    memory.importance_prompt_version = row.importance_prompt_version
-  }
-  if (row.importance_scored_at !== undefined) {
-    memory.importance_scored_at = row.importance_scored_at
-  }
-  return memory
-}
-
 export class MemoryStore {
+  private readonly stmtInsertMemory: Database.Statement
+  private readonly stmtInsertEntity: Database.Statement
+  private readonly stmtGetById: Database.Statement
+  private readonly stmtRecordAccess: Database.Statement
+  private readonly stmtSetPinned: Database.Statement
+  private readonly stmtSetValidUntil: Database.Statement
+
   constructor(
     private readonly db: Database.Database,
     private readonly vectorsAvailable: boolean = false,
     private readonly adjudicationQueue: AdjudicationQueue | null = null,
     private readonly importanceQueue: BackgroundJobQueue<string> | null = null
-  ) {}
+  ) {
+    this.stmtInsertMemory = this.db.prepare(
+      `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, valid_from, procedure_meta, importance_source)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    )
+    this.stmtInsertEntity = this.db.prepare(
+      'INSERT OR IGNORE INTO memory_entities (memory_id, entity_text, entity_type, created_at) VALUES (?, ?, ?, ?)'
+    )
+    this.stmtGetById = this.db.prepare('SELECT * FROM memories WHERE id = ?')
+    this.stmtRecordAccess = this.db.prepare(
+      'UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?'
+    )
+    this.stmtSetPinned = this.db.prepare('UPDATE memories SET pinned = ? WHERE id = ?')
+    this.stmtSetValidUntil = this.db.prepare(
+      'UPDATE memories SET valid_until = COALESCE(valid_until, ?) WHERE id = ?'
+    )
+  }
 
   async store(input: StoreMemoryInput): Promise<Memory> {
     const id = randomUUID()
@@ -75,25 +55,31 @@ export class MemoryStore {
     const tags = JSON.stringify(input.tags ?? [])
     const type = input.type ?? 'note'
     const importance = input.importance ?? 0.5
+    const procedureMeta = input.procedure_meta ? JSON.stringify(input.procedure_meta) : null
     const importanceSource: ImportanceSource = input.importanceProvided ? 'user' : 'default'
 
-    this.db
-      .prepare(
-        `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, importance_source)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        id,
-        input.session_id,
-        input.project_path,
-        input.project_path,
-        input.content,
-        type,
-        importance,
-        tags,
-        now,
-        importanceSource
-      )
+    this.stmtInsertMemory.run(
+      id,
+      input.session_id,
+      input.project_path,
+      input.project_path,
+      input.content,
+      type,
+      importance,
+      tags,
+      now,
+      now,
+      procedureMeta,
+      importanceSource
+    )
+
+    try {
+      const entities = extractEntities(input.content)
+      for (const e of entities) {
+        this.stmtInsertEntity.run(id, e.entity_text, e.entity_type, now)
+      }
+    } catch {
+    }
 
     // Compute embedding and link to related memories (non-blocking on failure)
     if (this.vectorsAvailable) {
@@ -109,7 +95,7 @@ export class MemoryStore {
           this.db.prepare('UPDATE memories SET vec_rowid = ? WHERE id = ?').run(vecRowid, id)
 
           // Auto-link to semantically similar memories (Zettelkasten)
-          await this._autoLink(id, vecRowid, embedding)
+          await this._autoLink(id, embedding)
         }
       } catch {
         // Embeddings are best-effort; FTS5 search still works
@@ -134,7 +120,7 @@ export class MemoryStore {
    * Find existing memories similar to the new one and create bidirectional links.
    * Implements the Zettelkasten note-linking pattern from A-MEM (arxiv 2502.12110).
    */
-  private async _autoLink(newId: string, newVecRowid: number, embedding: Float32Array): Promise<void> {
+  private async _autoLink(newId: string, embedding: Float32Array): Promise<void> {
     const queryVec = JSON.stringify(Array.from(embedding))
     try {
       const vecResults = this.db
@@ -169,9 +155,7 @@ export class MemoryStore {
   }
 
   getById(id: string): Memory | null {
-    const row = this.db
-      .prepare('SELECT * FROM memories WHERE id = ?')
-      .get(id) as MemoryRow | undefined
+    const row = this.stmtGetById.get(id) as MemoryRow | undefined
     return row ? rowToMemory(row) : null
   }
 
@@ -225,16 +209,53 @@ export class MemoryStore {
   }
 
   recordAccess(id: string): void {
-    this.db
-      .prepare('UPDATE memories SET last_accessed = ?, access_count = access_count + 1 WHERE id = ?')
-      .run(Date.now(), id)
+    this.stmtRecordAccess.run(Date.now(), id)
   }
 
   setPinned(id: string, pinned: boolean): boolean {
-    const result = this.db
-      .prepare('UPDATE memories SET pinned = ? WHERE id = ?')
-      .run(pinned ? 1 : 0, id)
+    const result = this.stmtSetPinned.run(pinned ? 1 : 0, id)
     return result.changes > 0
+  }
+
+  setValidUntil(id: string, timestamp: number): void {
+    this.stmtSetValidUntil.run(timestamp, id)
+  }
+
+  getEntities(memoryId: string): ExtractedEntity[] {
+    return this.db
+      .prepare(
+        'SELECT entity_text, entity_type FROM memory_entities WHERE memory_id = ? ORDER BY id ASC LIMIT 30'
+      )
+      .all(memoryId) as ExtractedEntity[]
+  }
+
+  searchByEntity(
+    entityText: string,
+    projectPath?: string,
+    limit: number = 10,
+    options: { include_superseded?: boolean } = {}
+  ): Memory[] {
+    const conditions = ['me.entity_text = ? COLLATE NOCASE']
+    if (!options.include_superseded) {
+      conditions.push(notSupersededClause('m.id'))
+    }
+    const values: unknown[] = [entityText]
+    if (projectPath) {
+      conditions.push('COALESCE(m.namespace, m.project_path) = ?')
+      values.push(projectPath)
+    }
+    values.push(limit)
+    const rows = this.db
+      .prepare(
+        `SELECT DISTINCT m.*
+         FROM memory_entities me
+         JOIN memories m ON m.id = me.memory_id
+         WHERE ${conditions.join(' AND ')}
+         ORDER BY m.created_at DESC
+         LIMIT ?`
+      )
+      .all(...values) as MemoryRow[]
+    return rows.map(rowToMemory)
   }
 
   /**

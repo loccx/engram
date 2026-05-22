@@ -134,6 +134,55 @@ program
   })
 
 program
+  .command('stats')
+  .description('Show usage statistics and estimated context savings')
+  .option('-p, --port <port>', 'Port', '8888')
+  .option('-n, --namespace <namespace>', 'Filter by namespace')
+  .option('--json', 'Output raw JSON')
+  .action(async (opts: { port: string; namespace?: string; json?: boolean }) => {
+    try {
+      const params: Record<string, unknown> = {}
+      if (opts.namespace) params.namespace = opts.namespace
+
+      const res = await fetch(`http://localhost:${opts.port}/metrics${opts.namespace ? `?namespace=${encodeURIComponent(opts.namespace)}` : ''}`)
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const stats = await res.json() as Record<string, unknown>
+
+      if (opts.json) {
+        console.log(JSON.stringify(stats, null, 2))
+        return
+      }
+
+      const searches = stats.searches as { total: number; hits: number; hit_rate: number }
+      const savings = stats.estimated_context_savings as { tokens: number; tokens_realistic: number; estimated_usd_saved: number }
+
+      console.log(`Install ID:       ${stats.install_id}`)
+      console.log(`Memories stored:  ${stats.memories_stored}`)
+      console.log(`Searches:         ${searches.total} (${searches.hits} hits, ${Math.round(searches.hit_rate * 100)}% hit rate)`)
+      console.log(`Context loads:    ${stats.context_loads}`)
+      console.log(`Tokens served:    ${(stats.tokens_served as number).toLocaleString()}`)
+      console.log(`Results served:   ${stats.results_served}`)
+      console.log()
+      console.log(`Estimated savings:`)
+      console.log(`  Tokens saved:   ~${savings.tokens_realistic.toLocaleString()} (3x multiplier for raw file reads)`)
+      console.log(`  USD saved:      ~$${savings.estimated_usd_saved.toFixed(2)} (at Claude Sonnet input pricing)`)
+
+      const perNs = stats.per_namespace as Array<{ namespace: string; tokens_served: number; searches: number; search_hit_rate: number }>
+      if (perNs && perNs.length > 0) {
+        console.log()
+        console.log(`Per namespace:`)
+        for (const ns of perNs) {
+          console.log(`  ${ns.namespace}: ${ns.tokens_served.toLocaleString()} tokens, ${ns.searches} searches (${Math.round(ns.search_hit_rate * 100)}% hit rate)`)
+        }
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      console.error('Failed to connect to Engram daemon:', msg)
+      process.exit(1)
+    }
+  })
+
+program
   .command('warm')
   .description('Pre-download and cache the embedding model (~23MB, one-time)')
   .action(async () => {

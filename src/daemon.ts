@@ -7,7 +7,8 @@ import { backfillNamespaces } from './db/workers/backfill.js'
 import { reembedStaleMemories } from './db/workers/reembed.js'
 import { MODEL_ID } from './embeddings/pipeline.js'
 import { drainAdjudicationQueue } from './contradictions/runtime.js'
-import { drainImportanceQueue } from './importance/runtime.js'
+import { drainImportanceQueue, getImportanceQueue, isImportanceScoringEnabled } from './importance/runtime.js'
+import { runClusterWorker } from './memory/cluster-worker.js'
 
 async function runStartupWorkers(): Promise<void> {
   const dbm = getDatabase()
@@ -17,6 +18,32 @@ async function runStartupWorkers(): Promise<void> {
     await backfillNamespaces(dbm.db, { log })
   } catch (err) {
     logger.warn({ err }, 'namespace backfill failed (will retry on next startup)')
+  }
+
+  if (isImportanceScoringEnabled()) {
+    try {
+      const unscored = dbm.db
+        .prepare("SELECT id FROM memories WHERE importance_source = 'default' LIMIT 100")
+        .all() as Array<{ id: string }>
+      const queue = getImportanceQueue(dbm.db)
+      if (queue && unscored.length > 0) {
+        for (const { id } of unscored) queue.enqueue(id)
+        logger.info({ count: unscored.length }, 'importance: re-enqueued unscored memories')
+      }
+    } catch (err) {
+      logger.warn({ err }, 'importance replay failed')
+    }
+  }
+
+  try {
+    const projects = dbm.db
+      .prepare('SELECT DISTINCT COALESCE(namespace, project_path) as p FROM memories')
+      .all() as Array<{ p: string }>
+    for (const { p } of projects) {
+      await runClusterWorker(dbm.db, p, process.env.ENGRAM_LLM_BASE_URL)
+    }
+  } catch (err) {
+    logger.warn({ err }, 'cluster worker failed (will retry on next startup)')
   }
 
   if (dbm.vectorsAvailable) {

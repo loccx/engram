@@ -73,6 +73,26 @@ CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC);
 CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type);
 CREATE INDEX IF NOT EXISTS idx_sessions_project_path ON sessions(project_path);
 CREATE INDEX IF NOT EXISTS idx_memories_vec_rowid ON memories(vec_rowid);
+
+-- Metrics: anonymous install identity for cross-instance aggregation
+CREATE TABLE IF NOT EXISTS engram_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+-- Metrics: per-event tracking for context savings measurement
+CREATE TABLE IF NOT EXISTS engram_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  event_type TEXT NOT NULL,
+  hit INTEGER NOT NULL DEFAULT 0,
+  tokens_served INTEGER NOT NULL DEFAULT 0,
+  result_count INTEGER NOT NULL DEFAULT 0,
+  namespace TEXT,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_engram_events_type ON engram_events(event_type);
+CREATE INDEX IF NOT EXISTS idx_engram_events_created ON engram_events(created_at);
 `
 
 export class DatabaseManager {

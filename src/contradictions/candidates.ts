@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
-import type { Memory, MemoryType } from '../memory/types.js'
+import type { Memory } from '../memory/types.js'
+import { rowToMemory, type MemoryRow } from '../memory/row.js'
 
 export interface CandidateFinderOptions {
   vecTopK?: number
@@ -15,42 +16,11 @@ export interface Candidate {
   ftsRank?: number
 }
 
-interface MemoryRow {
-  id: string
-  session_id: string
-  project_path: string
-  namespace: string | null
-  content: string
-  type: string
-  importance: number
-  tags: string
-  created_at: number
-  last_accessed: number | null
-  access_count: number
-  vec_rowid: number | null
-}
-
 const DEFAULTS = {
   vecTopK: 20,
   ftsTopK: 20,
   minCosineSim: 0.75,
   maxCandidates: 10,
-}
-
-function rowToMemory(row: MemoryRow): Memory {
-  return {
-    id: row.id,
-    session_id: row.session_id,
-    project_path: row.project_path,
-    content: row.content,
-    type: row.type as MemoryType,
-    importance: row.importance,
-    tags: JSON.parse(row.tags) as string[],
-    created_at: row.created_at,
-    last_accessed: row.last_accessed,
-    access_count: row.access_count,
-    vec_rowid: row.vec_rowid,
-  }
 }
 
 export function findContradictionCandidates(

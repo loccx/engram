@@ -3,6 +3,7 @@ import { cors } from 'hono/cors'
 import { handleTool, type RequestContext } from './mcp/handlers.js'
 import { tools } from './mcp/tools.js'
 import { getDatabase } from './db/init.js'
+import { getMetricsTracker } from './metrics/tracker.js'
 import { logger } from './utils/logger.js'
 
 const startTime = Date.now()
@@ -30,6 +31,20 @@ export function createServer(): Hono {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       return c.json({ status: 'error', error: message }, 500)
+    }
+  })
+
+  app.get('/metrics', (c) => {
+    try {
+      const dbm = getDatabase()
+      const tracker = getMetricsTracker(dbm.db)
+      const namespace = c.req.query('namespace') || undefined
+      const sinceStr = c.req.query('since')
+      const since = sinceStr ? parseInt(sinceStr, 10) : undefined
+      return c.json(tracker.getStats({ namespace, since }))
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      return c.json({ error: message }, 500)
     }
   })
 

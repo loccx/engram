@@ -104,6 +104,9 @@ function writeSupersedes(
        (source_id, target_id, similarity, link_type, created_at, confidence, reason, decider_model, prompt_version, judged_at)
      VALUES (?, ?, ?, 'supersedes', ?, ?, ?, ?, ?, ?)`
   )
+  const setValidUntilStmt = db.prepare(
+    'UPDATE memories SET valid_until = COALESCE(valid_until, ?) WHERE id = ?'
+  )
   const now = Date.now()
   let written = 0
   const tx = db.transaction((rows: Array<{ candidateId: string; verdict: Verdict }>) => {
@@ -124,6 +127,7 @@ function writeSupersedes(
         now
       )
       if (info.changes > 0) written++
+      if (info.changes > 0) setValidUntilStmt.run(now, candidateId)
     }
   })
   const supersedingVerdicts = verdicts
