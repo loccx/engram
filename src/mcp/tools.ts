@@ -211,26 +211,6 @@ export const tools = [
     },
   },
   {
-    name: 'start_session',
-    description:
-      'Begin a new memory session. Namespace resolved from explicit args, URL params, or git root.',
-    inputSchema: {
-      type: 'object',
-      properties: {
-        project_path: projectPathField,
-        namespace: namespaceField,
-        tool_name: { type: 'string', description: 'Calling tool name (e.g. "claude-code")' },
-      },
-    },
-    annotations: {
-      title: 'Start session',
-      readOnlyHint: false,
-      destructiveHint: false,
-      idempotentHint: false,
-      openWorldHint: false,
-    },
-  },
-  {
     name: 'end_session',
     description: 'Close the current session with an optional summary.',
     inputSchema: {
@@ -290,18 +270,44 @@ export const tools = [
     },
   },
   {
-    name: 'pin_memory',
+    name: 'get_memory',
     description:
-      'Pin a memory so it always surfaces in get_context, never decays via Ebbinghaus, and is protected from contradiction adjudication. Pinned memories are tier=pinned.',
+      'Fetch a single memory by ID with its full enriched payload (entities, links, importance signals).',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'Memory ID to pin' },
+        id: { type: 'string', description: 'Memory ID' },
       },
       required: ['id'],
     },
     annotations: {
-      title: 'Pin memory',
+      title: 'Get memory',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'update_memory',
+    description:
+      'Patch a memory in place. Supported fields: type, importance, tags, valid_until. Setting importance flips importance_source to "user" and prevents LLM rescoring.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Memory ID to patch' },
+        type: { ...memoryTypeEnum },
+        importance: { type: 'number', minimum: 0, maximum: 1, description: 'New importance 0.0–1.0' },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Replacement tag list' },
+        valid_until: {
+          type: ['number', 'null'],
+          description: 'Unix timestamp (ms) when this fact stops being valid. Pass null to clear.',
+        },
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Update memory',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
@@ -309,18 +315,19 @@ export const tools = [
     },
   },
   {
-    name: 'unpin_memory',
+    name: 'set_pin',
     description:
-      'Unpin a memory. It returns to normal Ebbinghaus decay and contradiction adjudication, and its tier is recomputed from importance/access/recency.',
+      'Pin or unpin a memory. Pinned memories always surface in get_context, never decay via Ebbinghaus, and are protected from contradiction adjudication.',
     inputSchema: {
       type: 'object',
       properties: {
-        id: { type: 'string', description: 'Memory ID to unpin' },
+        id: { type: 'string', description: 'Memory ID' },
+        pinned: { type: 'boolean', description: 'true = pin, false = unpin' },
       },
-      required: ['id'],
+      required: ['id', 'pinned'],
     },
     annotations: {
-      title: 'Unpin memory',
+      title: 'Set pin state',
       readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,

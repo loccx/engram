@@ -8,7 +8,7 @@ import { getAdjudicationQueue } from '../contradictions/runtime.js'
 import { getImportanceQueue } from '../importance/runtime.js'
 import { enrichMemories, enrichSearchResults, type RecallSignal } from '../memory/enrichment.js'
 import { getMetricsTracker, type MetricsTracker } from '../metrics/tracker.js'
-import type { MemoryType, StoreMemoryInput } from '../memory/types.js'
+import type { MemoryType, StoreMemoryInput, UpdateMemoryPatch } from '../memory/types.js'
 import { SCHEMAS } from './schemas.js'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> }
@@ -223,15 +223,6 @@ export async function handleTool(
         })
       }
 
-      case 'start_session': {
-        const project_path = await resolveProjectPath(args, ctx)
-        const session = await sessions.start({
-          project_path,
-          tool_name: args.tool_name as string | undefined,
-        })
-        return ok(session)
-      }
-
       case 'end_session': {
         const session_id = args.session_id as string
         const session = sessions.end(session_id, args.summary as string | undefined)
@@ -257,21 +248,41 @@ export async function handleTool(
         return ok({ success: deleted, id })
       }
 
-      case 'pin_memory': {
+      case 'get_memory': {
         const id = args.id as string
         const memory = store.getById(id)
         if (!memory) return err(`Memory ${id} not found`)
-        const updated = store.setPinned(id, true)
+        const [enriched] = enrichMemories(db, [memory])
+        return ok(enriched)
+      }
+
+      case 'update_memory': {
+        const id = args.id as string
+        const existing = store.getById(id)
+        if (!existing) return err(`Memory ${id} not found`)
+        const patch: UpdateMemoryPatch = {
+          type: args.type as MemoryType | undefined,
+          importance: typeof args.importance === 'number' ? args.importance : undefined,
+          tags: Array.isArray(args.tags) ? (args.tags as string[]) : undefined,
+          valid_until:
+            args.valid_until === null
+              ? null
+              : typeof args.valid_until === 'number'
+                ? args.valid_until
+                : undefined,
+        }
+        const updated = store.update(id, patch)
         const refreshed = store.getById(id)!
         const [enriched] = enrichMemories(db, [refreshed])
         return ok({ success: updated, memory: enriched })
       }
 
-      case 'unpin_memory': {
+      case 'set_pin': {
         const id = args.id as string
+        const pinned = args.pinned === true
         const memory = store.getById(id)
         if (!memory) return err(`Memory ${id} not found`)
-        const updated = store.setPinned(id, false)
+        const updated = store.setPinned(id, pinned)
         const refreshed = store.getById(id)!
         const [enriched] = enrichMemories(db, [refreshed])
         return ok({ success: updated, memory: enriched })

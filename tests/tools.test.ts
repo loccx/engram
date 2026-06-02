@@ -54,7 +54,6 @@ describe('mcp tool annotations', () => {
       'search_memories',
       'get_context',
       'consolidate_memories',
-      'start_session',
       'list_memories',
     ]
     for (const name of namespaced) {

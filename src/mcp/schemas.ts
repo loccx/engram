@@ -61,12 +61,6 @@ export const ConsolidateSchema = z.object({
   namespace: z.string().optional(),
 })
 
-export const StartSessionSchema = z.object({
-  project_path: z.string().optional(),
-  namespace: z.string().optional(),
-  tool_name: z.string().optional(),
-})
-
 export const EndSessionSchema = z.object({
   session_id: z.string().min(1),
   summary: z.string().optional(),
@@ -85,12 +79,21 @@ export const ForgetMemorySchema = z.object({
   id: z.string().min(1),
 })
 
-export const PinMemorySchema = z.object({
+export const GetMemorySchema = z.object({
   id: z.string().min(1),
 })
 
-export const UnpinMemorySchema = z.object({
+export const UpdateMemorySchema = z.object({
   id: z.string().min(1),
+  type: MemoryType.optional(),
+  importance: z.number().min(0).max(1).optional(),
+  tags: z.array(z.string()).optional(),
+  valid_until: z.number().int().nullable().optional(),
+})
+
+export const SetPinSchema = z.object({
+  id: z.string().min(1),
+  pinned: z.boolean(),
 })
 
 export const GetStatsSchema = z.object({
@@ -105,11 +108,11 @@ export const SCHEMAS: Record<string, z.ZodType> = {
   get_related: GetRelatedSchema,
   search_by_entity: SearchByEntitySchema,
   consolidate_memories: ConsolidateSchema,
-  start_session: StartSessionSchema,
   end_session: EndSessionSchema,
   list_memories: ListMemoriesSchema,
   forget_memory: ForgetMemorySchema,
-  pin_memory: PinMemorySchema,
-  unpin_memory: UnpinMemorySchema,
+  get_memory: GetMemorySchema,
+  update_memory: UpdateMemorySchema,
+  set_pin: SetPinSchema,
   get_stats: GetStatsSchema,
 }
