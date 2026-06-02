@@ -61,6 +61,13 @@ export interface StoreMemoryInput {
   procedure_meta?: ProcedureMeta
 }
 
+export interface UpdateMemoryPatch {
+  type?: MemoryType
+  importance?: number
+  tags?: string[]
+  valid_until?: number | null
+}
+
 export interface ListMemoriesFilter {
   project_path?: string
   tags?: string[]

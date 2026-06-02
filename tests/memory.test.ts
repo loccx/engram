@@ -140,4 +140,94 @@ describe('MemoryStore', () => {
     const mem = await store.store({ content: 'Isolated', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
     expect(store.getLinked(mem.id)).toEqual([])
   })
+
+  describe('delete cascade', () => {
+    it('cascades to memory_links via FK', async () => {
+      const a = await store.store({ content: 'A', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      const b = await store.store({ content: 'B', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      db.prepare(
+        `INSERT INTO memory_links (source_id, target_id, similarity, link_type, created_at)
+         VALUES (?, ?, ?, ?, ?), (?, ?, ?, ?, ?)`
+      ).run(a.id, b.id, 0.9, 'semantic', Date.now(), b.id, a.id, 0.9, 'semantic', Date.now())
+
+      expect(store.delete(a.id)).toBe(true)
+
+      const remaining = db.prepare('SELECT COUNT(*) as n FROM memory_links').get() as { n: number }
+      expect(remaining.n).toBe(0)
+    })
+
+    it('cascades to memory_entities via FK', async () => {
+      const mem = await store.store({
+        content: 'Refactored src/auth/login.ts to call getUserById(id) and validateToken(t)',
+        session_id: TEST_SESSION_ID,
+        project_path: TEST_PROJECT,
+      })
+      const before = db
+        .prepare('SELECT COUNT(*) as n FROM memory_entities WHERE memory_id = ?')
+        .get(mem.id) as { n: number }
+      expect(before.n).toBeGreaterThan(0)
+
+      store.delete(mem.id)
+
+      const after = db
+        .prepare('SELECT COUNT(*) as n FROM memory_entities WHERE memory_id = ?')
+        .get(mem.id) as { n: number }
+      expect(after.n).toBe(0)
+    })
+
+    it('removes FTS row via AFTER DELETE trigger', async () => {
+      const mem = await store.store({
+        content: 'uniqueftsmarkerzzz',
+        session_id: TEST_SESSION_ID,
+        project_path: TEST_PROJECT,
+      })
+      const before = db
+        .prepare('SELECT COUNT(*) as n FROM memories_fts WHERE memories_fts MATCH ?')
+        .get('uniqueftsmarkerzzz') as { n: number }
+      expect(before.n).toBe(1)
+
+      store.delete(mem.id)
+
+      const after = db
+        .prepare('SELECT COUNT(*) as n FROM memories_fts WHERE memories_fts MATCH ?')
+        .get('uniqueftsmarkerzzz') as { n: number }
+      expect(after.n).toBe(0)
+    })
+
+    it('prunes deleted id from memory_clusters.member_ids', async () => {
+      const a = await store.store({ content: 'A', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      const b = await store.store({ content: 'B', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      const c = await store.store({ content: 'C', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      const now = Date.now()
+      db.prepare(
+        `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
+         VALUES (?, ?, ?, 1, ?, ?)`
+      ).run(TEST_PROJECT, JSON.stringify([a.id, b.id, c.id]), 'three-member cluster', now, now)
+
+      store.delete(b.id)
+
+      const row = db
+        .prepare('SELECT member_ids FROM memory_clusters WHERE project_path = ?')
+        .get(TEST_PROJECT) as { member_ids: string }
+      const members = JSON.parse(row.member_ids) as string[]
+      expect(members).toEqual([a.id, c.id])
+    })
+
+    it('drops cluster entirely when pruning leaves <2 members', async () => {
+      const a = await store.store({ content: 'A', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      const b = await store.store({ content: 'B', session_id: TEST_SESSION_ID, project_path: TEST_PROJECT })
+      const now = Date.now()
+      db.prepare(
+        `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
+         VALUES (?, ?, ?, 1, ?, ?)`
+      ).run(TEST_PROJECT, JSON.stringify([a.id, b.id]), 'two-member cluster', now, now)
+
+      store.delete(a.id)
+
+      const count = db
+        .prepare('SELECT COUNT(*) as n FROM memory_clusters WHERE project_path = ?')
+        .get(TEST_PROJECT) as { n: number }
+      expect(count.n).toBe(0)
+    })
+  })
 })

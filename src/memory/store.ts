@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3'
 import type {
   Memory,
   StoreMemoryInput,
+  UpdateMemoryPatch,
   ListMemoriesFilter,
   LinkType,
   ImportanceSource,
@@ -87,10 +88,12 @@ export class MemoryStore {
         const embedding = await getEmbedding(input.content)
         if (embedding) {
           // Insert into vec0 — capture rowid directly from run() to avoid
-          // interference from FTS5 triggers that also issue INSERTs
+          // interference from FTS5 triggers that also issue INSERTs.
+          // Binary blob format (Buffer over Float32Array buffer) matches
+          // db/workers/reembed.ts and is ~3-4x more compact than JSON.
           const vecInfo = this.db
             .prepare('INSERT INTO memory_vectors(embedding) VALUES (?)')
-            .run(JSON.stringify(Array.from(embedding)))
+            .run(Buffer.from(embedding.buffer))
           const vecRowid = Number(vecInfo.lastInsertRowid)
           this.db.prepare('UPDATE memories SET vec_rowid = ? WHERE id = ?').run(vecRowid, id)
 
@@ -103,6 +106,7 @@ export class MemoryStore {
     }
 
     if (this.adjudicationQueue) {
+      this.db.prepare("UPDATE memories SET adjudication_state = 'pending' WHERE id = ?").run(id)
       const job = this.adjudicationQueue.enqueue(id)
       if (input.adjudicateSync) {
         await withTimeout(job.promise, ADJUDICATE_SYNC_TIMEOUT_MS, `adjudicate:${id}`)
@@ -121,7 +125,7 @@ export class MemoryStore {
    * Implements the Zettelkasten note-linking pattern from A-MEM (arxiv 2502.12110).
    */
   private async _autoLink(newId: string, embedding: Float32Array): Promise<void> {
-    const queryVec = JSON.stringify(Array.from(embedding))
+    const queryVec = Buffer.from(embedding.buffer)
     try {
       const vecResults = this.db
         .prepare(
@@ -160,17 +164,58 @@ export class MemoryStore {
   }
 
   delete(id: string): boolean {
-    // Clean up vector index entry before deleting the memory
     const mem = this.getById(id)
-    if (mem?.vec_rowid != null) {
-      try {
-        this.db.prepare('DELETE FROM memory_vectors WHERE rowid = ?').run(mem.vec_rowid)
-      } catch {
-        // Vec cleanup is best-effort
+    if (!mem) return false
+
+    // Atomic cleanup across all tables that reference this memory:
+    //   memory_links + memory_entities cascade via FK (set in baseline schema)
+    //   memories_fts is wiped by the AFTER DELETE trigger
+    //   memory_vectors (vec0) and memory_clusters.member_ids have no FK and
+    //   must be cleaned manually. Wrapping in a transaction ensures we don't
+    //   leave orphan rows if any single step throws.
+    const tx = this.db.transaction((memoryId: string, vecRowid: number | null) => {
+      if (vecRowid != null) {
+        try {
+          this.db.prepare('DELETE FROM memory_vectors WHERE rowid = ?').run(vecRowid)
+        } catch {
+          // vec0 cleanup is best-effort; orphan vec rows are harmless (vec_rowid
+          // is required to surface them via the JOIN in _autoLink / _vectorSearch)
+        }
       }
-    }
-    const result = this.db.prepare('DELETE FROM memories WHERE id = ?').run(id)
-    return result.changes > 0
+
+      const clusterRows = this.db
+        .prepare(
+          "SELECT id, member_ids FROM memory_clusters WHERE member_ids LIKE '%' || ? || '%'"
+        )
+        .all(memoryId) as Array<{ id: number; member_ids: string }>
+      const updateCluster = this.db.prepare(
+        'UPDATE memory_clusters SET member_ids = ?, updated_at = ? WHERE id = ?'
+      )
+      const deleteCluster = this.db.prepare('DELETE FROM memory_clusters WHERE id = ?')
+      const now = Date.now()
+      for (const row of clusterRows) {
+        let members: unknown
+        try {
+          members = JSON.parse(row.member_ids)
+        } catch {
+          continue
+        }
+        if (!Array.isArray(members)) continue
+        const pruned = members.filter((m): m is string => typeof m === 'string' && m !== memoryId)
+        if (pruned.length === members.length) continue
+        if (pruned.length < 2) {
+          // A cluster with <2 members carries no community signal; drop it
+          deleteCluster.run(row.id)
+        } else {
+          updateCluster.run(JSON.stringify(pruned), now, row.id)
+        }
+      }
+
+      const result = this.db.prepare('DELETE FROM memories WHERE id = ?').run(memoryId)
+      return result.changes > 0
+    })
+
+    return tx(id, mem.vec_rowid) as boolean
   }
 
   list(filters: ListMemoriesFilter = {}): Memory[] {
@@ -219,6 +264,31 @@ export class MemoryStore {
 
   setValidUntil(id: string, timestamp: number): void {
     this.stmtSetValidUntil.run(timestamp, id)
+  }
+
+  update(id: string, patch: UpdateMemoryPatch): boolean {
+    const sets: string[] = []
+    const values: unknown[] = []
+    if (patch.type !== undefined) {
+      sets.push('type = ?')
+      values.push(patch.type)
+    }
+    if (patch.importance !== undefined) {
+      sets.push('importance = ?', "importance_source = 'user'")
+      values.push(patch.importance)
+    }
+    if (patch.tags !== undefined) {
+      sets.push('tags = ?')
+      values.push(JSON.stringify(patch.tags))
+    }
+    if (patch.valid_until !== undefined) {
+      sets.push('valid_until = ?')
+      values.push(patch.valid_until)
+    }
+    if (sets.length === 0) return false
+    values.push(id)
+    const result = this.db.prepare(`UPDATE memories SET ${sets.join(', ')} WHERE id = ?`).run(...values)
+    return result.changes > 0
   }
 
   getEntities(memoryId: string): ExtractedEntity[] {
