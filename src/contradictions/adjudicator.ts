@@ -35,6 +35,34 @@ export async function adjudicateMemory(
   memoryId: string,
   options: AdjudicateOptions
 ): Promise<AdjudicationResult> {
+  const result = await adjudicateMemoryInner(db, memoryId, options)
+  recordAdjudicationState(db, memoryId, result.status)
+  return result
+}
+
+function recordAdjudicationState(
+  db: Database.Database,
+  memoryId: string,
+  status: AdjudicationResult['status']
+): void {
+  // 'skipped' = won't help to retry (pinned / missing / LLM offline at decision time).
+  // 'done' = ran to a terminal answer; do not replay even if links were 0.
+  const next: 'done' | 'skipped' =
+    status === 'pinned' || status === 'memory-missing' || status === 'llm-unavailable'
+      ? 'skipped'
+      : 'done'
+  try {
+    db.prepare('UPDATE memories SET adjudication_state = ? WHERE id = ?').run(next, memoryId)
+  } catch (err) {
+    logger.debug({ err, memoryId }, 'adjudicator: failed to record adjudication_state')
+  }
+}
+
+async function adjudicateMemoryInner(
+  db: Database.Database,
+  memoryId: string,
+  options: AdjudicateOptions
+): Promise<AdjudicationResult> {
   const row = db
     .prepare('SELECT id, content, namespace, project_path, pinned, vec_rowid FROM memories WHERE id = ?')
     .get(memoryId) as MemoryRow | undefined

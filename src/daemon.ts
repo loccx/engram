@@ -6,7 +6,7 @@ import { getDatabase } from './db/init.js'
 import { backfillNamespaces } from './db/workers/backfill.js'
 import { reembedStaleMemories } from './db/workers/reembed.js'
 import { MODEL_ID } from './embeddings/pipeline.js'
-import { drainAdjudicationQueue } from './contradictions/runtime.js'
+import { drainAdjudicationQueue, getAdjudicationQueue } from './contradictions/runtime.js'
 import { drainImportanceQueue, getImportanceQueue, isImportanceScoringEnabled } from './importance/runtime.js'
 import { runClusterWorker } from './memory/cluster-worker.js'
 
@@ -36,11 +36,24 @@ async function runStartupWorkers(): Promise<void> {
   }
 
   try {
+    const pending = dbm.db
+      .prepare("SELECT id FROM memories WHERE adjudication_state = 'pending' LIMIT 100")
+      .all() as Array<{ id: string }>
+    const adjQueue = getAdjudicationQueue(dbm.db, dbm.vectorsAvailable)
+    if (adjQueue && pending.length > 0) {
+      for (const { id } of pending) adjQueue.enqueue(id)
+      logger.info({ count: pending.length }, 'adjudication: re-enqueued pending memories')
+    }
+  } catch (err) {
+    logger.warn({ err }, 'adjudication replay failed')
+  }
+
+  try {
     const projects = dbm.db
       .prepare('SELECT DISTINCT COALESCE(namespace, project_path) as p FROM memories')
       .all() as Array<{ p: string }>
     for (const { p } of projects) {
-      await runClusterWorker(dbm.db, p, process.env.ENGRAM_LLM_BASE_URL)
+      await runClusterWorker(dbm.db, p)
     }
   } catch (err) {
     logger.warn({ err }, 'cluster worker failed (will retry on next startup)')
