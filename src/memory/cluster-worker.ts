@@ -1,5 +1,6 @@
 import type Database from 'better-sqlite3'
 import { computeClusters } from './clustering.js'
+import { chat, isLlmConfigured } from '../llm/client.js'
 
 interface StoredClusterRow {
   id: number
@@ -14,43 +15,23 @@ function extractiveSummary(content: string): string {
 }
 
 async function summarizeCluster(
-  representativeContent: string,
-  llmBaseUrl?: string
+  representativeContent: string
 ): Promise<{ summary: string; isExtractive: boolean }> {
   const fallback = extractiveSummary(representativeContent)
-  const base = llmBaseUrl?.trim()
-  if (!base) return { summary: fallback, isExtractive: true }
+  if (!isLlmConfigured()) return { summary: fallback, isExtractive: true }
 
   try {
-    const model = process.env.ENGRAM_LLM_MODEL?.trim() || 'gpt-4o-mini'
-    const url = `${base.replace(/\/+$/, '')}/v1/chat/completions`
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    }
-    const apiKey = process.env.ENGRAM_LLM_API_KEY?.trim()
-    if (apiKey) headers.Authorization = `Bearer ${apiKey}`
-
-    const res = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        model,
-        messages: [
-          {
-            role: 'user',
-            content: `Summarize in one sentence: ${representativeContent.slice(0, 2000)}`,
-          },
-        ],
-        max_tokens: 60,
-      }),
-    })
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}`)
-    const json = (await res.json()) as {
-      choices?: Array<{ message?: { content?: string } }>
-    }
-    const text = json.choices?.[0]?.message?.content?.trim()
-    if (!text) throw new Error('empty response')
+    const result = await chat(
+      [
+        {
+          role: 'user',
+          content: `Summarize in one sentence: ${representativeContent.slice(0, 2000)}`,
+        },
+      ],
+      { maxTokens: 60 }
+    )
+    const text = result.content.trim()
+    if (!text) return { summary: fallback, isExtractive: true }
     return { summary: text.slice(0, 240), isExtractive: false }
   } catch {
     return { summary: fallback, isExtractive: true }
@@ -65,7 +46,7 @@ function hasOverlap(a: readonly string[], b: readonly string[]): boolean {
 export async function runClusterWorker(
   db: Database.Database,
   projectPath: string,
-  llmBaseUrl?: string
+  _llmBaseUrl?: string
 ): Promise<number> {
   const lastCluster = db
     .prepare('SELECT MAX(updated_at) as last FROM memory_clusters WHERE project_path = ?')
@@ -113,7 +94,7 @@ export async function runClusterWorker(
 
   let written = 0
   for (const cluster of clusters) {
-    const { summary, isExtractive } = await summarizeCluster(cluster.representativeContent, llmBaseUrl)
+    const { summary, isExtractive } = await summarizeCluster(cluster.representativeContent)
     const memberIds = cluster.memberIds
     const now = Date.now()
 
