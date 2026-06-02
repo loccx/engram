@@ -3,732 +3,86 @@
  * with query-adaptive signal weighting inspired by Attention Residuals
  * (arxiv 2603.15031).
  *
- * Instead of fixed-weight score multiplication (the "residual connection"
- * pattern), each query is classified into an archetype that determines
- * how much each signal contributes — like learned attention over
- * accumulated layer outputs.
- *
- * Signals: FTS5 rank, vector rank, Ebbinghaus decay, access frequency,
- * importance. All normalized to [0,1] before weighted combination.
+ * Public facade — implementations live in ./search/{scoring,hybrid,context,graph,duplicates}.ts.
+ * MemorySearch class preserved for backward compatibility; delegates to free functions.
  *
  * Research: MemoryBank (2305.10250), FOREVER (2601.03938),
  *   RRF (Cormack et al. 2009), AttnRes (2603.15031)
  */
 
 import type Database from 'better-sqlite3'
-import type { Memory, SearchResult, MemoryType, MemoryCluster } from './types.js'
-import { getEmbedding } from '../embeddings/pipeline.js'
-import { rerank as rerankCrossEncoder } from '../embeddings/reranker.js'
-import { notSupersededClause } from '../contradictions/supersession.js'
-import { rowToMemory, type MemoryRow } from './row.js'
+import type { Memory, SearchResult, MemoryCluster } from './types.js'
+import {
+  hybridSearch,
+  type SearchOptions,
+  DEFAULT_RERANK_TOP_N,
+} from './search/hybrid.js'
+import {
+  prepareContextStatements,
+  getContext,
+  getClusters,
+  type ContextStatements,
+} from './search/context.js'
+import { traverseGraph, pprSearch, type GraphResult } from './search/graph.js'
+import { findDuplicates, type DuplicateGroup, type FindDuplicatesOptions } from './search/duplicates.js'
+import {
+  classifyQuery,
+  WEIGHT_PROFILES,
+  type QueryArchetype,
+  type SignalKey,
+} from './search/scoring.js'
 
-interface ClusterRow {
-  id: number
-  project_path: string
-  member_ids: string
-  summary: string
-  is_extractive: number
-  created_at: number
-  updated_at: number
-}
-
-
-/**
- * Ebbinghaus forgetting curve: R = exp(-t / S)
- * S (stability) scales with importance and access frequency.
- * A memory with importance=0.5 and 0 accesses decays to ~37% in 30 days.
- * Frequent access raises S, slowing decay (spacing effect).
- */
-function ebbinghaus(memory: Memory, now: number): number {
-  const t = now - (memory.last_accessed ?? memory.created_at)
-  const tDays = t / (24 * 60 * 60 * 1000)
-  // Memory strength: base importance + access frequency bonus (spacing effect)
-  const strength = memory.importance + 0.3 * Math.log(memory.access_count + 1)
-  const S = 30 * Math.max(strength, 0.1)
-  return Math.exp(-tDays / S)
-}
-
-// AttnRes-inspired adaptive scoring (arxiv 2603.15031):
-// query archetype determines signal weights instead of fixed multiplication.
-export type QueryArchetype = 'temporal' | 'lookup' | 'semantic' | 'frequentist'
-
-interface WeightProfile {
-  fts: number
-  vec: number
-  recency: number
-  access: number
-  importance: number
-}
-
-// Priority order: temporal > lookup > frequentist > semantic (default)
-const TEMPORAL_RE =
-  /\b(yesterday|today|recent(?:ly)?|last\s+(?:week|session|time|month|day)|ago|earlier|previous(?:ly)?|this\s+(?:morning|week|month))\b/i
-const LOOKUP_RE =
-  /\b[a-z]+[A-Z][a-zA-Z]*\b|\b[a-z]+_[a-z]+\b|\b[A-Z][A-Z0-9]+_[A-Z][A-Z0-9]+\b|`[^`]+`|0x[0-9a-fA-F]+/
-const FREQUENTIST_RE =
-  /\b(common(?:ly)?|frequent(?:ly)?|often|always|usually|pattern|convention|standard|best\s+practice|typical(?:ly)?)\b/i
-
-// Weights sum to 1.0; vec weight is redistributed when vectors unavailable.
-export const WEIGHT_PROFILES: Record<QueryArchetype, WeightProfile> = {
-  temporal:    { fts: 0.10, vec: 0.15, recency: 0.50, access: 0.10, importance: 0.15 },
-  lookup:      { fts: 0.45, vec: 0.15, recency: 0.10, access: 0.15, importance: 0.15 },
-  semantic:    { fts: 0.20, vec: 0.35, recency: 0.15, access: 0.10, importance: 0.20 },
-  frequentist: { fts: 0.10, vec: 0.15, recency: 0.10, access: 0.45, importance: 0.20 },
-}
-
-/** Classify query for adaptive signal weighting. Priority: temporal > lookup > frequentist > semantic. */
-export function classifyQuery(query: string): QueryArchetype {
-  if (TEMPORAL_RE.test(query)) return 'temporal'
-  if (LOOKUP_RE.test(query)) return 'lookup'
-  if (FREQUENTIST_RE.test(query)) return 'frequentist'
-  return 'semantic'
-}
-
-export interface SearchOptions {
-  project_path?: string
-  limit?: number
-  type?: MemoryType
-  before?: number
-  include_superseded?: boolean
-  use_reranker?: boolean
-  rerank_top_n?: number
-}
-
-export const DEFAULT_RERANK_TOP_N = 20
+export { classifyQuery, WEIGHT_PROFILES, DEFAULT_RERANK_TOP_N }
+export type { QueryArchetype, SearchOptions, SignalKey, GraphResult, DuplicateGroup, FindDuplicatesOptions }
 
 export class MemorySearch {
-  private readonly stmtGetContextDefault: Database.Statement
-  private readonly stmtGetClusters: Database.Statement
+  private readonly contextStmts: ContextStatements
 
   constructor(
     private readonly db: Database.Database,
     private readonly vectorsAvailable: boolean = false
   ) {
-    this.stmtGetContextDefault = this.db.prepare(
-      `SELECT * FROM memories
-       WHERE COALESCE(namespace, project_path) = ?
-         AND ${notSupersededClause('memories.id')}
-       ORDER BY
-         CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
-         (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
-         created_at DESC
-       LIMIT ?`
-    )
-    this.stmtGetClusters = this.db.prepare(
-      'SELECT * FROM memory_clusters WHERE project_path = ? ORDER BY updated_at DESC LIMIT 20'
-    )
+    this.contextStmts = prepareContextStatements(db)
   }
 
-  /**
-   * Hybrid search with query-adaptive signal weighting.
-   * Retrieves candidates via FTS5 + vector, then scores each using
-   * five normalized signals weighted by query archetype.
-   * Falls back to FTS5-only if embeddings are unavailable.
-   *
-   * Side effect: populates `signalBreakdown` (if provided) with each
-   * memory id mapped to its weighted contribution per signal. Used by
-   * MCP enrichment to attribute `recall_reason`.
-   */
   async hybridSearch(
     query: string,
     options: SearchOptions = {},
-    signalBreakdown?: Map<string, Record<'fts' | 'vec' | 'recency' | 'access' | 'importance' | 'reranker', number>>
+    signalBreakdown?: Map<string, Record<SignalKey, number>>
   ): Promise<SearchResult[]> {
-    const limit = options.limit ?? 10
-    const overFetch = Math.max(limit * 5, 50)
-    const now = Date.now()
-
-    // 1. FTS5 lexical retrieval
-    const ftsRows = this._ftsSearch(query, options, overFetch)
-
-    // 2. Vector semantic retrieval (if available)
-    const queryEmbed = this.vectorsAvailable ? await getEmbedding(query, 'query') : null
-    const vecRows = queryEmbed ? this._vectorSearch(queryEmbed, options, overFetch) : []
-
-    // 3. Decompose retrieval signals (RRF per-method, k=60)
-    const k = 60
-    const candidates = new Map<string, { fts: number; vec: number; memory: Memory }>()
-
-    ftsRows.forEach((m, rank) => {
-      candidates.set(m.id, { fts: 1 / (k + rank + 1), vec: 0, memory: m })
-    })
-
-    vecRows.forEach((m, rank) => {
-      const ex = candidates.get(m.id)
-      const vecScore = 1 / (k + rank + 1)
-      if (ex) {
-        ex.vec = vecScore
-      } else {
-        candidates.set(m.id, { fts: 0, vec: vecScore, memory: m })
-      }
-    })
-
-    // 4. Normalize retrieval scores to [0,1] for cross-signal comparison
-    let maxFts = 0
-    let maxVec = 0
-    for (const { fts, vec } of candidates.values()) {
-      if (fts > maxFts) maxFts = fts
-      if (vec > maxVec) maxVec = vec
-    }
-
-    // 5. Query-adaptive weighting: classify query, then weight signals
-    const archetype = classifyQuery(query)
-    const w = { ...WEIGHT_PROFILES[archetype] }
-
-    // Redistribute vec weight when vectors are unavailable
-    if (maxVec === 0 && w.vec > 0) {
-      const spare = w.vec
-      w.vec = 0
-      const rest = w.fts + w.recency + w.access + w.importance
-      if (rest > 0) {
-        const scale = (rest + spare) / rest
-        w.fts *= scale
-        w.recency *= scale
-        w.access *= scale
-        w.importance *= scale
-      }
-    }
-
-    const results: SearchResult[] = [...candidates.values()].map(({ fts, vec, memory }) => {
-      const normFts = maxFts > 0 ? fts / maxFts : 0
-      const normVec = maxVec > 0 ? vec / maxVec : 0
-      const recency = ebbinghaus(memory, now)
-      // Normalize access count to [0,1] — 100 accesses saturates at 1.0
-      const access = Math.min(Math.log(memory.access_count + 1) / Math.log(100), 1.0)
-      const contribFts = w.fts * normFts
-      const contribVec = w.vec * normVec
-      const contribRecency = w.recency * recency
-      const contribAccess = w.access * access
-      const contribImportance = w.importance * memory.importance
-      if (signalBreakdown) {
-        signalBreakdown.set(memory.id, {
-          fts: contribFts,
-          vec: contribVec,
-          recency: contribRecency,
-          access: contribAccess,
-          importance: contribImportance,
-          reranker: 0,
-        })
-      }
-      return {
-        ...memory,
-        score: contribFts + contribVec + contribRecency + contribAccess + contribImportance,
-      }
-    })
-
-    let ranked = results.sort((a, b) => b.score - a.score)
-
-    if (options.use_reranker && ranked.length > 1) {
-      const topN = options.rerank_top_n ?? DEFAULT_RERANK_TOP_N
-      const window = ranked.slice(0, topN)
-      const tail = ranked.slice(topN)
-      const rerankScores = await rerankCrossEncoder(
-        query,
-        window.map((r) => r.content)
-      )
-      if (rerankScores) {
-        const reordered = rerankScores.map((rs) => ({
-          result: window[rs.index],
-          rerankScore: rs.score,
-        }))
-        if (signalBreakdown) {
-          for (const { result, rerankScore } of reordered) {
-            const existing = signalBreakdown.get(result.id)
-            if (existing) existing.reranker = rerankScore
-          }
-        }
-        ranked = [
-          ...reordered.map(({ result, rerankScore }) => ({ ...result, score: rerankScore })),
-          ...tail,
-        ]
-      }
-    }
-
-    const top = ranked.slice(0, limit)
-
-    // Record access on returned results so Ebbinghaus spacing effect works:
-    // memories that get retrieved strengthen over time instead of decaying.
-    if (top.length > 0) {
-      const ids = top.map((r) => r.id)
-      const placeholders = ids.map(() => '?').join(',')
-      this.db
-        .prepare(
-          `UPDATE memories SET last_accessed = ?, access_count = access_count + 1
-           WHERE id IN (${placeholders})`
-        )
-        .run(now, ...ids)
-    }
-
-    return top
+    return hybridSearch(this.db, this.vectorsAvailable, query, options, signalBreakdown)
   }
 
-  private _ftsSearch(query: string, options: SearchOptions, limit: number): Memory[] {
-    const tokens = query
-      .trim()
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((t) => `"${t.replace(/"/g, '""')}"`)
-
-    // Try implicit AND first, fallback to OR if AND returns nothing (common with 3+ terms)
-    const andQuery = tokens.join(' ')
-    const rows = this._ftsExec(andQuery, options, limit)
-    if (rows.length > 0 || tokens.length <= 2) return rows
-
-    // AND returned nothing — retry with OR for partial matches
-    const orQuery = tokens.join(' OR ')
-    return this._ftsExec(orQuery, options, limit)
-  }
-
-  private _ftsExec(ftsQuery: string, options: SearchOptions, limit: number): Memory[] {
-    const conditions: string[] = ['memories_fts MATCH ?']
-    const values: unknown[] = [ftsQuery]
-
-    if (options.project_path) {
-      // namespace and project_path coexist during the backfill window;
-      // match against either so callers see consistent results.
-      conditions.push('COALESCE(m.namespace, m.project_path) = ?')
-      values.push(options.project_path)
-    }
-    if (options.type) {
-      conditions.push('m.type = ?')
-      values.push(options.type)
-    }
-    if (options.before !== undefined) {
-      conditions.push('m.valid_from <= ?')
-      values.push(options.before)
-    }
-    if (!options.include_superseded) {
-      conditions.push(notSupersededClause('m.id'))
-    }
-    values.push(limit)
-
-    // bm25(table, w_content=10.0, w_tags=5.0) — explicit column weights.
-    // Content carries 2x the influence of tags so short tag matches do not
-    // dominate longer, more discriminative content matches.
-    try {
-      const rows = this.db
-        .prepare(
-          `SELECT m.* FROM memories_fts fts
-           JOIN memories m ON fts.rowid = m.rowid
-           WHERE ${conditions.join(' AND ')}
-           ORDER BY bm25(memories_fts, 10.0, 5.0)
-           LIMIT ?`
-        )
-        .all(...values) as MemoryRow[]
-      return rows.map(rowToMemory)
-    } catch {
-      return []
-    }
-  }
-
-  private _vectorSearch(embedding: Float32Array, options: SearchOptions, limit: number): Memory[] {
-    const queryVec = JSON.stringify(Array.from(embedding))
-
-    let sql = `
-      SELECT m.* FROM
-        (SELECT rowid, distance FROM memory_vectors WHERE embedding MATCH ? LIMIT ?) knn
-      JOIN memories m ON m.vec_rowid = knn.rowid
-      WHERE 1=1
-    `
-    const values: unknown[] = [queryVec, limit]
-
-    if (options.project_path) {
-      sql += ' AND COALESCE(m.namespace, m.project_path) = ?'
-      values.push(options.project_path)
-    }
-    if (options.type) {
-      sql += ' AND m.type = ?'
-      values.push(options.type)
-    }
-    if (options.before !== undefined) {
-      sql += ' AND m.valid_from <= ?'
-      values.push(options.before)
-    }
-    if (!options.include_superseded) {
-      sql += ` AND ${notSupersededClause('m.id')}`
-    }
-    sql += ' ORDER BY knn.distance'
-
-    try {
-      return (this.db.prepare(sql).all(...values) as MemoryRow[]).map(rowToMemory)
-    } catch {
-      return []
-    }
-  }
-
-  /**
-   * Get the most contextually relevant memories for a project.
-   * Used at session start to load working context.
-   * Ranked by importance × Ebbinghaus retention (no query needed).
-   */
   getContext(
     project_path: string,
     limit: number = 20,
     options: { include_superseded?: boolean; before?: number } = {}
   ): Memory[] {
-    const now = Date.now()
-    const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000
-
-    if (!options.include_superseded && options.before === undefined) {
-      const rows = this.stmtGetContextDefault.all(project_path, thirtyDaysAgo, limit) as MemoryRow[]
-      return rows.map(rowToMemory)
-    }
-
-    const supersededFilter = options.include_superseded
-      ? ''
-      : ` AND ${notSupersededClause('memories.id')}`
-
-    const beforeFilter = options.before !== undefined ? ' AND valid_from <= ?' : ''
-    const params: unknown[] = [project_path]
-    if (options.before !== undefined) params.push(options.before)
-    params.push(thirtyDaysAgo, limit)
-
-    const rows = this.db
-      .prepare(
-        `SELECT * FROM memories
-         WHERE COALESCE(namespace, project_path) = ?${supersededFilter}${beforeFilter}
-          ORDER BY
-            CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
-            (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
-            created_at DESC
-          LIMIT ?`
-      )
-      .all(...params) as MemoryRow[]
-
-    return rows.map(rowToMemory)
+    return getContext(this.db, this.contextStmts, project_path, limit, options)
   }
 
   getClusters(projectPath: string): MemoryCluster[] {
-    const rows = this.stmtGetClusters.all(projectPath) as ClusterRow[]
-
-    return rows.map((r) => {
-      let memberIds: string[] = []
-      try {
-        const parsed = JSON.parse(r.member_ids)
-        if (Array.isArray(parsed)) {
-          memberIds = parsed.filter((v): v is string => typeof v === 'string')
-        }
-      } catch {
-      }
-      return {
-        id: r.id,
-        project_path: r.project_path,
-        member_ids: memberIds,
-        summary: r.summary,
-        is_extractive: r.is_extractive === 1,
-        created_at: r.created_at,
-        updated_at: r.updated_at,
-      }
-    })
+    return getClusters(this.contextStmts, projectPath)
   }
 
-  /**
-   * Walk the memory graph N hops deep via recursive CTE.
-   * Returns memories with hop distance, deduped to shortest path.
-   */
   traverseGraph(
     startId: string,
     depth: number = 2,
     limit: number = 20,
     options: { include_superseded?: boolean } = {}
-  ): Array<Memory & { similarity: number; link_type: string; hops: number }> {
-    const supersededFilter = options.include_superseded
-      ? ''
-      : ` AND ${notSupersededClause('m.id')}`
-
-    const rows = this.db
-      .prepare(
-        `WITH RECURSIVE traverse AS (
-           SELECT target_id AS id, similarity, link_type, 1 AS hops,
-                  ',' || ? || ',' || target_id || ',' AS path
-           FROM memory_links WHERE source_id = ?
-           UNION ALL
-           SELECT ml.target_id, ml.similarity, ml.link_type, t.hops + 1,
-                  t.path || ml.target_id || ','
-           FROM traverse t
-           JOIN memory_links ml ON ml.source_id = t.id
-           WHERE t.hops < ? AND instr(t.path, ',' || ml.target_id || ',') = 0
-         )
-         SELECT m.*, sub.similarity, sub.link_type, sub.hops
-         FROM (
-           SELECT id, similarity, link_type, hops,
-                  ROW_NUMBER() OVER (PARTITION BY id ORDER BY hops ASC, similarity DESC) AS rn
-           FROM traverse WHERE id != ?
-         ) sub
-         JOIN memories m ON m.id = sub.id
-         WHERE sub.rn = 1${supersededFilter}
-         ORDER BY sub.hops ASC, sub.similarity DESC
-         LIMIT ?`
-      )
-      .all(startId, startId, depth, startId, limit) as Array<
-        MemoryRow & { similarity: number; link_type: string; hops: number }
-      >
-
-    return rows.map((row) => ({
-      ...rowToMemory(row),
-      similarity: row.similarity,
-      link_type: row.link_type,
-      hops: row.hops,
-    }))
+  ): GraphResult[] {
+    return traverseGraph(this.db, startId, depth, limit, options)
   }
 
   pprSearch(
     seedIds: string[],
     limit: number = 20,
     options: { include_superseded?: boolean } = {}
-  ): Array<Memory & { similarity: number; link_type: string; hops: number }> {
-    const uniqueSeeds = [...new Set(seedIds.filter((s) => s.length > 0))]
-    if (uniqueSeeds.length === 0) return []
-
-    const seedValues = uniqueSeeds.map(() => '(?)').join(',')
-    const reachableRows = this.db
-      .prepare(
-        `WITH RECURSIVE
-           seeds(id) AS (VALUES ${seedValues}),
-           traverse(source_id, target_id, hops, path) AS (
-             SELECT ml.source_id, ml.target_id, 1,
-                    ',' || ml.source_id || ',' || ml.target_id || ','
-             FROM memory_links ml
-             JOIN seeds s ON s.id = ml.source_id
-             UNION ALL
-             SELECT t.target_id, ml.target_id, t.hops + 1,
-                    t.path || ml.target_id || ','
-             FROM traverse t
-             JOIN memory_links ml ON ml.source_id = t.target_id
-             WHERE t.hops < 3 AND instr(t.path, ',' || ml.target_id || ',') = 0
-           )
-         SELECT DISTINCT id FROM (
-           SELECT id FROM seeds
-           UNION
-           SELECT source_id AS id FROM traverse
-           UNION
-           SELECT target_id AS id FROM traverse
-         )`
-      )
-      .all(...uniqueSeeds) as Array<{ id: string }>
-
-    const reachableIds = [...new Set(reachableRows.map((r) => r.id))]
-    if (reachableIds.length < 3) {
-      const fallback = new Map<string, Memory & { similarity: number; link_type: string; hops: number }>()
-      for (const seed of uniqueSeeds) {
-        const walked = this.traverseGraph(seed, 3, limit, options)
-        for (const row of walked) {
-          const prev = fallback.get(row.id)
-          if (!prev || row.similarity > prev.similarity) fallback.set(row.id, row)
-        }
-      }
-      return [...fallback.values()]
-        .sort((a, b) => b.similarity - a.similarity)
-        .slice(0, limit)
-    }
-
-    const nodePlaceholders = reachableIds.map(() => '?').join(',')
-    const edgeRows = this.db
-      .prepare(
-        `SELECT source_id, target_id
-         FROM memory_links
-         WHERE source_id IN (${nodePlaceholders})
-           AND target_id IN (${nodePlaceholders})`
-      )
-      .all(...reachableIds, ...reachableIds) as Array<{ source_id: string; target_id: string }>
-
-    const adjacency = new Map<string, { targets: string[]; outDeg: number }>()
-    const reverse = new Map<string, string[]>()
-    for (const id of reachableIds) {
-      adjacency.set(id, { targets: [], outDeg: 0 })
-      reverse.set(id, [])
-    }
-    for (const { source_id, target_id } of edgeRows) {
-      const outgoing = adjacency.get(source_id)
-      if (outgoing) {
-        outgoing.targets.push(target_id)
-        outgoing.outDeg = outgoing.targets.length
-      }
-      const incoming = reverse.get(target_id)
-      if (incoming) incoming.push(source_id)
-    }
-
-    const damping = 0.85
-    const iterations = 20
-    const seedWeight = 1 / uniqueSeeds.length
-    const p = new Map<string, number>()
-    let score = new Map<string, number>()
-    for (const id of reachableIds) {
-      const v = uniqueSeeds.includes(id) ? seedWeight : 0
-      p.set(id, v)
-      score.set(id, v)
-    }
-
-    for (let i = 0; i < iterations; i++) {
-      const next = new Map<string, number>()
-      for (const id of reachableIds) {
-        const incoming = reverse.get(id) ?? []
-        let sum = 0
-        for (const u of incoming) {
-          const outDeg = adjacency.get(u)?.outDeg ?? 0
-          if (outDeg > 0) sum += (score.get(u) ?? 0) / outDeg
-        }
-        const personal = p.get(id) ?? 0
-        next.set(id, (1 - damping) * personal + damping * sum)
-      }
-      score = next
-    }
-
-    let candidates = reachableIds.filter((id) => !uniqueSeeds.includes(id))
-    if (!options.include_superseded && candidates.length > 0) {
-      const placeholders = candidates.map(() => '?').join(',')
-      const validRows = this.db
-        .prepare(`SELECT id FROM memories WHERE id IN (${placeholders}) AND ${notSupersededClause('id')}`)
-        .all(...candidates) as Array<{ id: string }>
-      const valid = new Set(validRows.map((r) => r.id))
-      candidates = candidates.filter((id) => valid.has(id))
-    }
-
-    const rankedIds = candidates
-      .sort((a, b) => (score.get(b) ?? 0) - (score.get(a) ?? 0))
-      .slice(0, limit)
-    if (rankedIds.length === 0) return []
-
-    const placeholders = rankedIds.map(() => '?').join(',')
-    const rows = this.db
-      .prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
-      .all(...rankedIds) as MemoryRow[]
-    const byId = new Map(rows.map((r) => [r.id, r]))
-
-    return rankedIds
-      .map((id) => byId.get(id))
-      .filter((r): r is MemoryRow => r != null)
-      .map((row) => ({
-        ...rowToMemory(row),
-        similarity: score.get(row.id) ?? 0,
-        link_type: 'semantic',
-        hops: 1,
-      }))
+  ): GraphResult[] {
+    return pprSearch(this.db, seedIds, limit, options)
   }
 
-  /**
-   * Find near-duplicate memories using vector similarity.
-   * Returns candidate groups for consolidation.
-   * Based on memory consolidation literature (Mem0, arxiv 2504.19413).
-   */
-  findDuplicates(
-    options: {
-      threshold?: number
-      project_path?: string
-      limit?: number
-      include_superseded?: boolean
-    } = {}
-  ): Array<{ representative: Memory; duplicates: Array<{ memory: Memory; similarity: number }> }> {
-    if (!this.vectorsAvailable) return []
-
-    const threshold = options.threshold ?? 0.95 // cosine_sim > 0.95
-    const limit = options.limit ?? 50
-
-    const conditions: string[] = []
-    const values: unknown[] = [threshold]
-    if (options.project_path) {
-      conditions.push('COALESCE(m1.namespace, m1.project_path) = ?')
-      values.push(options.project_path)
-    }
-    if (!options.include_superseded) {
-      conditions.push(notSupersededClause('m1.id'))
-      conditions.push(notSupersededClause('m2.id'))
-    }
-    values.push(limit)
-
-    const where = conditions.length ? `AND ${conditions.join(' AND ')}` : ''
-
-    // Find pairs with similarity above threshold (avoid duplicating pairs)
-    const pairs = this.db
-      .prepare(
-        `SELECT ml.source_id, ml.target_id, ml.similarity,
-                m1.importance as imp1, m2.importance as imp2,
-                m1.access_count as acc1, m2.access_count as acc2
-         FROM memory_links ml
-         JOIN memories m1 ON ml.source_id = m1.id
-         JOIN memories m2 ON ml.target_id = m2.id
-         WHERE ml.similarity > ? ${where}
-           AND ml.source_id < ml.target_id
-         ORDER BY ml.similarity DESC
-         LIMIT ?`
-      )
-      .all(...values) as Array<{
-      source_id: string
-      target_id: string
-      similarity: number
-      imp1: number
-      imp2: number
-      acc1: number
-      acc2: number
-    }>
-
-    // Cluster into groups using union-find
-    const parent = new Map<string, string>()
-    const find = (x: string): string => {
-      if (!parent.has(x)) parent.set(x, x)
-      const p = parent.get(x)!
-      if (p !== x) parent.set(x, find(p))
-      return parent.get(x)!
-    }
-    const union = (x: string, y: string) => parent.set(find(x), find(y))
-
-    for (const { source_id, target_id } of pairs) {
-      union(source_id, target_id)
-    }
-
-    // Build groups
-    const groups = new Map<string, string[]>()
-    for (const { source_id, target_id } of pairs) {
-      const root = find(source_id)
-      if (!groups.has(root)) groups.set(root, [])
-      for (const id of [source_id, target_id]) {
-        if (!groups.get(root)!.includes(id)) groups.get(root)!.push(id)
-      }
-    }
-
-    // Batch-fetch all memories referenced across all groups (avoids N+1)
-    const allIds = new Set<string>()
-    for (const members of groups.values()) {
-      for (const id of members) allIds.add(id)
-    }
-
-    const memoryMap = new Map<string, Memory>()
-    if (allIds.size > 0) {
-      const idList = [...allIds]
-      const placeholders = idList.map(() => '?').join(',')
-      const rows = this.db
-        .prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
-        .all(...idList) as MemoryRow[]
-      for (const row of rows) {
-        memoryMap.set(row.id, rowToMemory(row))
-      }
-    }
-
-    const result: Array<{
-      representative: Memory
-      duplicates: Array<{ memory: Memory; similarity: number }>
-    }> = []
-
-    for (const members of groups.values()) {
-      const memories = members.map((id) => memoryMap.get(id)).filter((m): m is Memory => m != null)
-      if (memories.length < 2) continue
-
-      const rep = memories.reduce((best, m) =>
-        m.importance * (m.access_count + 1) > best.importance * (best.access_count + 1) ? m : best
-      )
-
-      const sims = new Map(pairs.filter(p => members.includes(p.source_id) && members.includes(p.target_id)).map(p => [`${p.source_id}:${p.target_id}`, p.similarity]))
-
-      const duplicates = memories
-        .filter((m) => m.id !== rep.id)
-        .map((m) => ({
-          memory: m,
-          similarity: sims.get(`${rep.id}:${m.id}`) ?? sims.get(`${m.id}:${rep.id}`) ?? threshold,
-        }))
-
-      result.push({ representative: rep, duplicates })
-    }
-
-    return result
+  findDuplicates(options: FindDuplicatesOptions = {}): DuplicateGroup[] {
+    return findDuplicates(this.db, this.vectorsAvailable, options)
   }
 }
