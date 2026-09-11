@@ -1,3 +1,5 @@
+import { AUDIT_LOG_FILE } from '../brains/paths.js'
+
 export const MEMORY_TYPES = ['note', 'decision', 'bug', 'pattern', 'gotcha', 'todo', 'procedure'] as const
 
 const memoryTypeEnum = {
@@ -86,6 +88,11 @@ export const tools = [
           type: 'number',
           description: 'Unix timestamp (ms). Restrict results to facts valid at/before this time.',
         },
+        as_of: {
+          type: 'number',
+          description:
+            'Unix timestamp (ms). Historical view: returns facts valid at this exact time (valid_from <= as_of <= valid_until — both boundaries inclusive) with time-aware supersession, so facts superseded after as_of still appear. Prefer over the legacy `before` field.',
+        },
         include_superseded: includeSupersededField,
         use_reranker: {
           type: 'boolean',
@@ -110,16 +117,45 @@ export const tools = [
   {
     name: 'get_context',
     description:
-      'Get the most important memories for the current namespace. Call at session start. Ranked by importance × Ebbinghaus retention. Hides superseded memories by default.',
+      'Get memories for the current namespace, scoped by task when a query is given (routes through the same hybrid FTS5+vector search as search_memories). Without a query, falls back to a blanket set ranked by importance × Ebbinghaus retention. Default: full (untruncated) content and full cluster member_ids. Pass compact_content=true / compact_topics=true to explicitly opt into truncated content and a capped 5-id topic sample. Hides superseded memories by default.',
     inputSchema: {
       type: 'object',
       properties: {
         project_path: projectPathField,
         namespace: namespaceField,
+        query: {
+          type: 'string',
+          description: 'Scope results to this task/topic via hybrid search instead of returning a blanket importance-ranked dump.',
+        },
         limit: { type: 'number', description: 'Max memories to return (default: 20)' },
         before: {
           type: 'number',
           description: 'Unix timestamp (ms). Restrict context to facts valid at/before this time.',
+        },
+        as_of: {
+          type: 'number',
+          description:
+            'Unix timestamp (ms). Historical view with time-aware supersession (see search_memories.as_of). Present-state digest and topic summaries are omitted and reported through as_of_limitations. Prefer over the legacy `before` field.',
+        },
+        compact_content: {
+          type: 'boolean',
+          description:
+            'Opt-in: truncate long content to ~400 chars + ellipsis. Without this flag, full content is returned (legacy default preserved).',
+        },
+        compact_topics: {
+          type: 'boolean',
+          description:
+            'Opt-in: cap cluster member_ids at a 5-id sample and add member_count. Without this flag, full membership is returned (legacy default preserved).',
+        },
+        full_content: {
+          type: 'boolean',
+          description:
+            'Legacy alias accepted for backward compatibility with the brief compact-era opt-in. Full content is the default again; setting this still guarantees untruncated content.',
+        },
+        full_topics: {
+          type: 'boolean',
+          description:
+            'Legacy alias accepted for backward compatibility with the brief compact-era opt-in. Full topic membership is the default again; setting this still guarantees complete member_ids.',
         },
         include_superseded: includeSupersededField,
       },
@@ -146,6 +182,10 @@ export const tools = [
         limit: { type: 'number', description: 'Max results (default: 10)' },
         project_path: projectPathField,
         namespace: namespaceField,
+        as_of: {
+          type: 'number',
+          description: 'Unix timestamp (ms). Historical view (see search_memories.as_of).',
+        },
         include_superseded: includeSupersededField,
       },
       required: ['entity'],
@@ -165,7 +205,12 @@ export const tools = [
     inputSchema: {
       type: 'object',
       properties: {
-        memory_id: { type: 'string', description: 'Memory ID to find related memories for' },
+        id: { type: 'string', description: 'Memory ID to find related memories for' },
+        memory_id: {
+          type: 'string',
+          description:
+            'Deprecated alias for id, retained for backward compatibility with pre-rename clients. When both are set, id wins.',
+        },
         limit: { type: 'number', description: 'Max results (default: 10)' },
         depth: {
           type: 'number',
@@ -175,7 +220,7 @@ export const tools = [
         },
         include_superseded: includeSupersededField,
       },
-      required: ['memory_id'],
+      required: [],
     },
     annotations: {
       title: 'Get related memories',
@@ -240,6 +285,10 @@ export const tools = [
         limit: { type: 'number', description: 'Max results (default: 20)' },
         project_path: projectPathField,
         namespace: namespaceField,
+        as_of: {
+          type: 'number',
+          description: 'Unix timestamp (ms). Historical view (see search_memories.as_of).',
+        },
         include_superseded: includeSupersededField,
       },
     },
@@ -277,6 +326,11 @@ export const tools = [
       type: 'object',
       properties: {
         id: { type: 'string', description: 'Memory ID' },
+        as_of: {
+          type: 'number',
+          description:
+            'Unix timestamp (ms). When set, returns the member of the explicit manual revision chain (supersedes links with revision > 0) that was current at that time, respecting when each revision link was judged, instead of the literal row.',
+        },
       },
       required: ['id'],
     },
@@ -351,6 +405,209 @@ export const tools = [
     annotations: {
       title: 'Get usage stats',
       readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'list_brains',
+    description:
+      'List local engram brains (owned + followed). Returns name, memory count, owner, embedding model, description, and whether the decrypted cache is present.',
+    inputSchema: { type: 'object', properties: {} },
+    annotations: {
+      title: 'List brains',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'search_brain',
+    description:
+      'Full-text search within a specific followed/owned brain. Caller must name the brain explicitly; cross-brain access is never implicit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        brain: { type: 'string', description: 'Brain name (as shown by list_brains)' },
+        query: { type: 'string', description: 'FTS5 query string' },
+        limit: { type: 'number', default: 10, description: 'Max results (default 10)' },
+      },
+      required: ['brain', 'query'],
+    },
+    annotations: {
+      title: 'Search a specific brain',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'get_brain_memory',
+    description: 'Fetch a single memory by ID from a named brain.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        brain: { type: 'string', description: 'Brain name' },
+        id: { type: 'string', description: 'Memory ID' },
+      },
+      required: ['brain', 'id'],
+    },
+    annotations: {
+      title: 'Get brain memory',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'mark_shareable',
+    description:
+      `Mark a local memory as shareable (or unshareable) so it will be included in the next brain snapshot. Default for every memory is NOT shareable. Writes to ${AUDIT_LOG_FILE} for prompt-injection defense.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Memory ID to flag' },
+        shareable: { type: 'boolean', default: true, description: 'true to mark shareable, false to revoke' },
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Mark memory shareable',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'revise_memory',
+    description:
+      'Append-only content revision: creates a NEW memory row linked to the original by a deterministic confidence=1 supersedes edge, closes the predecessor\'s validity window, and returns the version number. History and audit events are preserved; content is never edited in place. The predecessor keeps its pinned status OFF so digests always track current content. Shareable is never inherited — pass shareable=true to opt the revision into brain export.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Memory ID to revise' },
+        content: { type: 'string', description: 'New content (min 1 char)' },
+        reason: { type: 'string', description: 'Why the revision was made (stored on the supersedes link)' },
+        type: { ...memoryTypeEnum },
+        tags: { type: 'array', items: { type: 'string' }, description: 'Replacement tags (default: inherit from predecessor)' },
+        session_id: { type: 'string', description: 'Session for the revision (default: predecessor\'s session)' },
+        shareable: {
+          type: 'boolean',
+          description: 'Explicit opt-in to mark the revision shareable. NEVER inherited from the predecessor.',
+        },
+      },
+      required: ['id', 'content'],
+    },
+    annotations: {
+      title: 'Revise memory (append-only)',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: true,
+    },
+  },
+  {
+    name: 'get_memory_history',
+    description:
+      'Audit a memory\'s whole supersession chain: versions oldest-first plus the supersedes links between them. This is the BROAD audit view (not recall): it spans ALL supersedes edges — manual revisions AND LLM-adjudicated contradictions, confidence-agnostic — so chain members can include unrelated adjudicated memories. Optional as_of filters the returned versions to facts valid at that time; the links list still shows every edge found.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Memory ID — any member of the chain works' },
+        as_of: {
+          type: 'number',
+          description: 'Unix timestamp (ms). Filter chain members to facts valid at this time.',
+        },
+        limit: { type: 'number', default: 50, maximum: 500, description: 'Max versions returned (default 50)' },
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Get memory history',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'recall_context',
+    description:
+      'Progressive recall with a strict character budget. Digest text, memory content, and topic summaries are packed deterministically (digest first, then top-ranked memories, then topics) and the payload reports budget usage, drops, and truncations. Read-only and repeatable: hybrid search never stamps last_accessed here. Modes: fused (hybrid + digest + topics), hybrid, entity (query as entity name), graph (PPR walk from seed_id). Content characters are the budget unit; JSON transport overhead is not charged. When as_of is set, the present-state digest and topic summary text are omitted (flagged via as_of_limitations) because neither is reconstructable at that time; topic member_ids remain filtered to facts valid at as_of.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Query (entity text in entity mode)' },
+        budget_chars: { type: 'number', minimum: 50, description: 'Strict content-character budget' },
+        mode: {
+          type: 'string',
+          enum: ['fused', 'hybrid', 'graph', 'entity'],
+          default: 'fused',
+          description: 'Retrieval mode (default merged hybrid+digest+topics)',
+        },
+        seed_id: { type: 'string', description: 'Required for graph mode: starting memory id' },
+        limit: { type: 'number', default: 10, maximum: 100, description: 'Candidate cap per branch' },
+        min_trust: {
+          type: 'number',
+          minimum: 0,
+          maximum: 1,
+          default: 0,
+          description: 'Minimum composite trust score (pinned memories bypass)',
+        },
+        project_path: projectPathField,
+        namespace: namespaceField,
+        as_of: {
+          type: 'number',
+          description:
+            'Unix timestamp (ms). Historical view (see search_memories.as_of). Present-state digest and topic summary text are omitted in historical results and flagged via as_of_limitations; topic member_ids stay filtered to facts valid at as_of.',
+        },
+      },
+      required: ['query', 'budget_chars'],
+    },
+    annotations: {
+      title: 'Progressive recall',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'get_maintenance_status',
+    description:
+      'Read-only view of the durable maintenance job queue: counts by status/type plus recent jobs. Maintenance jobs run in safe shadow mode — they inspect state and record summaries into result_json but never write canonical memories, digests, clusters, importance, or contradiction links.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', default: 20, maximum: 200, description: 'Recent jobs to return' },
+      },
+    },
+    annotations: {
+      title: 'Maintenance status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'run_pending_maintenance',
+    description:
+      'Bounded run of pending maintenance jobs (lease-based claim, shadow mode only — see get_maintenance_status). Returns claimed/done/failed counts. Safe to run at any time; shadow handlers never mutate canonical state.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        limit: { type: 'number', default: 20, maximum: 100, description: 'Max jobs to claim this run' },
+      },
+    },
+    annotations: {
+      title: 'Run pending maintenance',
+      readOnlyHint: false,
       destructiveHint: false,
       idempotentHint: true,
       openWorldHint: false,

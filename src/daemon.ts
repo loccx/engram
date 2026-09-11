@@ -9,6 +9,13 @@ import { MODEL_ID } from './embeddings/pipeline.js'
 import { drainAdjudicationQueue, getAdjudicationQueue } from './contradictions/runtime.js'
 import { drainImportanceQueue, getImportanceQueue, isImportanceScoringEnabled } from './importance/runtime.js'
 import { runClusterWorker } from './memory/cluster-worker.js'
+import {
+  enqueueNamespaceMaintenance,
+  isMaintenanceEnabled,
+  releaseOwnedLeases,
+  runPendingMaintenanceJobs,
+  MAINTENANCE_OWNER,
+} from './maintenance/jobs.js'
 
 async function runStartupWorkers(): Promise<void> {
   const dbm = getDatabase()
@@ -72,6 +79,22 @@ async function runStartupWorkers(): Promise<void> {
       logger.warn({ err }, 're-embed worker failed (stale memories will retry on next startup)')
     }
   }
+
+  // Durable maintenance: enqueue per-namespace shadow jobs, then run a
+  // bounded drain. Also reclaims any job whose lease expired while the
+  // daemon was down (crash recovery). Shadow-only handlers make this safe.
+  if (isMaintenanceEnabled()) {
+    try {
+      const namespaces = enqueueNamespaceMaintenance(dbm.db)
+      const ran = await runPendingMaintenanceJobs(dbm.db, { owner: MAINTENANCE_OWNER })
+      logger.info(
+        { namespaces, ...ran },
+        'maintenance: startup enqueue + bounded shadow drain complete'
+      )
+    } catch (err) {
+      logger.warn({ err }, 'maintenance: startup drain failed (jobs will retry on next startup)')
+    }
+  }
 }
 
 export async function startDaemon(port: number = 8888): Promise<void> {
@@ -96,6 +119,14 @@ export async function startDaemon(port: number = 8888): Promise<void> {
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'Shutting down Engram daemon')
+    try {
+      // Requeue maintenance jobs this process still holds so a clean exit
+      // leaves only recoverable, expired leases for the next startup.
+      const released = releaseOwnedLeases(getDatabase().db, MAINTENANCE_OWNER)
+      if (released > 0) logger.info({ released }, 'maintenance: released leases on shutdown')
+    } catch (err) {
+      logger.warn({ err }, 'maintenance: lease release on shutdown failed')
+    }
     try {
       await Promise.race([
         Promise.allSettled([drainAdjudicationQueue(), drainImportanceQueue()]),

@@ -3,9 +3,16 @@
   "version": "0.1.0",
   "description": "Local MCP memory daemon for AI coding tools",
   "license": "MIT",
-  "keywords": ["mcp", "memory", "ai", "agent", "sqlite", "coding-tools"],
+  "keywords": [
+    "mcp",
+    "memory",
+    "ai",
+    "agent",
+    "sqlite",
+    "coding-tools"
+  ],
   "engines": {
-    "node": ">=20.0.0"
+    "node": ">=20.19.0"
   },
   "type": "module",
   "bin": {
@@ -22,6 +29,8 @@
   "dependencies": {
     "@hono/node-server": "^1.8.0",
     "@huggingface/transformers": "^3.8.1",
+    "age-encryption": "^0.3.0",
+    "bech32": "^2.0.0",
     "better-sqlite3": "^12.6.2",
     "commander": "^11.1.0",
     "env-paths": "^3.0.0",

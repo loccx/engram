@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
 import { readPid, isRunning, removePid } from './utils/pid.js'
+import { registerBrainCommands } from './cli/brain.js'
+import { ENGRAM_VERSION } from './version.js'
 
 const program = new Command()
 
-program.name('engram').description('Local MCP memory daemon for AI coding tools').version('0.1.0')
+program.name('engram').description('Local MCP memory daemon for AI coding tools').version(ENGRAM_VERSION)
 
 program
   .command('start')
@@ -14,7 +16,20 @@ program
   .action(async (opts: { port: string; namespace?: string }) => {
     const existingPid = readPid()
     if (existingPid && isRunning(existingPid)) {
-      console.log(`Engram is already running (PID ${existingPid})`)
+      try {
+        const res = await fetch(`http://localhost:${opts.port}/health`)
+        if (res.ok) {
+          console.log(`Engram is already running (PID ${existingPid}) on port ${opts.port}`)
+          process.exit(0)
+        }
+      } catch {
+        // requested port isn't serving; fall through to the warning below
+      }
+      console.log(
+        `Engram is already running (PID ${existingPid}), but not responding on port ${opts.port}. ` +
+          `Only one engram daemon can run at a time; --port ${opts.port} was ignored. ` +
+          `Run \`engram stop\` first if you need to restart on a different port.`
+      )
       process.exit(0)
     }
 
@@ -268,5 +283,7 @@ program
     console.log(`Done. ${success} embedded, ${failed} failed.`)
     dbm.close()
   })
+
+registerBrainCommands(program)
 
 program.parse()

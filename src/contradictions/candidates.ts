@@ -39,7 +39,9 @@ export function findContradictionCandidates(
 
   if (params.embedding && params.vectorsAvailable) {
     const distThreshold = Math.sqrt(2 * (1 - opts.minCosineSim))
-    const queryVec = JSON.stringify(Array.from(params.embedding))
+    // Binary blob matches the format used in store.ts and reembed.ts — ~3-4x more
+    // compact than JSON and avoids per-search float-array serialization overhead.
+    const queryVec = Buffer.from(params.embedding.buffer)
     try {
       const vecRows = db
         .prepare(

@@ -1,5 +1,5 @@
 import type Database from 'better-sqlite3'
-import type { Memory, SearchResult } from './types.js'
+import type { Memory, MemoryCluster, SearchResult } from './types.js'
 import { SUPERSEDES_FILTER_THRESHOLD } from '../contradictions/supersession.js'
 
 export type Tier = 'pinned' | 'hot' | 'warm' | 'cold'
@@ -25,6 +25,41 @@ export interface EnrichedSearchResult extends EnrichedMemory {
 
 export const TIER_HOT_THRESHOLD = 0.7
 export const TIER_WARM_THRESHOLD = 0.3
+
+export const CONTEXT_CONTENT_MAX_CHARS = 400
+
+/**
+ * Caps memory content length for blanket context payloads (get_context has no
+ * query to rank relevance by, so it must bound size structurally instead).
+ */
+export function truncateContent<T extends { content: string }>(
+  items: T[],
+  maxChars: number = CONTEXT_CONTENT_MAX_CHARS
+): T[] {
+  return items.map((item) =>
+    item.content.length > maxChars
+      ? { ...item, content: `${item.content.slice(0, maxChars)}…` }
+      : item
+  )
+}
+
+export const TOPIC_MEMBER_SAMPLE_SIZE = 5
+
+/**
+ * A cluster's member_ids can hold the id of nearly every memory in a project
+ * (one project-wide "everything" cluster is common). get_context callers want
+ * a topic label, not a full membership index, so cap the sample and expose
+ * the true size separately.
+ */
+export function summarizeClusters(
+  clusters: MemoryCluster[]
+): Array<Omit<MemoryCluster, 'member_ids'> & { member_ids: string[]; member_count: number }> {
+  return clusters.map(({ member_ids, ...rest }) => ({
+    ...rest,
+    member_ids: member_ids.slice(0, TOPIC_MEMBER_SAMPLE_SIZE),
+    member_count: member_ids.length,
+  }))
+}
 
 /**
  * Composite trust score in [0,1] used to bucket memories into tiers.

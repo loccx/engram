@@ -5,6 +5,7 @@ import { tools } from './mcp/tools.js'
 import { getDatabase } from './db/init.js'
 import { getMetricsTracker } from './metrics/tracker.js'
 import { logger } from './utils/logger.js'
+import { ENGRAM_VERSION } from './version.js'
 
 const startTime = Date.now()
 
@@ -26,7 +27,7 @@ export function createServer(): Hono {
         uptime: Date.now() - startTime,
         memoryCount: row.count,
         sessionCount: sessionRow.count,
-        version: '0.1.0',
+        version: ENGRAM_VERSION,
       })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -81,7 +82,7 @@ export function createServer(): Hono {
           result: {
             protocolVersion: '2024-11-05',
             capabilities: { tools: {} },
-            serverInfo: { name: 'engram', version: '0.1.0' },
+            serverInfo: { name: 'engram', version: ENGRAM_VERSION },
           },
         })
       }

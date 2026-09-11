@@ -26,7 +26,10 @@ export const SearchMemoriesSchema = z.object({
   type: MemoryType.optional(),
   project_path: z.string().optional(),
   namespace: z.string().optional(),
+  /** Legacy bound: facts with valid_from <= before (present-state supersession). */
   before: z.number().int().optional(),
+  /** Historical view: full bi-temporal validity + time-aware supersession. */
+  as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),
   use_reranker: z.boolean().optional().default(false),
   rerank_top_n: z.number().int().min(2).max(100).optional(),
@@ -35,9 +38,25 @@ export const SearchMemoriesSchema = z.object({
 export const GetContextSchema = z.object({
   project_path: z.string().optional(),
   namespace: z.string().optional(),
+  query: z.string().optional(),
   limit: z.number().int().positive().optional().default(20),
   before: z.number().int().optional(),
+  as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),
+  /** Explicit opt-in: truncate long content (~400 chars + ellipsis). Default (legacy): full content. */
+  compact_content: z.boolean().optional(),
+  /**
+   * Legacy alias accepted for backward compatibility: full content is the
+   * default again, so this flag is a no-op that still forces full content.
+   */
+  full_content: z.boolean().optional(),
+  /** Explicit opt-in: cap cluster member_ids at a 5-id sample + member_count. Default (legacy): full membership. */
+  compact_topics: z.boolean().optional(),
+  /**
+   * Legacy alias accepted for backward compatibility: full topic membership
+   * is the default again, so this flag is a no-op that still forces it.
+   */
+  full_topics: z.boolean().optional(),
 })
 
 export const SearchByEntitySchema = z.object({
@@ -45,15 +64,28 @@ export const SearchByEntitySchema = z.object({
   limit: z.number().int().positive().optional().default(10),
   project_path: z.string().optional(),
   namespace: z.string().optional(),
+  as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),
 })
 
-export const GetRelatedSchema = z.object({
-  memory_id: z.string().min(1),
-  limit: z.number().int().positive().optional().default(10),
-  depth: z.number().int().min(1).max(5).optional().default(1),
-  include_superseded: z.boolean().optional().default(false),
-})
+/**
+ * Compatibility firewall: `id` is preferred; the legacy `memory_id` alias is
+ * still accepted so clients written against the pre-rename contract keep
+ * working unchanged.
+ */
+export const GetRelatedSchema = z
+  .object({
+    id: z.string().min(1).optional(),
+    memory_id: z.string().min(1).optional().describe(
+      'Deprecated alias for id; retained for backward compatibility'
+    ),
+    limit: z.number().int().positive().optional().default(10),
+    depth: z.number().int().min(1).max(5).optional().default(1),
+    include_superseded: z.boolean().optional().default(false),
+  })
+  .refine((v) => v.id !== undefined || v.memory_id !== undefined, {
+    message: 'id (or legacy memory_id) is required',
+  })
 
 export const ConsolidateSchema = z.object({
   threshold: z.number().min(0.8).max(1.0).optional().default(0.95),
@@ -73,6 +105,7 @@ export const ListMemoriesSchema = z.object({
   project_path: z.string().optional(),
   namespace: z.string().optional(),
   include_superseded: z.boolean().optional().default(false),
+  as_of: z.number().int().optional(),
 })
 
 export const ForgetMemorySchema = z.object({
@@ -81,6 +114,7 @@ export const ForgetMemorySchema = z.object({
 
 export const GetMemorySchema = z.object({
   id: z.string().min(1),
+  as_of: z.number().int().optional(),
 })
 
 export const UpdateMemorySchema = z.object({
@@ -91,6 +125,45 @@ export const UpdateMemorySchema = z.object({
   valid_until: z.number().int().nullable().optional(),
 })
 
+export const ReviseMemorySchema = z.object({
+  id: z.string().min(1),
+  content: z.string().min(1),
+  reason: z.string().optional(),
+  type: MemoryType.optional(),
+  tags: z.array(z.string()).optional(),
+  session_id: z.string().optional(),
+  /** Explicit opt-in only; shareable is never inherited from the predecessor. */
+  shareable: z.boolean().optional(),
+})
+
+export const GetMemoryHistorySchema = z.object({
+  id: z.string().min(1),
+  as_of: z.number().int().optional(),
+  limit: z.number().int().positive().max(500).optional().default(50),
+})
+
+export const RecallMode = z.enum(['fused', 'hybrid', 'graph', 'entity'])
+
+export const RecallContextSchema = z.object({
+  query: z.string().min(1),
+  budget_chars: z.number().int().min(50),
+  mode: RecallMode.optional().default('fused'),
+  seed_id: z.string().optional(),
+  limit: z.number().int().min(1).max(100).optional().default(10),
+  min_trust: z.number().min(0).max(1).optional().default(0),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+  as_of: z.number().int().optional(),
+})
+
+export const GetMaintenanceStatusSchema = z.object({
+  limit: z.number().int().positive().max(200).optional().default(20),
+})
+
+export const RunPendingMaintenanceSchema = z.object({
+  limit: z.number().int().positive().max(100).optional().default(20),
+})
+
 export const SetPinSchema = z.object({
   id: z.string().min(1),
   pinned: z.boolean(),
@@ -99,6 +172,24 @@ export const SetPinSchema = z.object({
 export const GetStatsSchema = z.object({
   namespace: z.string().optional(),
   since: z.number().int().optional(),
+})
+
+export const ListBrainsSchema = z.object({})
+
+export const SearchBrainSchema = z.object({
+  brain: z.string().min(1),
+  query: z.string().min(1),
+  limit: z.number().int().positive().optional().default(10),
+})
+
+export const GetBrainMemorySchema = z.object({
+  brain: z.string().min(1),
+  id: z.string().min(1),
+})
+
+export const MarkShareableSchema = z.object({
+  id: z.string().min(1),
+  shareable: z.boolean().optional().default(true),
 })
 
 export const SCHEMAS: Record<string, z.ZodType> = {
@@ -113,6 +204,15 @@ export const SCHEMAS: Record<string, z.ZodType> = {
   forget_memory: ForgetMemorySchema,
   get_memory: GetMemorySchema,
   update_memory: UpdateMemorySchema,
+  revise_memory: ReviseMemorySchema,
+  get_memory_history: GetMemoryHistorySchema,
+  recall_context: RecallContextSchema,
+  get_maintenance_status: GetMaintenanceStatusSchema,
+  run_pending_maintenance: RunPendingMaintenanceSchema,
   set_pin: SetPinSchema,
   get_stats: GetStatsSchema,
+  list_brains: ListBrainsSchema,
+  search_brain: SearchBrainSchema,
+  get_brain_memory: GetBrainMemorySchema,
+  mark_shareable: MarkShareableSchema,
 }

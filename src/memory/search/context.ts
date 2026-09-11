@@ -1,6 +1,10 @@
 import type Database from 'better-sqlite3'
 import type { Memory, MemoryCluster } from '../types.js'
-import { notSupersededClause } from '../../contradictions/supersession.js'
+import {
+  notSupersededClause,
+  notSupersededAtClause,
+  validityAtClause,
+} from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
 
 interface ClusterRow {
@@ -43,32 +47,49 @@ export function getContext(
   stmts: ContextStatements,
   project_path: string,
   limit: number = 20,
-  options: { include_superseded?: boolean; before?: number } = {}
+  options: { include_superseded?: boolean; before?: number; as_of?: number } = {}
 ): Memory[] {
   const now = Date.now()
   const thirtyDaysAgo = now - THIRTY_DAYS_MS
 
-  if (!options.include_superseded && options.before === undefined) {
+  // Fast path: default (latest-view) semantics are untouched.
+  if (!options.include_superseded && options.before === undefined && options.as_of === undefined) {
     const rows = stmts.default.all(project_path, thirtyDaysAgo, limit) as MemoryRow[]
     return rows.map(rowToMemory)
   }
 
-  const supersededFilter = options.include_superseded
-    ? ''
-    : ` AND ${notSupersededClause('memories.id')}`
-  const beforeFilter = options.before !== undefined ? ' AND valid_from <= ?' : ''
   const params: unknown[] = [project_path]
-  if (options.before !== undefined) params.push(options.before)
+  let timeFilter = ''
+  if (options.as_of !== undefined) {
+    timeFilter = ` AND ${validityAtClause('memories', '?')}`
+    params.push(options.as_of, options.as_of)
+  } else if (options.before !== undefined) {
+    timeFilter = ' AND valid_from <= ?'
+    params.push(options.before)
+  }
+
+  // as_of uses time-aware supersession; before keeps the legacy present-state
+  // filter; include_superseded disables filtering entirely.
+  let supersededFilter = ''
+  if (!options.include_superseded) {
+    if (options.as_of !== undefined) {
+      supersededFilter = ` AND ${notSupersededAtClause('memories.id', '?')}`
+      params.push(options.as_of)
+    } else {
+      supersededFilter = ` AND ${notSupersededClause('memories.id')}`
+    }
+  }
   params.push(thirtyDaysAgo, limit)
 
   const rows = db
     .prepare(
       `SELECT * FROM memories
-       WHERE COALESCE(namespace, project_path) = ?${supersededFilter}${beforeFilter}
+       WHERE COALESCE(namespace, project_path) = ?${timeFilter}${supersededFilter}
         ORDER BY
           CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
           (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
-          created_at DESC
+          created_at DESC,
+          id DESC
         LIMIT ?`
     )
     .all(...params) as MemoryRow[]

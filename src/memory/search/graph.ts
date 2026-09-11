@@ -1,6 +1,10 @@
 import type Database from 'better-sqlite3'
 import type { Memory } from '../types.js'
-import { notSupersededClause } from '../../contradictions/supersession.js'
+import {
+  notSupersededClause,
+  notSupersededAtClause,
+  validityAtClause,
+} from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
 
 export type GraphResult = Memory & { similarity: number; link_type: string; hops: number }
@@ -15,11 +19,24 @@ export function traverseGraph(
   startId: string,
   depth: number = 2,
   limit: number = 20,
-  options: { include_superseded?: boolean } = {}
+  options: { include_superseded?: boolean; as_of?: number } = {}
 ): GraphResult[] {
-  const supersededFilter = options.include_superseded
-    ? ''
-    : ` AND ${notSupersededClause('m.id')}`
+  const params: unknown[] = [startId, startId, depth, startId]
+  let timeFilter = ''
+  if (options.as_of !== undefined) {
+    timeFilter = ` AND ${validityAtClause('m', '?')}`
+    params.push(options.as_of, options.as_of)
+  }
+  let supersededFilter = ''
+  if (!options.include_superseded) {
+    if (options.as_of !== undefined) {
+      supersededFilter = ` AND ${notSupersededAtClause('m.id', '?')}`
+      params.push(options.as_of)
+    } else {
+      supersededFilter = ` AND ${notSupersededClause('m.id')}`
+    }
+  }
+  params.push(limit)
 
   const rows = db
     .prepare(
@@ -41,11 +58,11 @@ export function traverseGraph(
          FROM traverse WHERE id != ?
        ) sub
        JOIN memories m ON m.id = sub.id
-       WHERE sub.rn = 1${supersededFilter}
+       WHERE sub.rn = 1${timeFilter}${supersededFilter}
        ORDER BY sub.hops ASC, sub.similarity DESC
        LIMIT ?`
     )
-    .all(startId, startId, depth, startId, limit) as Array<
+    .all(...params) as Array<
       MemoryRow & { similarity: number; link_type: string; hops: number }
     >
 
@@ -66,7 +83,7 @@ export function pprSearch(
   db: Database.Database,
   seedIds: string[],
   limit: number = 20,
-  options: { include_superseded?: boolean } = {}
+  options: { include_superseded?: boolean; as_of?: number } = {}
 ): GraphResult[] {
   const uniqueSeeds = [...new Set(seedIds.filter((s) => s.length > 0))]
   if (uniqueSeeds.length === 0) return []
@@ -166,17 +183,35 @@ export function pprSearch(
   }
 
   let candidates = reachableIds.filter((id) => !uniqueSeeds.includes(id))
-  if (!options.include_superseded && candidates.length > 0) {
+  if (candidates.length > 0) {
     const placeholders = candidates.map(() => '?').join(',')
+    const filterParams: unknown[] = [...candidates]
+    let validityFilter =
+      options.as_of !== undefined ? ` AND ${validityAtClause('memories', '?')}` : ''
+    if (options.as_of !== undefined) filterParams.push(options.as_of, options.as_of)
+    let supersededFilter = ''
+    if (!options.include_superseded) {
+      if (options.as_of !== undefined) {
+        supersededFilter = ` AND ${notSupersededAtClause('memories.id', '?')}`
+        filterParams.push(options.as_of)
+      } else {
+        supersededFilter = ` AND ${notSupersededClause('memories.id')}`
+      }
+    }
     const validRows = db
-      .prepare(`SELECT id FROM memories WHERE id IN (${placeholders}) AND ${notSupersededClause('id')}`)
-      .all(...candidates) as Array<{ id: string }>
+      .prepare(
+        `SELECT id FROM memories WHERE id IN (${placeholders})${validityFilter}${supersededFilter}`
+      )
+      .all(...filterParams) as Array<{ id: string }>
     const valid = new Set(validRows.map((r) => r.id))
     candidates = candidates.filter((id) => valid.has(id))
   }
 
   const rankedIds = candidates
-    .sort((a, b) => (score.get(b) ?? 0) - (score.get(a) ?? 0))
+    .sort(
+      (a, b) =>
+        (score.get(b) ?? 0) - (score.get(a) ?? 0) || (a < b ? -1 : a > b ? 1 : 0)
+    )
     .slice(0, limit)
   if (rankedIds.length === 0) return []
 

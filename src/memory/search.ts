@@ -56,7 +56,7 @@ export class MemorySearch {
   getContext(
     project_path: string,
     limit: number = 20,
-    options: { include_superseded?: boolean; before?: number } = {}
+    options: { include_superseded?: boolean; before?: number; as_of?: number } = {}
   ): Memory[] {
     return getContext(this.db, this.contextStmts, project_path, limit, options)
   }
@@ -69,7 +69,7 @@ export class MemorySearch {
     startId: string,
     depth: number = 2,
     limit: number = 20,
-    options: { include_superseded?: boolean } = {}
+    options: { include_superseded?: boolean; as_of?: number } = {}
   ): GraphResult[] {
     return traverseGraph(this.db, startId, depth, limit, options)
   }
@@ -77,7 +77,7 @@ export class MemorySearch {
   pprSearch(
     seedIds: string[],
     limit: number = 20,
-    options: { include_superseded?: boolean } = {}
+    options: { include_superseded?: boolean; as_of?: number } = {}
   ): GraphResult[] {
     return pprSearch(this.db, seedIds, limit, options)
   }

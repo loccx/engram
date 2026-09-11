@@ -56,6 +56,22 @@ describe('migration runner', () => {
     expect(columnExists(db, 'memories', 'embedding_model')).toBe(true)
     expect(columnExists(db, 'memory_links', 'confidence')).toBe(true)
 
+    // 008: append-only revision/provenance foundation.
+    expect(columnExists(db, 'memories', 'origin')).toBe(true)
+    expect(columnExists(db, 'memory_links', 'revision')).toBe(true)
+    const eventTables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_events'")
+      .all()
+    expect(eventTables.length).toBe(1)
+    const origin = db.prepare('SELECT COUNT(*) AS n FROM memories WHERE origin = ?').get('legacy') as { n: number }
+    expect(origin.n).toBeGreaterThanOrEqual(0)
+
+    // 009: durable maintenance_jobs queue.
+    const jobTables = db
+      .prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_jobs'")
+      .all()
+    expect(jobTables.length).toBe(1)
+
     const auditRows = db.prepare('SELECT version, description FROM schema_migrations ORDER BY version').all()
     expect(auditRows).toEqual(
       migrations.map((m) => ({ version: m.version, description: m.description }))

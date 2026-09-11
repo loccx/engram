@@ -2,7 +2,11 @@ import type Database from 'better-sqlite3'
 import type { Memory, SearchResult, MemoryType } from '../types.js'
 import { getEmbedding } from '../../embeddings/pipeline.js'
 import { rerank as rerankCrossEncoder } from '../../embeddings/reranker.js'
-import { notSupersededClause } from '../../contradictions/supersession.js'
+import {
+  notSupersededClause,
+  notSupersededAtClause,
+  validityAtClause,
+} from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
 import {
   ebbinghaus,
@@ -15,10 +19,29 @@ export interface SearchOptions {
   project_path?: string
   limit?: number
   type?: MemoryType
+  /**
+   * Legacy temporal bound (only valid_from <= before, present-state
+   * supersession). Kept for backward compatibility.
+   */
   before?: number
+  /**
+   * Historical view: full bi-temporal predicate (valid_from <= t AND
+   * (valid_until IS NULL OR valid_until >= t)) plus time-aware supersession
+   * (only supersedes links already judged at t). Takes precedence over
+   * `before` when both are set.
+   */
+  as_of?: number
   include_superseded?: boolean
   use_reranker?: boolean
   rerank_top_n?: number
+  /**
+   * Read-only mode: do not stamp last_accessed/access_count on results.
+   * Default true preserves existing behavior; recall_context passes false
+   * so repeated calls are deterministic and side-effect free.
+   */
+  touch?: boolean
+  /** Clock injection seam for deterministic scoring (defaults to Date.now()). */
+  now?: number
 }
 
 export const DEFAULT_RERANK_TOP_N = 20
@@ -32,7 +55,7 @@ export async function hybridSearch(
 ): Promise<SearchResult[]> {
   const limit = options.limit ?? 10
   const overFetch = Math.max(limit * 5, 50)
-  const now = Date.now()
+  const now = options.now ?? Date.now()
 
   const ftsRows = ftsSearch(db, query, options, overFetch)
   const queryEmbed = vectorsAvailable ? await getEmbedding(query, 'query') : null
@@ -107,7 +130,7 @@ export async function hybridSearch(
     }
   })
 
-  let ranked = results.sort((a, b) => b.score - a.score)
+  let ranked = results.sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
 
   if (options.use_reranker && ranked.length > 1) {
     const topN = options.rerank_top_n ?? DEFAULT_RERANK_TOP_N
@@ -138,8 +161,9 @@ export async function hybridSearch(
   const top = ranked.slice(0, limit)
 
   // Stamp last_accessed on returned results — Ebbinghaus "spacing effect":
-  // retrieved memories strengthen instead of decay.
-  if (top.length > 0) {
+  // retrieved memories strengthen instead of decay. Skipped in touch:false
+  // read-only mode so callers get repeatable, side-effect-free rankings.
+  if (options.touch !== false && top.length > 0) {
     const ids = top.map((r) => r.id)
     const placeholders = ids.map(() => '?').join(',')
     db.prepare(
@@ -191,12 +215,20 @@ function ftsExec(
     conditions.push('m.type = ?')
     values.push(options.type)
   }
-  if (options.before !== undefined) {
+  if (options.as_of !== undefined) {
+    conditions.push(validityAtClause('m', '?'))
+    values.push(options.as_of, options.as_of)
+  } else if (options.before !== undefined) {
     conditions.push('m.valid_from <= ?')
     values.push(options.before)
   }
   if (!options.include_superseded) {
-    conditions.push(notSupersededClause('m.id'))
+    if (options.as_of !== undefined) {
+      conditions.push(notSupersededAtClause('m.id', '?'))
+      values.push(options.as_of)
+    } else {
+      conditions.push(notSupersededClause('m.id'))
+    }
   }
   values.push(limit)
 
@@ -244,12 +276,20 @@ export function vectorSearch(
     sql += ' AND m.type = ?'
     values.push(options.type)
   }
-  if (options.before !== undefined) {
+  if (options.as_of !== undefined) {
+    sql += ` AND ${validityAtClause('m', '?')}`
+    values.push(options.as_of, options.as_of)
+  } else if (options.before !== undefined) {
     sql += ' AND m.valid_from <= ?'
     values.push(options.before)
   }
   if (!options.include_superseded) {
-    sql += ` AND ${notSupersededClause('m.id')}`
+    if (options.as_of !== undefined) {
+      sql += ` AND ${notSupersededAtClause('m.id', '?')}`
+      values.push(options.as_of)
+    } else {
+      sql += ` AND ${notSupersededClause('m.id')}`
+    }
   }
   sql += ' ORDER BY knn.distance'
 

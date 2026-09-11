@@ -24,6 +24,8 @@ export interface MemoryRow {
   embed_state?: string | null
   superseded_by?: string | null
   namespace_backfilled?: number | null
+  origin?: string | null
+  shareable?: number | null
 }
 
 export function rowToMemory(row: MemoryRow): Memory {
@@ -50,6 +52,7 @@ export function rowToMemory(row: MemoryRow): Memory {
     id: row.id,
     session_id: row.session_id,
     project_path: row.project_path,
+    namespace: row.namespace ?? null,
     content: row.content,
     type: row.type as MemoryType,
     importance: row.importance,
@@ -77,6 +80,12 @@ export function rowToMemory(row: MemoryRow): Memory {
   }
   if (row.pinned != null) {
     ;(memory as Memory & { pinned?: boolean }).pinned = row.pinned === 1
+  }
+  if (row.origin != null) {
+    memory.origin = row.origin
+  }
+  if (row.shareable != null) {
+    ;(memory as Memory & { shareable?: boolean }).shareable = row.shareable === 1
   }
 
   return memory
