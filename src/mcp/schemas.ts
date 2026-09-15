@@ -49,7 +49,8 @@ export const GetContextSchema = z.object({
   project_path: z.string().optional(),
   namespace: z.string().optional(),
   query: z.string().optional(),
-  limit: z.number().int().positive().optional().default(20),
+  /** Default 8: semantic top-8 is the lean default; callers pass limit for more. */
+  limit: z.number().int().positive().optional().default(8),
   before: z.number().int().optional(),
   as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),

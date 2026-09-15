@@ -132,7 +132,7 @@ export const tools = [
           type: 'string',
           description: 'Scope results to this task/topic via hybrid search and receive full content. Omitting it degrades the response to a compact roster (previews only).',
         },
-        limit: { type: 'number', description: 'Max memories to return (default: 20)' },
+        limit: { type: 'number', description: 'Max memories to return (default: 8; semantic top-8 is the lean default)' },
         scope: {
           type: 'string',
           enum: ['leaf', 'funnel'],

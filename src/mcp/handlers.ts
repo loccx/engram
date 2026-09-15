@@ -53,7 +53,7 @@ export interface RequestContext {
 }
 
 function ok(data: unknown): ToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify(data, null, 2) }] }
+  return { content: [{ type: 'text', text: JSON.stringify(data) }] }
 }
 
 function err(message: string): ToolResult {
@@ -343,7 +343,7 @@ export async function handleTool(
 
       case 'get_context': {
         const project_path = await resolveProjectPath(args, ctx)
-        const limit = typeof args.limit === 'number' ? args.limit : 20
+        const limit = typeof args.limit === 'number' ? args.limit : 8
         const query = typeof args.query === 'string' ? args.query.trim() : ''
         const asOf = asOfFromArgs(args)
         // Query path: full content by default; compact_content truncates and
