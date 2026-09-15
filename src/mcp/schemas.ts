@@ -43,18 +43,19 @@ export const GetContextSchema = z.object({
   before: z.number().int().optional(),
   as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),
-  /** Explicit opt-in: truncate long content (~400 chars + ellipsis). Default (legacy): full content. */
+  /** Query path only: truncate long content (~400 chars + ellipsis). Default (legacy): full content. */
   compact_content: z.boolean().optional(),
   /**
-   * Legacy alias accepted for backward compatibility: full content is the
-   * default again, so this flag is a no-op that still forces full content.
+   * Legacy alias accepted for backward compatibility: on the query path this
+   * still forces full content. The blanket (no-query) path ignores it — it
+   * serves a compact roster regardless.
    */
   full_content: z.boolean().optional(),
-  /** Explicit opt-in: cap cluster member_ids at a 5-id sample + member_count. Default (legacy): full membership. */
+  /** No-op: topics are summarized by default on both paths. Accepted for backward compatibility. */
   compact_topics: z.boolean().optional(),
   /**
-   * Legacy alias accepted for backward compatibility: full topic membership
-   * is the default again, so this flag is a no-op that still forces it.
+   * Forces full cluster member_ids on both paths. Topics are summarized by
+   * default otherwise.
    */
   full_topics: z.boolean().optional(),
 })

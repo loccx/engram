@@ -28,12 +28,22 @@ describe('get_context handler', () => {
     await store('Redis is great for caching session data', { importance: 0.9 })
     await store('SQLite WAL mode enables concurrent reads', { importance: 0.5 })
 
-    const result = parse<{ memories: Array<{ content: string; importance: number }> }>(
+    const result = parse<{
+      memories: Array<{
+        content?: string
+        preview: string
+        importance: number
+        id: string
+      }>
+    }>(
       await handleTool('get_context', { project_path: TEST_PROJECT })
     )
 
     expect(result.memories.length).toBe(2)
     expect(result.memories[0].importance).toBeGreaterThanOrEqual(result.memories[1].importance)
+    // Roster contract: no full content on the blanket path.
+    expect(result.memories[0].content).toBeUndefined()
+    expect(result.memories[0].preview).toContain('Redis')
   })
 
   it('includes a digest of pinned facts in both the query and no-query paths', async () => {
@@ -92,22 +102,24 @@ describe('get_context handler', () => {
     expect(result.digest).toContain('Deploys must run from the release branch')
   })
 
-  it('truncates long content in the blanket (no-query) path only when compact_content opts in', async () => {
-    const long = 'x'.repeat(1000)
+  it('serves only roster previews on the blanket path, even with full_content set', async () => {
+    const long = 'Rotation policy ' + 'x'.repeat(1000)
     await store(long)
 
-    // Legacy default: full content.
-    const full = parse<{ memories: Array<{ content: string }> }>(
-      await handleTool('get_context', { project_path: TEST_PROJECT })
+    // Blanket path never serves full content — compact_content/full_content
+    // are query-path flags.
+    const roster = parse<{ memories: Array<{ content?: string; preview: string }> }>(
+      await handleTool('get_context', { project_path: TEST_PROJECT, full_content: true })
     )
-    expect(full.memories[0].content).toBe(long)
+    expect(roster.memories[0].content).toBeUndefined()
+    expect(roster.memories[0].preview.length).toBeLessThanOrEqual(161)
+    expect(roster.memories[0].preview.endsWith('…')).toBe(true)
 
-    // Explicit opt-in: truncated.
-    const compact = parse<{ memories: Array<{ content: string }> }>(
-      await handleTool('get_context', { project_path: TEST_PROJECT, compact_content: true })
+    // Query path honors full content by default.
+    const scoped = parse<{ memories: Array<{ content: string }> }>(
+      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'rotation policy' })
     )
-    expect(compact.memories[0].content.length).toBeLessThan(1000)
-    expect(compact.memories[0].content.endsWith('…')).toBe(true)
+    expect(scoped.memories[0].content).toBe(long)
   })
 
   it('ranks by relevance when a query is given, unlike the importance-only blanket path', async () => {
@@ -115,10 +127,10 @@ describe('get_context handler', () => {
     await store('Kubernetes pods restart on OOM kill', { importance: 0.9 })
     await store('Redis is great for caching session data', { importance: 0.1 })
 
-    const blanket = parse<{ memories: Array<{ content: string }> }>(
+    const blanket = parse<{ memories: Array<{ preview: string }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT })
     )
-    expect(blanket.memories[0].content).toContain('Kubernetes')
+    expect(blanket.memories[0].preview).toContain('Kubernetes')
 
     const scoped = parse<{ memories: Array<{ content: string }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT, query: 'redis caching' })
@@ -135,17 +147,24 @@ describe('get_context handler', () => {
       )
       .run(TEST_PROJECT, JSON.stringify(memberIds), 'a big topic', Date.now(), Date.now())
 
-    // Legacy default: full membership.
-    const full = parse<{ topics: Array<{ member_ids: string[] }> }>(
+    // Blanket path: topics are always summarized (5-id sample + count).
+    const blanket = parse<{ topics: Array<{ member_ids: string[]; member_count?: number }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT })
     )
-    expect(full.topics.length).toBe(1)
-    expect(full.topics[0].member_ids.length).toBe(700)
+    expect(blanket.topics.length).toBe(1)
+    expect(blanket.topics[0].member_ids.length).toBeLessThan(700)
 
-    // Explicit opt-in: capped sample + member_count.
+    // Explicit opt-in: full_topics forces complete membership.
+    const expanded = parse<{ topics: Array<{ member_ids: string[] }> }>(
+      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'topic', full_topics: true })
+    )
+    expect(expanded.topics[0].member_ids.length).toBe(700)
+
+    // compact_topics is accepted as a no-op for backward compatibility.
+
     const compact = parse<{
       topics: Array<{ member_ids: string[]; member_count: number }>
-    }>(await handleTool('get_context', { project_path: TEST_PROJECT, compact_topics: true }))
+    }>(await handleTool('get_context', { project_path: TEST_PROJECT, query: 'topic', compact_topics: true }))
     expect(compact.topics[0].member_count).toBe(700)
     expect(compact.topics[0].member_ids.length).toBeLessThan(700)
   })

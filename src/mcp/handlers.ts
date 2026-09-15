@@ -31,6 +31,7 @@ import type {
 } from '../memory/types.js'
 import { SCHEMAS } from './schemas.js'
 import { listLocalBrains, searchBrain, getBrainMemory, markShareable } from '../brains/mcp.js'
+import type { Memory } from '../memory/types.js'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }> }
 
@@ -53,6 +54,28 @@ function ok(data: unknown): ToolResult {
 
 function err(message: string): ToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }] }
+}
+
+const ROSTER_PREVIEW_CHARS = 160
+
+/**
+ * Roster entry for the blanket (no-query) get_context form. The blanket form
+ * never serves full content — that requires a query (hybrid search) or
+ * get_memory — so accidental no-query calls stay small.
+ */
+function toRosterEntry(m: Memory) {
+  return {
+    id: m.id,
+    type: m.type,
+    importance: m.importance,
+    created_at: m.created_at,
+    pinned: m.pinned === true,
+    tags: m.tags,
+    preview:
+      m.content.length > ROSTER_PREVIEW_CHARS
+        ? `${m.content.slice(0, ROSTER_PREVIEW_CHARS)}…`
+        : m.content,
+  }
 }
 
 let _services: Services | null = null
@@ -179,19 +202,20 @@ export async function handleTool(
         const limit = typeof args.limit === 'number' ? args.limit : 20
         const query = typeof args.query === 'string' ? args.query.trim() : ''
         const asOf = asOfFromArgs(args)
-        // Strict legacy compatibility: callers with no flags get FULL content
-        // and full cluster member_ids, exactly as before the compact flags
-        // existed. Compact payloads are an explicit opt-in; full_content /
-        // full_topics are accepted as aliases of the default (they were
-        // briefly opt-ins, so honoring them never breaks a caller).
+        // Query path: full content by default; compact_content truncates and
+        // full_content is honored as an alias for backward compatibility.
+        // The blanket (no-query) path ignores both — it serves a compact
+        // roster regardless.
         const compactContent = args.compact_content === true
         const legacyFullRequested = args.full_content === true
         // Cluster summaries are present-state derived views, so historical
         // context omits them rather than leaking knowledge from after as_of.
         const baseClusters = asOf === undefined ? search.getClusters(project_path) : []
-        const clusters = args.compact_topics === true && args.full_topics !== true
-          ? summarizeClusters(baseClusters)
-          : baseClusters
+        // Topics are summarized (5-id sample + member_count) on both paths by
+        // default — a project-wide cluster can carry thousands of member_ids.
+        // full_topics: true is the explicit opt-out that forces full membership.
+        const clusters =
+          args.full_topics === true ? baseClusters : summarizeClusters(baseClusters)
         const historicalLimitations = asOf === undefined
           ? {}
           : { as_of_limitations: { digest_omitted: true, topics_omitted: true } }
@@ -227,12 +251,18 @@ export async function handleTool(
           as_of: asOf,
           include_superseded: args.include_superseded === true,
         })
+        // Contract change ("require query always"): the blanket form is a
+        // compact roster, not a content dump. Full content requires a query
+        // or get_memory, so accidental no-query calls stay small. Topics are
+        // always summarized here to keep cluster membership out of the dump.
         metrics.recordContextLoad(memories, project_path)
         return ok({
           namespace: project_path,
           digest: asOf === undefined ? getDigest(db, project_path) : null,
-          memories: wrapContent(enrichMemories(db, memories)),
+          memories: memories.map(toRosterEntry),
           topics: clusters,
+          hint:
+            'Blanket context (no query) returns a compact roster only; preview is capped at 160 chars. Pass query to scope retrieval via hybrid search and receive full content, or fetch a single memory with get_memory.',
           ...historicalLimitations,
         })
       }

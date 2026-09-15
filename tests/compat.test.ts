@@ -79,41 +79,50 @@ describe('compat: get_related legacy memory_id alias', () => {
   })
 })
 
-describe('compat: get_context legacy full defaults + compact opt-ins', () => {
+describe('compat: get_context roster blanket + query-path full defaults', () => {
   beforeEach(() => {
     resetDatabase()
     resetServicesForTests()
     getDatabase(':memory:')
   })
 
-  it('returns FULL untruncated content by default (legacy contract)', async () => {
-    const long = 'x'.repeat(1000)
-    await store(long)
-    const result = parse<{ memories: Array<{ content: string }> }>(
+  it('blanket (no-query) path serves only roster previews, never full content', async () => {
+    await store('x'.repeat(1000))
+    const result = parse<{ memories: Array<{ content?: string; preview: string }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT })
     )
-    expect(result.memories[0].content).toBe(long)
+    expect(result.memories[0].content).toBeUndefined()
+    expect(result.memories[0].preview.length).toBeLessThanOrEqual(161)
   })
 
-  it('compact_content opt-in truncates long content', async () => {
-    await store('y'.repeat(1000))
-    const result = parse<{ memories: Array<{ content: string }> }>(
-      await handleTool('get_context', { project_path: TEST_PROJECT, compact_content: true })
-    )
-    expect(result.memories[0].content.length).toBeLessThan(1000)
-    expect(result.memories[0].content.endsWith('…')).toBe(true)
-  })
-
-  it('legacy full_content flag keeps forcing full content (backward compat)', async () => {
-    const long = 'z'.repeat(1000)
-    await store(long)
-    const result = parse<{ memories: Array<{ content: string }> }>(
+  it('full_content flag does not re-enable full content on the blanket path', async () => {
+    await store('z'.repeat(1000))
+    const result = parse<{ memories: Array<{ content?: string; preview: string }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT, full_content: true })
     )
-    expect(result.memories[0].content).toBe(long)
+    expect(result.memories[0].content).toBeUndefined()
+    expect(result.memories[0].preview.length).toBeLessThanOrEqual(161)
   })
 
-  it('returns FULL cluster member_ids by default (legacy contract)', async () => {
+  it('query path: full content by default, compact_content truncates', async () => {
+    await store('Memcached eviction LRU quirks ' + 'y'.repeat(1000))
+    const full = parse<{ memories: Array<{ content: string }> }>(
+      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'memcached eviction' })
+    )
+    expect(full.memories[0].content).toBe('Memcached eviction LRU quirks ' + 'y'.repeat(1000))
+
+    const compact = parse<{ memories: Array<{ content: string }> }>(
+      await handleTool('get_context', {
+        project_path: TEST_PROJECT,
+        query: 'memcached eviction',
+        compact_content: true,
+      })
+    )
+    expect(compact.memories[0].content.length).toBeLessThan(1000)
+    expect(compact.memories[0].content.endsWith('…')).toBe(true)
+  })
+
+  it('blanket path summarizes topics by default; full_topics opts back in', async () => {
     const memberIds = Array.from({ length: 300 }, (_, i) => `mem-${i}`)
     getDatabase().db
       .prepare(
@@ -122,41 +131,38 @@ describe('compat: get_context legacy full defaults + compact opt-ins', () => {
       )
       .run(TEST_PROJECT, JSON.stringify(memberIds), 'big topic', Date.now(), Date.now())
 
-    const result = parse<{ topics: Array<{ member_ids: string[] }> }>(
+    const blanket = parse<{ topics: Array<{ member_ids: string[]; member_count: number }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT })
     )
-    expect(result.topics[0].member_ids.length).toBe(300)
-  })
+    expect(blanket.topics[0].member_count).toBe(300)
+    expect(blanket.topics[0].member_ids.length).toBeLessThan(300)
 
-  it('compact_topics opt-in caps membership to a 5-id sample + member_count', async () => {
-    const memberIds = Array.from({ length: 300 }, (_, i) => `mem-${i}`)
-    getDatabase().db
-      .prepare(
-        `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
-         VALUES (?, ?, ?, 1, ?, ?)`
-      )
-      .run(TEST_PROJECT, JSON.stringify(memberIds), 'big topic', Date.now(), Date.now())
-
-    const compact = parse<{ topics: Array<{ member_ids: string[]; member_count: number }> }>(
-      await handleTool('get_context', { project_path: TEST_PROJECT, compact_topics: true })
-    )
-    expect(compact.topics[0].member_count).toBe(300)
-    expect(compact.topics[0].member_ids.length).toBeLessThan(300)
-  })
-
-  it('legacy full_topics flag still forces complete membership (backward compat)', async () => {
-    const memberIds = Array.from({ length: 300 }, (_, i) => `mem-${i}`)
-    getDatabase().db
-      .prepare(
-        `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
-         VALUES (?, ?, ?, 1, ?, ?)`
-      )
-      .run(TEST_PROJECT, JSON.stringify(memberIds), 'big topic', Date.now(), Date.now())
-
-    const full = parse<{ topics: Array<{ member_ids: string[] }> }>(
+    // full_topics opts back into complete membership on the blanket path.
+    const forced = parse<{ topics: Array<{ member_ids: string[] }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT, full_topics: true })
     )
-    expect(full.topics[0].member_ids.length).toBe(300)
+    expect(forced.topics[0].member_ids.length).toBe(300)
+  })
+
+  it('query path: topics summarized by default, full_topics forces membership', async () => {
+    const memberIds = Array.from({ length: 300 }, (_, i) => `mem-${i}`)
+    getDatabase().db
+      .prepare(
+        `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
+         VALUES (?, ?, ?, 1, ?, ?)`
+      )
+      .run(TEST_PROJECT, JSON.stringify(memberIds), 'big topic', Date.now(), Date.now())
+
+    const summarized = parse<{ topics: Array<{ member_ids: string[]; member_count: number }> }>(
+      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'topic' })
+    )
+    expect(summarized.topics[0].member_count).toBe(300)
+    expect(summarized.topics[0].member_ids.length).toBeLessThan(300)
+
+    const expanded = parse<{ topics: Array<{ member_ids: string[] }> }>(
+      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'topic', full_topics: true })
+    )
+    expect(expanded.topics[0].member_ids.length).toBe(300)
   })
 })
 

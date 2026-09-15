@@ -117,7 +117,7 @@ export const tools = [
   {
     name: 'get_context',
     description:
-      'Get memories for the current namespace, scoped by task when a query is given (routes through the same hybrid FTS5+vector search as search_memories). Without a query, falls back to a blanket set ranked by importance × Ebbinghaus retention. Default: full (untruncated) content and full cluster member_ids. Pass compact_content=true / compact_topics=true to explicitly opt into truncated content and a capped 5-id topic sample. Hides superseded memories by default.',
+      'Get memories for the current namespace. With a query, scopes retrieval through hybrid FTS5+vector search (same engine as search_memories) and returns full content. Without a query, returns a compact roster only — id, type, importance, tags, and a ~160-char preview; full content requires a query or get_memory. Hides superseded memories by default.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -125,7 +125,7 @@ export const tools = [
         namespace: namespaceField,
         query: {
           type: 'string',
-          description: 'Scope results to this task/topic via hybrid search instead of returning a blanket importance-ranked dump.',
+          description: 'Scope results to this task/topic via hybrid search and receive full content. Omitting it degrades the response to a compact roster (previews only).',
         },
         limit: { type: 'number', description: 'Max memories to return (default: 20)' },
         before: {
@@ -140,22 +140,22 @@ export const tools = [
         compact_content: {
           type: 'boolean',
           description:
-            'Opt-in: truncate long content to ~400 chars + ellipsis. Without this flag, full content is returned (legacy default preserved).',
+            'Query path only: truncate long content to ~400 chars + ellipsis. Without this flag, the query path returns full content. Ignored on the blanket (no-query) path, which is always a roster.',
         },
         compact_topics: {
           type: 'boolean',
           description:
-            'Opt-in: cap cluster member_ids at a 5-id sample and add member_count. Without this flag, full membership is returned (legacy default preserved).',
+            'No-op: topics are summarized to a 5-id sample + member_count by default on both paths. Accepted for backward compatibility.',
         },
         full_content: {
           type: 'boolean',
           description:
-            'Legacy alias accepted for backward compatibility with the brief compact-era opt-in. Full content is the default again; setting this still guarantees untruncated content.',
+            'Legacy alias: keeps the query path on untruncated content. Has no effect on the blanket (no-query) path, which never serves full content.',
         },
         full_topics: {
           type: 'boolean',
           description:
-            'Legacy alias accepted for backward compatibility with the brief compact-era opt-in. Full topic membership is the default again; setting this still guarantees complete member_ids.',
+            'Forces complete cluster member_ids on both paths. Topics are summarized by default otherwise.',
         },
         include_superseded: includeSupersededField,
       },
