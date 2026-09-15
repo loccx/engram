@@ -223,7 +223,7 @@ function ftsExec(
     conditions.push(
       '(COALESCE(m.namespace, m.project_path) = ?' +
         " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'" +
-        " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'"
+        " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\')"
     )
     values.push(ns, `${esc}/%`, `${esc}//%`)
   } else if (options.project_path) {

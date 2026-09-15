@@ -12,6 +12,10 @@
  *   state and writes a summary to the job row's result_json. No handler ever
  *   writes/deletes canonical memories, promotes procedures, writes
  *   contradiction links, or mutates digests/clusters/importance.
+ * - NAV DIGESTS (the one sanctioned exception): a 'digest' job whose
+ *   target_key starts with 'nav:' calls refreshNavDigest, which writes ONLY
+ *   namespace_nodes.digest (thin navigation metadata) — never canonical
+ *   memories, project_digests, memory_clusters, or memory_links.
  *
  * Existing in-memory BackgroundJobQueues (adjudication/importance) are
  * preserved and independent; this layer runs beside them, not instead of.
@@ -19,6 +23,8 @@
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { logger } from '../utils/logger.js'
+import { ancestors } from '../namespace/tree.js'
+import { refreshNavDigest } from '../memory/nav.js'
 
 export type MaintenanceJobType = 'digest' | 'cluster' | 'importance' | 'adjudication'
 export type MaintenanceStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead'
@@ -210,13 +216,28 @@ export function releaseOwnedLeases(db: Database.Database, owner: string = MAINTE
 }
 
 /**
- * Shadow handlers. Each inspects state and returns a summary; none of them
- * writes to memories, project_digests, memory_clusters, or memory_links.
- * result_json records what a real (future, opt-in) handler would target.
+ * Job handlers. Non-nav jobs remain shadow-only: they inspect state and
+ * return a summary without writing memories, project_digests,
+ * memory_clusters, or memory_links. The nav: digest branch is the sanctioned
+ * exception — it writes only namespace_nodes.digest (see the file header).
  */
-function shadowRun(db: Database.Database, job: MaintenanceJobRow): unknown {
+async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise<unknown> {
   switch (job.job_type) {
     case 'digest': {
+      if (job.target_key.startsWith('nav:')) {
+        // Nav-layer digest: writes only namespace_nodes.digest (see header).
+        // refreshNavDigest no-ops (returns empty, changed:false) when the
+        // node row is missing and never throws.
+        const namespace = job.target_key.slice('nav:'.length)
+        const result = await refreshNavDigest(db, namespace)
+        return {
+          shadow: false,
+          nav_digest: true,
+          namespace,
+          digest_chars: result.content.length,
+          changed: result.changed,
+        }
+      }
       const pinned = db
         .prepare(
           `SELECT COUNT(*) AS n, COALESCE(SUM(LENGTH(content)), 0) AS chars
@@ -317,7 +338,7 @@ export async function runPendingMaintenanceJobs(
     if (!job) break
     claimed++
     try {
-      const result = shadowRun(db, job)
+      const result = await shadowRun(db, job)
       completeMaintenanceJob(db, job.id, { status: 'done', result, now: nowFn() })
       done++
       logger.debug({ jobId: job.id, jobType: job.job_type, targetKey: job.target_key }, 'maintenance: shadow job done')
@@ -443,6 +464,31 @@ export function enqueueEndSessionMaintenance(
           now,
         })
         if (!res.coalesced) enqueued++
+      }
+
+      // Nav-layer digests: refresh this namespace's thin digest and, when a
+      // parent node exists, its nearest existing ancestor's digest. Both no-op
+      // safely when the node row is absent (refreshNavDigest returns empty),
+      // so a fresh namespace never fails an end_session call.
+      const navSelf = enqueueMaintenanceJob(db, {
+        jobType: 'digest',
+        targetKey: `nav:${targetKey}`,
+        source: 'end_session',
+        now,
+      })
+      if (!navSelf.coalesced) enqueued++
+
+      const nodeAncestors = ancestors(db, targetKey)
+      const nearestAncestor =
+        nodeAncestors.length > 0 ? nodeAncestors[nodeAncestors.length - 1] : null
+      if (nearestAncestor && nearestAncestor.path !== targetKey) {
+        const navParent = enqueueMaintenanceJob(db, {
+          jobType: 'digest',
+          targetKey: `nav:${nearestAncestor.path}`,
+          source: 'end_session',
+          now,
+        })
+        if (!navParent.coalesced) enqueued++
       }
     }
     return enqueued

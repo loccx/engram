@@ -19,6 +19,7 @@
 import Database from 'better-sqlite3'
 import os from 'node:os'
 import { join } from 'node:path'
+import { writeFileSync } from 'node:fs'
 import { hybridSearch } from '../src/memory/search/hybrid.js'
 import type { SearchResult } from '../src/memory/types.js'
 import { parseNamespacePath, ancestorPaths } from '../src/namespace/tree.js'
@@ -294,6 +295,7 @@ async function run(db: Database.Database): Promise<void> {
   const funnel: ModeResult[] = []
   const missRanks: number[] = [] // flat rank of source when not in top-k
   const topScores: number[] = [] // flat normalized top scores, for THETA calibration
+  const thinLeafCases: number[] = [] // funnelRes.length when a non-leaf scope came back thin
 
   for (const p of usable) {
     const leaf = deepestKnownPrefixIn(p.scope, known) ?? p.scope
@@ -413,14 +415,327 @@ async function run(db: Database.Database): Promise<void> {
   if (dropped.length > 0) console.log('dropped probes:', dropped.join(' | '))
 }
 
+// ── P2: scoped-write projection ─────────────────────────────────────────────
+// Question: if we shard the largest flat namespace into k synthetic scopes
+// (spec Part C), does funnel retrieval keep recall while cutting the context
+// shipped to the model? Runs on a temp COPY of the live DB — the original is
+// opened readonly and never written.
+
+function fnv1a(str: string): number {
+  let h = 0x811c9dc5
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i)
+    h = Math.imul(h, 0x01000193)
+  }
+  return h >>> 0
+}
+
+interface ScopedRow {
+  k: number
+  scopeCount: number
+  memoriesPerScopeAvg: number
+  memoriesPerScopeMin: number
+  memoriesPerScopeMax: number
+  probes: number
+  recallAt5Flat: number
+  recallAt5Funnel: number
+  recallAt5Delta: number
+  contextCharsAt5Flat: number
+  contextCharsAt5Funnel: number
+  contextCharsSavingsPct: number
+  responseBytesFlat: number
+  responseBytesFunnel: number
+  responseBytesSavingsPct: number
+}
+
+// Reduction %: positive means `numer` is smaller than `denom` (a saving).
+function savingsPct(numer: number, denom: number): number {
+  return denom === 0 ? 0 : Math.round(((denom - numer) / denom) * 1000) / 10
+}
+
+async function runScopedProjection(dbPath: string, probesWanted: number): Promise<void> {
+  console.log('backing up live DB (readonly) to temp copy for P2 projection:', dbPath)
+  const source = new Database(dbPath, { readonly: true, fileMustExist: true })
+  const tmpPath = join(os.tmpdir(), `engram-eval-p2-${process.pid}.db`)
+  await source.backup(tmpPath)
+  source.close()
+  const db = new Database(tmpPath, { readonly: false, fileMustExist: true })
+
+  try {
+    const nowRow = db.prepare('SELECT MAX(created_at) AS n FROM memories').get() as { n: number }
+    const NOW = nowRow.n
+
+    const nsRows = db
+      .prepare('SELECT COALESCE(namespace, project_path) ns, COUNT(*) c FROM memories GROUP BY 1 ORDER BY c DESC')
+      .all() as Array<{ ns: string; c: number }>
+    const MS = nsRows[0].ns
+    const msTotal = nsRows[0].c
+
+    const allIds = db
+      .prepare('SELECT id FROM memories WHERE COALESCE(namespace, project_path) = ?')
+      .all(MS) as Array<{ id: string }>
+
+    // First entity token per memory → deterministic scope key (id fallback).
+    const entityRows = db
+      .prepare(
+        `SELECT e.memory_id, e.entity_text
+         FROM memory_entities e
+         JOIN memories m ON m.id = e.memory_id
+         WHERE COALESCE(m.namespace, m.project_path) = ?
+         ORDER BY e.memory_id ASC, e.id ASC`
+      )
+      .all(MS) as Array<{ memory_id: string; entity_text: string }>
+    const firstEntity = new Map<string, string>()
+    for (const r of entityRows) {
+      if (!firstEntity.has(r.memory_id)) firstEntity.set(r.memory_id, (r.entity_text ?? '').trim())
+    }
+
+    // Probes sampled from the project; usable only when the source is
+    // retrievable in the whole-project (flat) search by its own terms.
+    const rand = mulberry32(0xfeed5eed)
+    const sampled = sample(allIds, Math.max(probesWanted, 3), rand)
+    const flatByProbe = new Map<string, SearchResult[]>()
+    const queryByProbe = new Map<string, string>()
+    for (const { id } of sampled) {
+      const row = db.prepare('SELECT id, content FROM memories WHERE id = ?').get(id) as {
+        id: string
+        content: string
+      }
+      const { query } = buildQuery(db, row)
+      if (!query || !query.trim()) continue
+      // Flat baseline is k-independent and must reflect the pre-hierarchy
+      // one-bucket behavior, so it runs on the pristine (un-redistributed) copy
+      // via exact `project_path`. (namespace_subtree is avoided here — it has a
+      // live defect, see docs/eval-funnel-p2.md §Funnel defects.)
+      const flat = await hybridSearch(db, VECTORS, query, {
+        project_path: MS,
+        limit: QUERY_LIMIT,
+        touch: false,
+        now: NOW,
+      })
+      if (!flat.some((r) => r.id === id)) continue // broken token → broken probe
+      flatByProbe.set(id, flat)
+      queryByProbe.set(id, query)
+    }
+
+    const digestOf = (ns: string): string => {
+      const r = db.prepare('SELECT content FROM project_digests WHERE namespace = ?').get(ns) as
+        | { content: string }
+        | undefined
+      return r?.content ?? ''
+    }
+    const digest = digestOf(MS)
+
+    const assign = db.prepare('UPDATE memories SET namespace = ? WHERE id = ?')
+    const rows: ScopedRow[] = []
+
+    for (const k of [5, 20, 50]) {
+      const scopeOf = new Map<string, string>()
+      for (const { id } of allIds) {
+        const key = firstEntity.get(id) || id
+        scopeOf.set(id, `${MS}//s${fnv1a(key) % k}`)
+      }
+      db.transaction(() => {
+        for (const [id, ns] of scopeOf) assign.run(ns, id)
+      })()
+
+      const scopeCounts = db
+        .prepare('SELECT COUNT(*) AS c FROM memories WHERE namespace LIKE ? GROUP BY namespace')
+        .all(`${MS}//%`) as Array<{ c: number }>
+      const counts = scopeCounts.map((r) => r.c)
+
+      let hit5F = 0
+      let hit5N = 0
+      let charsF = 0
+      let charsN = 0
+      let bytesF = 0
+      let bytesN = 0
+      let n = 0
+      for (const [id, query] of queryByProbe) {
+        const leaf = scopeOf.get(id) as string
+        const flat = flatByProbe.get(id) as SearchResult[]
+        const funn = await hybridSearch(db, VECTORS, query, {
+          project_path: leaf,
+          limit: QUERY_LIMIT,
+          touch: false,
+          now: NOW,
+        })
+
+        hit5F += flat.slice(0, K).some((r) => r.id === id) ? 1 : 0
+        hit5N += funn.slice(0, K).some((r) => r.id === id) ? 1 : 0
+        const topF = flat.slice(0, K)
+        const topN = funn.slice(0, K)
+        charsF += topF.reduce((a, r) => a + r.content.length, 0)
+        charsN += topN.reduce((a, r) => a + r.content.length, 0)
+
+        const rich = topN.length >= FUNNEL_K_MIN && (topN[0]?.score ?? 0) >= FUNNEL_THETA
+        const trace: Array<Record<string, unknown>> = [
+          { namespace: leaf, depth: parseNamespacePath(leaf).depth, hits: topN.length, action: 'searched' },
+        ]
+        const guide: Array<Record<string, unknown>> = []
+        if (!rich) {
+          guide.push(
+            ...guideForParent(db, MS, query).map((h) => ({
+              namespace: MS,
+              kind: h.kind,
+              source: h.kind,
+              excerpt: h.excerpt,
+            }))
+          )
+          trace.push({ namespace: MS, depth: parseNamespacePath(MS).depth, hits: guide.length, action: 'guide_only' })
+        }
+        bytesF += buildResponseBytes(db, MS, digest, flat.slice(0, K), [], [])
+        bytesN += buildResponseBytes(db, MS, digest, funn.slice(0, K), trace, guide)
+        n++
+      }
+
+      rows.push({
+        k,
+        scopeCount: counts.length,
+        memoriesPerScopeAvg: Math.round(mean(counts)),
+        memoriesPerScopeMin: counts.length ? Math.min(...counts) : 0,
+        memoriesPerScopeMax: counts.length ? Math.max(...counts) : 0,
+        probes: n,
+        recallAt5Flat: Math.round((hit5F / n) * 1000) / 1000,
+        recallAt5Funnel: Math.round((hit5N / n) * 1000) / 1000,
+        recallAt5Delta: Math.round((hit5N / n - hit5F / n) * 1000) / 1000,
+        contextCharsAt5Flat: n ? Math.round(charsF / n) : 0,
+        contextCharsAt5Funnel: n ? Math.round(charsN / n) : 0,
+        contextCharsSavingsPct: savingsPct(charsN, charsF),
+        responseBytesFlat: n ? Math.round(bytesF / n) : 0,
+        responseBytesFunnel: n ? Math.round(bytesN / n) : 0,
+        responseBytesSavingsPct: savingsPct(bytesN, bytesF),
+      })
+    }
+
+    const result = {
+      dbPath,
+      tempCopy: tmpPath,
+      maxNamespace: MS,
+      memoriesInMaxNamespace: msTotal,
+      vectors: VECTORS,
+      touch: false,
+      scoringClock: NOW,
+      k: K,
+      funnelThresholds: { K_MIN: FUNNEL_K_MIN, THETA: FUNNEL_THETA },
+      scopeAssignment: 'fnv1a(first entity token) % k (id fallback)',
+      probesSampled: sampled.length,
+      probesUsable: queryByProbe.size,
+      rows,
+    }
+
+    console.log('\n=== eval-funnel P2 scoped-write projection ===')
+    console.log(JSON.stringify(result, null, 2))
+
+    writeP2Doc(result)
+  } finally {
+    db.close()
+  }
+}
+
+function writeP2Doc(r: {
+  maxNamespace: string
+  memoriesInMaxNamespace: number
+  probesUsable: number
+  funnelThresholds: { K_MIN: number; THETA: number }
+  scopeAssignment: string
+  rows: ScopedRow[]
+}): void {
+  const L: string[] = []
+  L.push('# Eval: P2 scoped-write projection (funnel vs flat)')
+  L.push('')
+  L.push(
+    `Generated by \`npx tsx scripts/eval-funnel.ts --project-scoped\` — runs on a temporary COPY`,
+    'of the live DB; the live DB is opened read-only and never written.'
+  )
+  L.push('')
+  L.push('## Method')
+  L.push('')
+  L.push(`- Largest flat namespace: \`${r.maxNamespace}\` (${r.memoriesInMaxNamespace} memories).`)
+  L.push(
+    `- For k in {5, 20, 50}: shard those memories into \`<ns>//s0..s(k-1)\` synthetic scopes,`,
+    `assigning each memory by \`${r.scopeAssignment}\` (deterministic, so same-entity memories co-locate).`
+  )
+  L.push('- Probes: sampled source memories; each kept only if its own terms retrieve it in whole-project search.')
+  L.push(
+    '- flat = hybridSearch on the pristine (pre-shard) copy via exact project_path — the true one-bucket',
+    'baseline. funnel = hybridSearch scoped to the source\u2019s leaf scope (exact).'
+  )
+  L.push(`- Recall at K=${K}; funnel thresholds K_MIN=${r.funnelThresholds.K_MIN}, THETA=${r.funnelThresholds.THETA}.`)
+  L.push(`- ${r.probesUsable} usable probes.`)
+  L.push('')
+  L.push('## Results')
+  L.push('')
+  L.push('| k | scopes | mem/scope (avg|min|max) | recall@5 flat | recall@5 funnel | Δ recall | ctx chars@5 flat | ctx chars@5 funnel | ctx savings % |')
+  L.push('| --- | --- | --- | --- | --- | --- | --- | --- | --- |')
+  for (const row of r.rows) {
+    L.push(
+      `| ${row.k} | ${row.scopeCount} | ${row.memoriesPerScopeAvg} (${row.memoriesPerScopeMin}..${row.memoriesPerScopeMax}) |` +
+        ` ${row.recallAt5Flat} | ${row.recallAt5Funnel} | ${row.recallAt5Delta >= 0 ? '+' : ''}${row.recallAt5Delta} |` +
+        ` ${row.contextCharsAt5Flat} | ${row.contextCharsAt5Funnel} | ${row.contextCharsSavingsPct}% |`
+    )
+  }
+  L.push('')
+  L.push('## Projected n_scope/N curve (context bytes shipped to the model)')
+  L.push('')
+  L.push('| k | mem/scope | N (project) | n_scope/N | response bytes flat | funnel | bytes savings % |')
+  L.push('| --- | --- | --- | --- | --- | --- | --- |')
+  for (const row of r.rows) {
+    L.push(
+      `| ${row.k} | ${row.memoriesPerScopeAvg} | ${r.memoriesInMaxNamespace} |` +
+        ` ${row.memoriesPerScopeAvg}/${r.memoriesInMaxNamespace} |` +
+        ` ${row.responseBytesFlat} | ${row.responseBytesFunnel} | ${row.responseBytesSavingsPct}% |`
+    )
+  }
+  L.push('')
+  L.push('## Funnel defects found (parent action)')
+  L.push('')
+  L.push(
+    '- `src/memory/search/hybrid.ts` `ftsExec`: the `namespace_subtree` branch is missing its closing',
+    'paren — the third OR clause ends `ESCAPE \'\\\'` with no `)`. SQLite throws, the `catch { return [] }`',
+    'swallows it, so `strict_scope=false` descendant search silently returns zero results. `project_path`',
+    '(exact, used by strict funnel) is unaffected. This eval works around it via exact-scope searches; the',
+    'parent should add the closing `)` and a regression test covering `strict_scope=false`.'
+  )
+  L.push('')
+  L.push('## Interpretation')
+  L.push('')
+  L.push(
+    '- Savings are the delta in CONTEXT the agent ships, not raw recall: the funnel must hold recall ',
+    '(Δ ≥ 0, ideally) while shrinking the memory content returned.'
+  )
+  L.push(
+    '- Sharding by entity token keeps related memories in one leaf, so the same query that found a source ',
+    'in the 3k-memory flat bucket should find it in its own small scope at equal-or-better rank.'
+  )
+  L.push(
+    '- Caveats: FTS5-only (vectors disabled) for determinism; topics/digest are held constant across modes so ',
+    'the delta reflects memory content + trace, not topic serialization; scope digests (which would replace ',
+    'full ancestor content entirely) are a P3 win not yet modeled here.'
+  )
+  L.push('')
+  writeFileSync('docs/eval-funnel-p2.md', L.join('\n') + '\n')
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 const dbPath = expandHome(process.env.ENGRAM_EVAL_DB ?? '~/Library/Application Support/engram-nodejs/engram.db')
-console.log('opening (readonly):', dbPath)
-const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+const PROJECT_SCOPED = process.argv.includes('--project-scoped')
 
-run(db)
-  .catch((e) => {
-    console.error('eval failed:', e)
-    process.exitCode = 1
-  })
-  .finally(() => db.close())
+if (PROJECT_SCOPED) {
+  const i = process.argv.indexOf('--probes')
+  const PROBES = i >= 0 ? Number(process.argv[i + 1]) : 30
+  runScopedProjection(dbPath, Number.isFinite(PROBES) ? PROBES : 30)
+    .catch((e) => {
+      console.error('scoped projection failed:', e)
+      process.exitCode = 1
+    })
+} else {
+  console.log('opening (readonly):', dbPath)
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true })
+  run(db)
+    .catch((e) => {
+      console.error('eval failed:', e)
+      process.exitCode = 1
+    })
+    .finally(() => db.close())
+}

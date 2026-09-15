@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { getDatabase, resetDatabase } from '../src/db/init.js'
 import { handleTool, resetServicesForTests } from '../src/mcp/handlers.js'
 import { ensureNode, setNodeDigest } from '../src/namespace/tree.js'
+import { MemorySearch } from '../src/memory/search.js'
 
 interface ToolResult {
   content: Array<{ type: 'text'; text: string }>
@@ -212,8 +213,31 @@ describe('get_context funnel retrieval', () => {
     )
     expect(result.scope_trace[0].namespace).toBe(deep)
   })
-})
+  it('subtree FTS is syntactically valid even without the supersession clause', async () => {
+    // Regression: the namespace_subtree group paren used to be closed only
+    // accidentally by notSupersededClause's own ')' — with include_superseded
+    // the SQL broke and the catch swallowed it into an empty result.
+    const search = new MemorySearch(getDatabase().db, false)
+    await storeAt('/home/user/sub/proj', 'subtree regression note about gophers')
+    await storeAt('/home/user/sub/proj//deep', 'deep scoped note about gophers')
+    await storeAt('/home/user/unrelated', 'sibling note about gophers')
 
+    for (const includeSuperseded of [false, true]) {
+      const rows = await search.hybridSearch('gophers', {
+        project_path: '/home/user/sub/proj',
+        namespace_subtree: '/home/user/sub/proj',
+        include_superseded: includeSuperseded,
+        limit: 10,
+      })
+
+
+      const namespaces = rows.map((r) => r.namespace ?? r.project_path)
+      expect(namespaces).toContain('/home/user/sub/proj')
+      expect(namespaces).toContain('/home/user/sub/proj//deep')
+      expect(namespaces).not.toContain('/home/user/unrelated')
+    }
+  })
+})
 
 function globalDb() {
   return getDatabase().db

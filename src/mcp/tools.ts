@@ -46,6 +46,11 @@ export const tools = [
         session_id: { type: 'string', description: 'Session ID (optional, uses current session)' },
         project_path: projectPathField,
         namespace: namespaceField,
+        scope: {
+          type: 'string',
+          description:
+            'Optional: store into a synthetic scope namespace `<project>//<scope>` (single path segment, ≤64 chars, no "/"). When omitted, the store auto-routes to an existing sibling scope if the content mentions its name.',
+        },
         adjudicate_sync: {
           type: 'boolean',
           default: false,

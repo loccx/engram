@@ -16,6 +16,16 @@ export const StoreMemorySchema = z.object({
   session_id: z.string().optional(),
   project_path: z.string().optional(),
   namespace: z.string().optional(),
+  /** Synthetic scope suffix: stores into `<project>//<scope>`. Single path segment. */
+  scope: z
+    .string()
+    .trim()
+    .min(1, 'scope must not be empty')
+    .max(64, 'scope must be at most 64 characters')
+    .refine((s) => !s.includes('/'), {
+      message: 'scope must be a single path segment (no "/")',
+    })
+    .optional(),
   adjudicate_sync: z.boolean().optional().default(false),
   procedure_meta: ProcedureMetaSchema,
 })

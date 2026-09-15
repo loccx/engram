@@ -15,7 +15,7 @@ import {
   type RecallSignal,
 } from '../memory/enrichment.js'
 import { getDigest, refreshDigest } from '../memory/digest.js'
-import { parseNamespacePath, ensureNode, ancestors } from '../namespace/tree.js'
+import { parseNamespacePath, ensureNode, ancestors, children } from '../namespace/tree.js'
 import { childRoster } from '../memory/nav.js'
 import { recallContext, type RecallMode } from '../memory/recall.js'
 import {
@@ -206,6 +206,17 @@ function beforeFromArgs(args: Record<string, unknown>): number | undefined {
   return typeof args.before === 'number' ? args.before : undefined
 }
 
+/**
+ * Word-boundary match for scope auto-routing: the scope token must appear as a
+ * standalone word in the content (case-insensitive), never as a substring of a
+ * longer identifier ('payment' must not match scope 'payments').
+ */
+function contentMentionsScope(content: string, token: string): boolean {
+  if (!token) return false
+  const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`(?:^|[^a-zA-Z0-9])${escaped}(?:[^a-zA-Z0-9]|$)`, 'i').test(content)
+}
+
 export async function handleTool(
   name: string,
   args: Record<string, unknown>,
@@ -230,6 +241,36 @@ export async function handleTool(
         const content = args.content as string
 
         const project_path = await resolveProjectPath(args, ctx)
+
+        // Scope routing (P2): explicit `scope` wins; otherwise deterministically
+        // auto-route into an existing synthetic sibling scope when the content
+        // mentions its name as a standalone word.
+        let routedScope: string | null = null
+        let effectiveNamespace = project_path
+        const explicitScope = typeof args.scope === 'string' ? (args.scope as string).trim() : ''
+        if (explicitScope) {
+          effectiveNamespace = `${project_path}//${explicitScope}`
+          ensureNode(db, effectiveNamespace)
+        } else {
+          const siblings = children(db, project_path).filter(
+            (n) => n.is_synthetic && n.real_path === project_path
+          )
+          let best: { token: string; count: number } | null = null
+          for (const node of siblings) {
+            const token = parseNamespacePath(node.path).scope ?? ''
+            if (token && contentMentionsScope(content, token)) {
+              if (!best || node.memory_count > best.count) {
+                best = { token, count: node.memory_count }
+              }
+            }
+          }
+          if (best) {
+            routedScope = best.token
+            effectiveNamespace = `${project_path}//${best.token}`
+            ensureNode(db, effectiveNamespace)
+          }
+        }
+
         let sessionId = args.session_id as string | undefined
 
         if (!sessionId) {
@@ -241,7 +282,7 @@ export async function handleTool(
         const input: StoreMemoryInput = {
           content,
           session_id: sessionId,
-          project_path,
+          project_path: effectiveNamespace,
           type: (args.type as MemoryType) || 'note',
           importance: importanceProvided ? (args.importance as number) : 0.5,
           tags: Array.isArray(args.tags) ? (args.tags as string[]) : [],
@@ -251,9 +292,14 @@ export async function handleTool(
           origin: 'mcp',
         }
         const memory = await store.store(input)
-        metrics.recordStore(content, project_path)
+        metrics.recordStore(content, effectiveNamespace)
         const [enriched] = enrichMemories(db, [memory])
-        return ok(enriched)
+        const response: Record<string, unknown> = {
+          ...enriched,
+          namespace: effectiveNamespace,
+        }
+        if (routedScope) response.routed_scope = routedScope
+        return ok(response)
       }
 
       case 'search_memories': {
