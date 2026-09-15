@@ -115,11 +115,20 @@ describe('get_context handler', () => {
     expect(roster.memories[0].preview.length).toBeLessThanOrEqual(161)
     expect(roster.memories[0].preview.endsWith('…')).toBe(true)
 
-    // Query path honors full content by default.
+    // Query path: compact by default; full_content opts back into full content.
     const scoped = parse<{ memories: Array<{ content: string }> }>(
       await handleTool('get_context', { project_path: TEST_PROJECT, query: 'rotation policy' })
     )
-    expect(scoped.memories[0].content).toBe(long)
+    expect(scoped.memories[0].content.length).toBeLessThan(long.length)
+
+    const expanded = parse<{ memories: Array<{ content: string }> }>(
+      await handleTool('get_context', {
+        project_path: TEST_PROJECT,
+        query: 'rotation policy',
+        full_content: true,
+      })
+    )
+    expect(expanded.memories[0].content).toBe(long)
   })
 
   it('ranks by relevance when a query is given, unlike the importance-only blanket path', async () => {

@@ -104,22 +104,23 @@ describe('compat: get_context roster blanket + query-path full defaults', () => 
     expect(result.memories[0].preview.length).toBeLessThanOrEqual(161)
   })
 
-  it('query path: full content by default, compact_content truncates', async () => {
+  it('query path: compact content by default, full_content opts back in', async () => {
     await store('Memcached eviction LRU quirks ' + 'y'.repeat(1000))
-    const full = parse<{ memories: Array<{ content: string }> }>(
-      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'memcached eviction' })
-    )
-    expect(full.memories[0].content).toBe('Memcached eviction LRU quirks ' + 'y'.repeat(1000))
 
     const compact = parse<{ memories: Array<{ content: string }> }>(
-      await handleTool('get_context', {
-        project_path: TEST_PROJECT,
-        query: 'memcached eviction',
-        compact_content: true,
-      })
+      await handleTool('get_context', { project_path: TEST_PROJECT, query: 'memcached eviction' })
     )
     expect(compact.memories[0].content.length).toBeLessThan(1000)
     expect(compact.memories[0].content.endsWith('…')).toBe(true)
+
+    const full = parse<{ memories: Array<{ content: string }> }>(
+      await handleTool('get_context', {
+        project_path: TEST_PROJECT,
+        query: 'memcached eviction',
+        full_content: true,
+      })
+    )
+    expect(full.memories[0].content).toBe('Memcached eviction LRU quirks ' + 'y'.repeat(1000))
   })
 
   it('blanket path summarizes topics by default; full_topics opts back in', async () => {

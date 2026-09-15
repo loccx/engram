@@ -10,6 +10,7 @@ import { getImportanceQueue } from '../importance/runtime.js'
 import {
   enrichMemories,
   enrichSearchResults,
+  type EnrichedSearchResult,
   truncateContent,
   summarizeClusters,
   type RecallSignal,
@@ -58,6 +59,26 @@ function ok(data: unknown): ToolResult {
 
 function err(message: string): ToolResult {
   return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }] }
+}
+
+/**
+ * Lean projection for query-path results: the full Memory row carries ~19
+ * fields (session_id, vec_rowid, access_count, ...) that bloat context
+ * without helping the caller.
+ */
+function toLeanContextEntry(m: EnrichedSearchResult) {
+  return {
+    id: m.id,
+    content: m.content,
+    type: m.type,
+    importance: m.importance,
+    tags: m.tags,
+    created_at: m.created_at,
+    namespace: m.namespace,
+    pinned: m.pinned === true,
+    score: m.score,
+    ...(m.recall_reason ? { recall_reason: m.recall_reason } : {}),
+  }
 }
 
 const ROSTER_PREVIEW_CHARS = 160
@@ -350,8 +371,11 @@ export async function handleTool(
         // full_content is honored as an alias for backward compatibility.
         // The blanket (no-query) path ignores both — it serves a compact
         // roster regardless.
-        const compactContent = args.compact_content === true
         const legacyFullRequested = args.full_content === true
+        // Query path: compact content by default; full_content opts back into
+        // untruncated content. compact_content is a no-op (always compact).
+        const wrapContent = <T extends { content: string }>(items: T[]): T[] =>
+          legacyFullRequested ? items : truncateContent(items)
         // Cluster summaries are present-state derived views, so historical
         // context omits them rather than leaking knowledge from after as_of.
         const baseClusters = asOf === undefined ? search.getClusters(project_path) : []
@@ -364,8 +388,6 @@ export async function handleTool(
           ? {}
           : { as_of_limitations: { digest_omitted: true, topics_omitted: true } }
 
-        const wrapContent = <T extends { content: string }>(items: T[]): T[] =>
-          compactContent && !legacyFullRequested ? truncateContent(items) : items
 
         // Hierarchical funnel scoping. Path-shaped namespaces resolve into the
         // materialized tree; non-path namespaces remain leaf-only (invariant 3).
@@ -446,7 +468,9 @@ export async function handleTool(
           return ok({
             namespace: project_path,
             digest: asOf === undefined ? getDigest(db, project_path) : null,
-            memories: wrapContent(enrichSearchResults(db, results, breakdown)),
+            memories: wrapContent(enrichSearchResults(db, results, breakdown)).map(
+              toLeanContextEntry
+            ),
             topics: clusters,
             ...(node ? { scope_trace } : {}),
             ...(guide.length > 0 ? { guide } : {}),
