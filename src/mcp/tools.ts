@@ -49,7 +49,7 @@ export const tools = [
         scope: {
           type: 'string',
           description:
-            'Optional: store into a synthetic scope namespace `<project>//<scope>` (single path segment, ≤64 chars, no "/"). When omitted, the store auto-routes to an existing sibling scope if the content mentions its name.',
+            'Optional: store into a synthetic scope namespace `<project>//<scope>` (single path segment, ≤64 chars, no "/"). When omitted, routing is: word-boundary mention of an existing sibling scope, then LLM inference over existing scopes, then the project root. Response reports the effective namespace, routed_scope, and routed_via (explicit|mention|inferred|root).',
         },
         adjudicate_sync: {
           type: 'boolean',

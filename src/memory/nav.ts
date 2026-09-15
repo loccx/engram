@@ -37,6 +37,7 @@ interface NodeRow {
 interface NavSources {
   pinnedDigest: string
   clusterSummaries: string[]
+  promotedPatterns: string[]
   childLines: Array<{ path: string; digest: string }>
 }
 // (children come from namespace/tree.ts — tree rows are its contract)
@@ -136,12 +137,26 @@ function collectSources(db: Database.Database, namespace: string): NavSources {
 
   const childRows = children(db, namespace).slice(0, 8)
 
+  // Promoted patterns are first-class nav content: without them, promotion
+  // would never surface in guide hits (digest-only nav layer).
+  const promoted = db
+    .prepare(
+      `SELECT content FROM memories
+       WHERE COALESCE(namespace, project_path) = ? AND origin = 'promotion'
+       ORDER BY importance DESC, created_at DESC
+       LIMIT 4`
+    )
+    .all(namespace) as Array<{ content: string }>
+
   return {
     pinnedDigest,
     clusterSummaries: clusters.map((c) => c.summary),
+    promotedPatterns: promoted.map((p) => p.content),
     childLines: childRows.map((n) => ({ path: n.path, digest: n.digest ?? '' })),
   }
+
 }
+
 
 function buildSourceLines(sources: NavSources): string[] {
   const lines: string[] = []
@@ -151,6 +166,9 @@ function buildSourceLines(sources: NavSources): string[] {
   }
   for (const summary of sources.clusterSummaries) {
     lines.push(`[topic] ${summary.trim()}`)
+  }
+  for (const pattern of sources.promotedPatterns) {
+    lines.push(`[pattern] ${pattern.split('\n')[0].trim().slice(0, 160)}`)
   }
   for (const child of sources.childLines) {
     const firstLine = child.digest.split('\n')[0].trim().slice(0, 100)

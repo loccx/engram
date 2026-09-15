@@ -244,8 +244,8 @@ describe('maintenance jobs', () => {
     const queued = mcpDb
       .prepare("SELECT job_type, target_key, source FROM maintenance_jobs WHERE status = 'queued'")
       .all() as Array<{ job_type: string; target_key: string; source: string }>
-    expect(queued.length).toBe(5)
-    const nonNav = queued.filter((q) => !q.target_key.startsWith('nav:'))
+    expect(queued.length).toBe(6)
+    const nonNav = queued.filter((q) => !q.target_key.startsWith('nav:') && q.job_type !== 'promote')
     expect(nonNav.length).toBe(4)
     for (const q of nonNav) {
       expect(q.target_key).toBe(NS)
@@ -259,7 +259,7 @@ describe('maintenance jobs', () => {
     const n = enqueueEndSessionMaintenance(mcpDb, 'sess-a', NS)
     expect(n).toBe(0)
     const total = (mcpDb.prepare('SELECT COUNT(*) AS n FROM maintenance_jobs').get() as { n: number }).n
-    expect(total).toBe(5)
+    expect(total).toBe(6)
   })
 
   it('end_session never fails the tool call even if the jobs table is unusable', async () => {
@@ -290,10 +290,14 @@ describe('maintenance jobs', () => {
     const queued = mcpDb
       .prepare("SELECT job_type, target_key FROM maintenance_jobs WHERE status = 'queued' ORDER BY job_type")
       .all() as Array<{ job_type: string; target_key: string }>
-    expect(queued.length).toBe(5)
+    expect(queued.length).toBe(6)
     for (const q of queued) {
-      // namespace override, never raw /proj; nav jobs carry the nav: prefix
-      expect(q.target_key === 'work' || q.target_key === 'nav:work').toBe(true)
+      // namespace override, never raw /proj; nav/promote jobs carry prefixes
+      expect(
+        q.target_key === 'work' ||
+          q.target_key === 'nav:work' ||
+          q.target_key === 'promote:work'
+      ).toBe(true)
     }
     expect(queued.some((q) => q.target_key === 'nav:work')).toBe(true)
   })

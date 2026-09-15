@@ -17,6 +17,7 @@ import {
 import { getDigest, refreshDigest } from '../memory/digest.js'
 import { parseNamespacePath, ensureNode, ancestors, children } from '../namespace/tree.js'
 import { childRoster } from '../memory/nav.js'
+import { inferScope } from '../memory/scope-inference.js'
 import { recallContext, type RecallMode } from '../memory/recall.js'
 import {
   enqueueEndSessionMaintenance,
@@ -242,15 +243,17 @@ export async function handleTool(
 
         const project_path = await resolveProjectPath(args, ctx)
 
-        // Scope routing (P2): explicit `scope` wins; otherwise deterministically
-        // auto-route into an existing synthetic sibling scope when the content
-        // mentions its name as a standalone word.
+        // Scope routing: explicit `scope` wins; then a deterministic word-boundary
+        // mention of an existing sibling scope; then LLM inference over existing
+        // scopes (P3); otherwise the project root.
         let routedScope: string | null = null
+        let routedVia: 'explicit' | 'mention' | 'inferred' | 'root' = 'root'
         let effectiveNamespace = project_path
         const explicitScope = typeof args.scope === 'string' ? (args.scope as string).trim() : ''
         if (explicitScope) {
           effectiveNamespace = `${project_path}//${explicitScope}`
           ensureNode(db, effectiveNamespace)
+          routedVia = 'explicit'
         } else {
           const siblings = children(db, project_path).filter(
             (n) => n.is_synthetic && n.real_path === project_path
@@ -268,6 +271,15 @@ export async function handleTool(
             routedScope = best.token
             effectiveNamespace = `${project_path}//${best.token}`
             ensureNode(db, effectiveNamespace)
+            routedVia = 'mention'
+          } else {
+            const inferred = await inferScope(db, project_path, content)
+            if (inferred.scope) {
+              routedScope = inferred.scope
+              effectiveNamespace = `${project_path}//${inferred.scope}`
+              ensureNode(db, effectiveNamespace)
+              routedVia = 'inferred'
+            }
           }
         }
 
@@ -297,6 +309,7 @@ export async function handleTool(
         const response: Record<string, unknown> = {
           ...enriched,
           namespace: effectiveNamespace,
+          routed_via: routedVia,
         }
         if (routedScope) response.routed_scope = routedScope
         return ok(response)

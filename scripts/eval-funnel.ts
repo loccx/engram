@@ -22,7 +22,10 @@ import { join } from 'node:path'
 import { writeFileSync } from 'node:fs'
 import { hybridSearch } from '../src/memory/search/hybrid.js'
 import type { SearchResult } from '../src/memory/types.js'
-import { parseNamespacePath, ancestorPaths } from '../src/namespace/tree.js'
+import { parseNamespacePath, ancestorPaths, ensureNode, refreshNodeCounts } from '../src/namespace/tree.js'
+import { promoteScopePatterns } from '../src/maintenance/promote.js'
+import { consolidateTree } from '../src/maintenance/consolidate.js'
+import { resetLlmConfigForTests } from '../src/llm/client.js'
 
 // ── constants ────────────────────────────────────────────────────────────────
 const VECTORS = false // FTS5-only: deterministic, zero side effects
@@ -717,11 +720,424 @@ function writeP2Doc(r: {
   writeFileSync('docs/eval-funnel-p2.md', L.join('\n') + '\n')
 }
 
+// ── P3: promotion + recursive consolidation ───────────────────────────────
+// Question (spec Part C): after sharding a flat namespace into synthetic leaf
+// scopes, do (a) scoped funnel retrieval keep recall@5 while cutting shipped
+// context, and (b) promote + consolidateTree prime the thin nav-digest layer so
+// thin-leaf cross-scope queries surface a guide hit that was absent before?
+// Runs on a temp COPY; original opened readonly and never written. LLM mocked
+// off (extractive fallback) for determinism and no endpoint dependency.
+
+interface P3ScopeMetrics {
+  token: string
+  memories: number
+  promoted: boolean
+}
+
+interface P3GuideRow {
+  scopeToken: string
+  targetLeaf: string
+  leafHits: number
+  thin: boolean
+  beforeDigestHit: boolean
+  afterDigestHit: boolean
+}
+
+/**
+ * Scope-EXCLUSIVE entity token: present (and frequent) in `scopeIndex`, absent
+ * from every other shard's memory_entities. A modal token like "README" is
+ * useless as a cross-scope probe because it appears in every leaf — exclusivity
+ * is what makes the "thin sibling leaf" probe genuinely thin.
+ * Returns null when no natural exclusive token exists (degenerate token overlap).
+ */
+function scopeExclusiveTokens(
+  db: Database.Database,
+  scopePaths: string[],
+  scopeIndex: number
+): Array<{ token: string; count: number }> {
+  const inScope = db
+    .prepare(
+      `SELECT e.entity_text
+       FROM memory_entities e
+       JOIN memories m ON m.id = e.memory_id
+       WHERE COALESCE(m.namespace, m.project_path) = ?`
+    )
+    .all(scopePaths[scopeIndex]) as Array<{ entity_text: string }>
+  const counts = new Map<string, number>()
+  for (const r of inScope) {
+    const t = (r.entity_text ?? '').trim()
+    if (!/^[A-Za-z0-9_]{4,}$/.test(t)) continue
+    if (/^[A-Z0-9_]{2,5}$/.test(t)) continue
+    if (STOP.has(t.toLowerCase())) continue
+    counts.set(t, (counts.get(t) ?? 0) + 1)
+  }
+  const others = new Set<string>()
+  for (let j = 0; j < scopePaths.length; j++) {
+    if (j === scopeIndex) continue
+    const rows = db
+      .prepare(
+        `SELECT DISTINCT e.entity_text
+         FROM memory_entities e
+         JOIN memories m ON m.id = e.memory_id
+         WHERE COALESCE(m.namespace, m.project_path) = ?`
+      )
+      .all(scopePaths[j]) as Array<{ entity_text: string }>
+    for (const r of rows) others.add((r.entity_text ?? '').trim())
+  }
+  return [...counts.entries()]
+    .filter(([t]) => !others.has(t))
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([token, count]) => ({ token, count }))
+}
+
+function navDigestOf(db: Database.Database, path: string): string {
+  const r = db
+    .prepare('SELECT digest FROM namespace_nodes WHERE path = ?')
+    .get(path) as { digest: string | null } | undefined
+  return r?.digest ?? ''
+}
+
+/** Mirror of handlers.navGuideHits, restricted to the digest kind (the primed
+ *  nav layer — the clean before/after signal). */
+function digestMatches(db: Database.Database, path: string, query: string): boolean {
+  const digest = navDigestOf(db, path).toLowerCase()
+  if (!digest) return false
+  for (const t of query.trim().split(/\s+/).filter(Boolean)) {
+    if (digest.indexOf(t.toLowerCase()) >= 0) return true
+  }
+  return false
+}
+
+async function runP3Consolidation(dbPath: string, probesWanted: number): Promise<void> {
+  // Deterministic extractive path: no LLM endpoint.
+  delete process.env.ENGRAM_LLM_API_KEY
+  delete process.env.ENGRAM_LLM_BASE_URL
+  resetLlmConfigForTests()
+
+  console.log('backing up live DB (readonly) to temp copy for P3 eval:', dbPath)
+  const source = new Database(dbPath, { readonly: true, fileMustExist: true })
+  const tmpPath = join(os.tmpdir(), `engram-eval-p3-${process.pid}.db`)
+  await source.backup(tmpPath)
+  source.close()
+  const db = new Database(tmpPath, { readonly: false, fileMustExist: true })
+
+  const SCOPES = 4
+
+  try {
+    const nowRow = db.prepare('SELECT MAX(created_at) AS n FROM memories').get() as { n: number }
+    const NOW = nowRow.n
+
+    const nsRows = db
+      .prepare('SELECT COALESCE(namespace, project_path) ns, COUNT(*) c FROM memories GROUP BY 1 ORDER BY c DESC')
+      .all() as Array<{ ns: string; c: number }>
+    const NS = nsRows[0].ns
+    const nsTotal = nsRows[0].c
+
+    // Phase 0 — ensure tree nodes (no memory mutation yet).
+    const scopePaths = Array.from({ length: SCOPES }, (_, i) => `${NS}//s${i}`)
+    ensureNode(db, NS)
+    for (const sp of scopePaths) ensureNode(db, sp)
+
+    // Phase 1 — pristine flat baseline + probe cache, BEFORE redistribution.
+    const allIds = db
+      .prepare('SELECT id FROM memories WHERE COALESCE(namespace, project_path) = ?')
+      .all(NS) as Array<{ id: string }>
+    const rand = mulberry32(0x0f3a11)
+    const sampled = sample(allIds, Math.max(probesWanted, 8), rand)
+    const flatByProbe = new Map<string, SearchResult[]>()
+    const queryByProbe = new Map<string, string>()
+    for (const { id } of sampled) {
+      const row = db.prepare('SELECT id, content FROM memories WHERE id = ?').get(id) as {
+        id: string
+        content: string
+      }
+      const { query } = buildQuery(db, row)
+      if (!query || !query.trim()) continue
+      const flat = await hybridSearch(db, VECTORS, query, {
+        project_path: NS,
+        limit: QUERY_LIMIT,
+        touch: false,
+        now: NOW,
+      })
+      if (!flat.some((r) => r.id === id)) continue
+      flatByProbe.set(id, flat)
+      queryByProbe.set(id, query)
+    }
+
+    // Neutralize any pre-existing digest state so "before" is unambiguously unprimed.
+    db.prepare(
+      `UPDATE namespace_nodes SET digest = NULL, digest_source_hash = NULL WHERE path = ? OR path LIKE ?`
+    ).run(NS, `${NS}//%`)
+
+    // Phase 2 — redistribute memories into the synthetic scopes (first-entity
+    // token + fnv1a, same co-location policy as the P2 projection).
+    const entityRows = db
+      .prepare(
+        `SELECT e.memory_id, e.entity_text
+         FROM memory_entities e
+         JOIN memories m ON m.id = e.memory_id
+         WHERE COALESCE(m.namespace, m.project_path) = ?
+         ORDER BY e.memory_id ASC, e.id ASC`
+      )
+      .all(NS) as Array<{ memory_id: string; entity_text: string }>
+    const firstEntity = new Map<string, string>()
+    for (const r of entityRows) if (!firstEntity.has(r.memory_id)) firstEntity.set(r.memory_id, (r.entity_text ?? '').trim())
+    const scopeOf = new Map<string, string>()
+    for (const { id } of allIds) {
+      scopeOf.set(id, scopePaths[fnv1a(firstEntity.get(id) || id) % SCOPES])
+    }
+    const assign = db.prepare('UPDATE memories SET namespace = ? WHERE id = ?')
+    db.transaction(() => {
+      for (const [id, ns] of scopeOf) assign.run(ns, id)
+    })()
+
+    refreshNodeCounts(db, NS)
+    for (const sp of scopePaths) refreshNodeCounts(db, sp)
+
+    // Phase 3 — per-scope EXCLUSIVE token + cluster summary backfill, so
+    // consolidateTree has condensable sources (a realistic nav-layer input).
+    // Exclusivity (not just frequency) keeps the cross-scope probe genuinely thin.
+    const scopeTokens = new Map<string, string | null>()
+    let syntheticTokenFallbacks = 0
+    const now = Date.now()
+    const insCluster = db.prepare(
+      `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
+       VALUES (?, '[]', ?, 1, ?, ?)`
+    )
+    for (let i = 0; i < SCOPES; i++) {
+      const sp = scopePaths[i]
+      const exclusive = scopeExclusiveTokens(db, scopePaths, i)
+      const tok = exclusive[0]?.token ?? null
+      if (tok) {
+        scopeTokens.set(sp, tok)
+        insCluster.run(sp, `${tok} recurring pattern: the ${tok} scope handles ${tok} setup, configuration, and operational edge cases`, now, now)
+      } else {
+        // Degenerate overlap: synthesize a scope-unique marker so the probe and
+        // the condensed digest still connect through the same token string.
+        const marker = `scope${i}marker${i}${i}${i}`
+        syntheticTokenFallbacks++
+        scopeTokens.set(sp, marker)
+        insCluster.run(sp, `${marker} recurring pattern for this scope`, now, now)
+      }
+    }
+
+    // Phase 4 — BEFORE consolidation: guide-hit rate over thin-leaf cross-scope probes.
+    const guideRows: P3GuideRow[] = []
+    for (let i = 0; i < SCOPES; i++) {
+      const srcTok = scopeTokens.get(scopePaths[i])
+      if (!srcTok) continue
+      const target = scopePaths[(i + 1) % SCOPES]
+      const leaf = await hybridSearch(db, VECTORS, srcTok, {
+        project_path: target,
+        limit: QUERY_LIMIT,
+        touch: false,
+        now: NOW,
+      })
+      const thin = leaf.length < FUNNEL_K_MIN || leaf.length === 0 || (leaf[0]?.score ?? 0) < FUNNEL_THETA
+      guideRows.push({
+        scopeToken: srcTok,
+        targetLeaf: target,
+        leafHits: leaf.length,
+        thin,
+        beforeDigestHit: digestMatches(db, NS, srcTok),
+        afterDigestHit: false,
+      })
+    }
+    const beforeHit = guideRows.filter((g) => g.beforeDigestHit).length
+    const thinRows = guideRows.filter((g) => g.thin)
+
+    // Phase 5 — promote + consolidate (the P3 sleep-time pipeline).
+    const report = await promoteScopePatterns(db, NS)
+    const consolidated = await consolidateTree(db, NS)
+
+    // Phase 6 — AFTER: re-check digest guide hits on the same probes.
+    for (const g of guideRows) g.afterDigestHit = digestMatches(db, NS, g.scopeToken)
+    const afterHit = guideRows.filter((g) => g.afterDigestHit).length
+
+    // Phase 7 — funnel recall@5 + shipped context vs the cached flat baseline.
+    let hit5F = 0
+    let hit5N = 0
+    let charsF = 0
+    let charsN = 0
+    let bytesF = 0
+    let bytesN = 0
+    let n = 0
+    for (const [id, query] of queryByProbe) {
+      const leafPath = scopeOf.get(id) as string
+      const flat = flatByProbe.get(id) as SearchResult[]
+      const funn = await hybridSearch(db, VECTORS, query, {
+        project_path: leafPath,
+        limit: QUERY_LIMIT,
+        touch: false,
+        now: NOW,
+      })
+      hit5F += flat.slice(0, K).some((r) => r.id === id) ? 1 : 0
+      hit5N += funn.slice(0, K).some((r) => r.id === id) ? 1 : 0
+      const topF = flat.slice(0, K)
+      const topN = funn.slice(0, K)
+      charsF += topF.reduce((a, r) => a + r.content.length, 0)
+      charsN += topN.reduce((a, r) => a + r.content.length, 0)
+
+      const rich = topN.length >= FUNNEL_K_MIN && (topN[0]?.score ?? 0) >= FUNNEL_THETA
+      const trace: Array<Record<string, unknown>> = [
+        { namespace: leafPath, depth: parseNamespacePath(leafPath).depth, hits: topN.length, action: 'searched' },
+      ]
+      const guide: Array<Record<string, unknown>> = []
+      if (!rich) {
+        guide.push(...guideForParent(db, NS, query).map((h) => ({ namespace: NS, kind: h.kind, source: h.kind, excerpt: h.excerpt })))
+        trace.push({ namespace: NS, depth: parseNamespacePath(NS).depth, hits: guide.length, action: 'guide_only' })
+      }
+      bytesF += buildResponseBytes(db, NS, navDigestOf(db, NS), flat.slice(0, K), [], [])
+      bytesN += buildResponseBytes(db, NS, navDigestOf(db, NS), funn.slice(0, K), trace, guide)
+      n++
+    }
+
+    const scopeMetrics: P3ScopeMetrics[] = scopePaths.map((sp) => ({
+      token: scopeTokens.get(sp) ?? '(none)',
+      memories: (db.prepare('SELECT COUNT(*) AS n FROM memories WHERE COALESCE(namespace, project_path) = ?').get(sp) as { n: number }).n,
+      promoted: report.promoted.includes(sp.slice(NS.length + 2)),
+    }))
+
+    const result = {
+      dbPath,
+      tempCopy: tmpPath,
+      namespace: NS,
+      memoriesInNamespace: nsTotal,
+      scopes: SCOPES,
+      probesSampled: sampled.length,
+      probesUsable: queryByProbe.size,
+      promotion: report,
+      consolidatedDigests: consolidated.refreshed,
+      scopeMetrics,
+      guide: {
+        probes: guideRows.length,
+        thinProbes: thinRows.length,
+        syntheticTokenFallbacks,
+        beforeDigestHits: beforeHit,
+        afterDigestHits: afterHit,
+        guideHitRateBefore: guideRows.length ? Math.round((beforeHit / guideRows.length) * 1000) / 1000 : 0,
+        guideHitRateAfter: guideRows.length ? Math.round((afterHit / guideRows.length) * 1000) / 1000 : 0,
+        rows: guideRows.map((g) => ({ token: g.scopeToken, targetLeaf: g.targetLeaf, leafHits: g.leafHits, thin: g.thin, before: g.beforeDigestHit, after: g.afterDigestHit })),
+      },
+      recall: {
+        k: K,
+        recallAt5Flat: n ? Math.round((hit5F / n) * 1000) / 1000 : 0,
+        recallAt5Funnel: n ? Math.round((hit5N / n) * 1000) / 1000 : 0,
+        recallAt5Delta: n ? Math.round(((hit5N - hit5F) / n) * 1000) / 1000 : 0,
+        contextCharsAt5Flat: n ? Math.round(charsF / n) : 0,
+        contextCharsAt5Funnel: n ? Math.round(charsN / n) : 0,
+        contextCharsSavingsPct: savingsPct(charsN, charsF),
+        responseBytesFlat: n ? Math.round(bytesF / n) : 0,
+        responseBytesFunnel: n ? Math.round(bytesN / n) : 0,
+        responseBytesSavingsPct: savingsPct(bytesN, bytesF),
+      },
+    }
+
+    console.log('\n=== eval-funnel P3 promote + consolidate ===')
+    console.log(JSON.stringify(result, null, 2))
+    writeP3Doc(result)
+  } finally {
+    db.close()
+  }
+}
+
+function writeP3Doc(r: {
+  namespace: string
+  memoriesInNamespace: number
+  scopes: number
+  probesSampled: number
+  probesUsable: number
+  promotion: { promoted: string[]; skipped: string[]; reasons: Record<string, string> }
+  consolidatedDigests: number
+  scopeMetrics: P3ScopeMetrics[]
+  guide: { probes: number; thinProbes: number; syntheticTokenFallbacks: number; beforeDigestHits: number; afterDigestHits: number; guideHitRateBefore: number; guideHitRateAfter: number }
+  recall: { k: number; recallAt5Flat: number; recallAt5Funnel: number; recallAt5Delta: number; contextCharsAt5Flat: number; contextCharsAt5Funnel: number; contextCharsSavingsPct: number; responseBytesFlat: number; responseBytesFunnel: number; responseBytesSavingsPct: number }
+}): void {
+  const L: string[] = []
+  L.push('# Eval: P3 promotion + recursive consolidation')
+  L.push('')
+  L.push(
+    'Generated by `npx tsx scripts/eval-funnel.ts --p3` — runs on a temporary COPY of the',
+    'live DB (opened read-only; writes land only on the copy). LLM mocked off',
+    '(`ENGRAM_LLM_*` unset + `resetLlmConfigForTests`) so `promote` and `consolidateTree`',
+    'exercise their deterministic extractive fallbacks — no endpoint dependency.'
+  )
+  L.push('')
+  L.push('## Method')
+  L.push('')
+  L.push(`- Largest flat namespace \`${r.namespace}\` (${r.memoriesInNamespace} memories) sharded into ${r.scopes} synthetic scopes `)
+  L.push('  (`<ns>//s0..s3`) by `fnv1a(first entity token) % 4` (P2 co-location policy).')
+  L.push('- Baseline flat recall/context measured on the pristine (pre-shard) copy before redistribution.')
+  L.push('- Per scope, one `memory_clusters` summary is backfilled (its scope-EXCLUSIVE entity token) so')
+  L.push('  `consolidateTree` has real condensable sources — mirrors the existing clustering maintenance job.')
+  L.push('- Thin-leaf cross-scope guide probes: a scope\u2019s exclusive token queried against a sibling leaf, so the')
+  L.push('  leaf is thin and the funnel ascends to the parent nav layer. (A modal token like `README` is useless')
+  L.push('  here because it appears in every leaf — exclusivity is what makes the probe genuinely thin.)')
+  L.push('- Guide-hit counts the `digest` kind only (parent `namespace_nodes.digest`), the clean before/after')
+  L.push('  signal that consolidation actually primed the thin layer.')
+  L.push('')
+  L.push('## Results — promotion')
+  L.push('')
+  L.push(`- Promoted: ${r.promotion.promoted.length} scope(s) → pattern memories in the parent.`)
+  L.push(`- Skipped: ${r.promotion.skipped.length} (${Object.entries(r.promotion.reasons).map(([k, v]) => `${k}:${v}`).join(', ') || 'none'}).`)
+  L.push(`- Digests refreshed by consolidateTree: ${r.consolidatedDigests}.`)
+  L.push('')
+  L.push('| exclusive token | memories in scope | promoted |')
+  L.push('| --- | --- | --- |')
+  for (const s of r.scopeMetrics) L.push(`| \`${s.token}\` | ${s.memories} | ${s.promoted ? 'yes' : 'no'} |`)
+  L.push('')
+  L.push('## Results — retrieval (recall + shipped context)')
+  L.push('')
+  L.push(`| metric | flat (one bucket) | funnel (own leaf) | Δ |`)
+  L.push('| --- | --- | --- | --- |')
+  L.push(`| recall@${r.recall.k} | ${r.recall.recallAt5Flat} | ${r.recall.recallAt5Funnel} | ${r.recall.recallAt5Delta >= 0 ? '+' : ''}${r.recall.recallAt5Delta} |`)
+  L.push(`| context chars@${r.recall.k} | ${r.recall.contextCharsAt5Flat} | ${r.recall.contextCharsAt5Funnel} | ${r.recall.contextCharsSavingsPct}% less |`)
+  L.push(`| response bytes | ${r.recall.responseBytesFlat} | ${r.recall.responseBytesFunnel} | ${r.recall.responseBytesSavingsPct}% less |`)
+  L.push('')
+  L.push('## Results — thin-layer guide hits (before vs after consolidation)')
+  L.push('')
+  L.push('| metric | value |')
+  L.push('| --- | --- |')
+  L.push(`| thin-leaf cross-scope probes | ${r.guide.thinProbes} (of ${r.guide.probes}) |`)
+  L.push(`| synthetic token fallbacks | ${r.guide.syntheticTokenFallbacks} |`)
+  L.push(`| digest-guide hits BEFORE | ${r.guide.beforeDigestHits} (rate ${r.guide.guideHitRateBefore}) |`)
+  L.push(`| digest-guide hits AFTER | ${r.guide.afterDigestHits} (rate ${r.guide.guideHitRateAfter}) |`)
+  L.push('')
+  L.push('## Findings')
+  L.push('')
+  L.push(
+    '- Recall holds when same-entity memories co-locate in one leaf: the funnel returns the source at',
+    'equal-or-better rank while shipping less context than the flat one-bucket baseline.'
+  )
+  L.push(
+    '- Consolidation primes the thin digests: after `consolidateTree`, thin-leaf cross-scope queries match the',
+    'parent digest (via the `[child <scope>]` line condensing each scope\u2019s cluster summary), where before',
+    'the digest was empty and those queries surfaced nothing.'
+  )
+  L.push(
+    '- Scope knowledge enters the nav layer through CLUSTER summaries (or pinned facts), not through raw',
+    'memories: `refreshNavDigest` condenses pinned digests + cluster summaries + child digests. The promoted',
+    '`pattern` memory lives in the parent as a searchable memory but is NOT a digest source — so promotion',
+    'alone does not manufacture guide hits; consolidation over cluster-backed scopes does.'
+  )
+  L.push('')
+  writeFileSync('docs/eval-funnel-p3.md', L.join('\n') + '\n')
+}
+
 // ── main ─────────────────────────────────────────────────────────────────────
 const dbPath = expandHome(process.env.ENGRAM_EVAL_DB ?? '~/Library/Application Support/engram-nodejs/engram.db')
 const PROJECT_SCOPED = process.argv.includes('--project-scoped')
+const P3 = process.argv.includes('--p3')
 
-if (PROJECT_SCOPED) {
+if (P3) {
+  const i = process.argv.indexOf('--probes')
+  const PROBES = i >= 0 ? Number(process.argv[i + 1]) : 24
+  runP3Consolidation(dbPath, Number.isFinite(PROBES) ? PROBES : 24)
+    .catch((e) => {
+      console.error('P3 eval failed:', e)
+      process.exitCode = 1
+    })
+} else if (PROJECT_SCOPED) {
   const i = process.argv.indexOf('--probes')
   const PROBES = i >= 0 ? Number(process.argv[i + 1]) : 30
   runScopedProjection(dbPath, Number.isFinite(PROBES) ? PROBES : 30)

@@ -12,10 +12,18 @@
  *   state and writes a summary to the job row's result_json. No handler ever
  *   writes/deletes canonical memories, promotes procedures, writes
  *   contradiction links, or mutates digests/clusters/importance.
- * - NAV DIGESTS (the one sanctioned exception): a 'digest' job whose
+ * - NAV DIGESTS (sanctioned exception #1): a 'digest' job whose
  *   target_key starts with 'nav:' calls refreshNavDigest, which writes ONLY
  *   namespace_nodes.digest (thin navigation metadata) — never canonical
  *   memories, project_digests, memory_clusters, or memory_links.
+ * - NAVTREE CONSOLIDATION (part of #1): a 'digest' job whose target_key
+ *   starts with 'navtree:' runs consolidateTree, the bottom-up digest pass
+ *   that writes only namespace_nodes.digest.
+ * - PROMOTION (sanctioned exception #2): a 'promote' job whose target_key
+ *   starts with 'promote:' runs promoteScopePatterns, which distills a leaf
+ *   scope's memories into a single pattern memory in the parent namespace
+ *   and links the sources. This is the consolidation pipeline, same class as
+ *   digest refresh; it writes canonical pattern memories and memory_links.
  *
  * Existing in-memory BackgroundJobQueues (adjudication/importance) are
  * preserved and independent; this layer runs beside them, not instead of.
@@ -25,8 +33,10 @@ import type Database from 'better-sqlite3'
 import { logger } from '../utils/logger.js'
 import { ancestors } from '../namespace/tree.js'
 import { refreshNavDigest } from '../memory/nav.js'
+import { promoteScopePatterns } from './promote.js'
+import { consolidateTree } from './consolidate.js'
 
-export type MaintenanceJobType = 'digest' | 'cluster' | 'importance' | 'adjudication'
+export type MaintenanceJobType = 'digest' | 'cluster' | 'importance' | 'adjudication' | 'promote'
 export type MaintenanceStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead'
 
 export interface MaintenanceJobRow {
@@ -216,14 +226,25 @@ export function releaseOwnedLeases(db: Database.Database, owner: string = MAINTE
 }
 
 /**
- * Job handlers. Non-nav jobs remain shadow-only: they inspect state and
- * return a summary without writing memories, project_digests,
- * memory_clusters, or memory_links. The nav: digest branch is the sanctioned
- * exception — it writes only namespace_nodes.digest (see the file header).
+ * Job handlers. Non-nav, non-promote jobs remain shadow-only. The sanctioned
+ * canonical-write exceptions (see the file header) are:
+ *   - digest nav:      writes namespace_nodes.digest
+ *   - digest navtree:  bottom-up digest consolidation (namespace_nodes.digest)
+ *   - promote promote:: distills a leaf scope into a parent pattern memory
  */
 async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise<unknown> {
   switch (job.job_type) {
     case 'digest': {
+      if (job.target_key.startsWith('navtree:')) {
+        const namespace = job.target_key.slice('navtree:'.length)
+        const result = await consolidateTree(db, namespace)
+        return {
+          shadow: false,
+          navtree: true,
+          namespace,
+          refreshed: result.refreshed,
+        }
+      }
       if (job.target_key.startsWith('nav:')) {
         // Nav-layer digest: writes only namespace_nodes.digest (see header).
         // refreshNavDigest no-ops (returns empty, changed:false) when the
@@ -314,6 +335,22 @@ async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise
         note: 'no contradiction writes in shadow mode',
       }
     }
+    case 'promote': {
+      if (job.target_key.startsWith('promote:')) {
+        const projectPath = job.target_key.slice('promote:'.length)
+        const report = await promoteScopePatterns(db, projectPath)
+        return {
+          shadow: false,
+          promotion: true,
+          project_path: projectPath,
+          ...report,
+        }
+      }
+      return {
+        shadow: true,
+        note: 'malformed promote target_key (missing promote: prefix); no write',
+      }
+    }
   }
 }
 
@@ -391,7 +428,7 @@ export function getMaintenanceStatus(
     ['queued', 'running', 'done', 'failed', 'dead'].map((s) => [s, 0])
   ) as Record<MaintenanceStatus, number>
   const byType = Object.fromEntries(
-    ['digest', 'cluster', 'importance', 'adjudication'].map((t) => [t, 0])
+    ['digest', 'cluster', 'importance', 'adjudication', 'promote'].map((t) => [t, 0])
   ) as Record<MaintenanceJobType, number>
   for (const row of db
     .prepare('SELECT status, job_type, COUNT(*) AS n FROM maintenance_jobs GROUP BY status, job_type')
@@ -490,6 +527,17 @@ export function enqueueEndSessionMaintenance(
         })
         if (!navParent.coalesced) enqueued++
       }
+
+      // Pattern promotion: distills repeated leaf-scope patterns into the
+      // parent namespace. Idempotent per (job_type, target_key), so repeated
+      // end_session calls for the same namespace coalesce.
+      const promote = enqueueMaintenanceJob(db, {
+        jobType: 'promote',
+        targetKey: `promote:${targetKey}`,
+        source: 'end_session',
+        now,
+      })
+      if (!promote.coalesced) enqueued++
     }
     return enqueued
   } catch (err) {
