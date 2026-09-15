@@ -8,8 +8,9 @@ import { migration006 } from './006_brain_support.js'
 import { migration007 } from './007_project_digests.js'
 import { migration008 } from './008_provenance_revisions.js'
 import { migration009 } from './009_maintenance_jobs.js'
+import { migration010 } from './010_namespace_nodes.js'
 
-export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009]
+export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010]
 
 export { runMigrations } from './runner.js'
 export type { MigrationRunResult } from './runner.js'
