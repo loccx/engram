@@ -117,7 +117,7 @@ export const tools = [
   {
     name: 'get_context',
     description:
-      'Get memories for the current namespace. With a query, scopes retrieval through hybrid FTS5+vector search (same engine as search_memories) and returns full content. Without a query, returns a compact roster only — id, type, importance, tags, and a ~160-char preview; full content requires a query or get_memory. Hides superseded memories by default.',
+      'Get memories for the current namespace. With a query, scopes retrieval through hybrid FTS5+vector search and returns full content; funnel scope (default for path-shaped namespaces) searches the deepest namespace first, then ascends thin ancestor nav layers for guide excerpts when the leaf is thin. Without a query, returns a compact roster only — id, type, importance, tags, and a ~160-char preview; full content requires a query or get_memory. Hides superseded memories by default.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -128,6 +128,17 @@ export const tools = [
           description: 'Scope results to this task/topic via hybrid search and receive full content. Omitting it degrades the response to a compact roster (previews only).',
         },
         limit: { type: 'number', description: 'Max memories to return (default: 20)' },
+        scope: {
+          type: 'string',
+          enum: ['leaf', 'funnel'],
+          description:
+            'Retrieval scope. funnel (default for path-shaped namespaces): search the deepest scope first, then ascend thin ancestor nav layers for guide excerpts only when the leaf yields few or weak hits. leaf: search the single namespace only.',
+        },
+        strict_scope: {
+          type: 'boolean',
+          description:
+            'When false, the leaf search expands to the namespace subtree (namespace/* and namespace//* descendants). Default true restricts to the exact namespace; sibling namespaces are never included.',
+        },
         before: {
           type: 'number',
           description: 'Unix timestamp (ms). Restrict context to facts valid at/before this time.',

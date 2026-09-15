@@ -43,6 +43,19 @@ export const GetContextSchema = z.object({
   before: z.number().int().optional(),
   as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),
+  /**
+   * Retrieval scope. 'funnel' (the default for path-shaped namespaces) searches
+   * the deepest namespace first, then ascends thin ancestor nav layers for
+   * guide excerpts when the leaf yields few/weak hits. 'leaf' searches the
+   * single namespace only.
+   */
+  scope: z.enum(['leaf', 'funnel']).optional(),
+  /**
+   * When false, the leaf search expands to descendant namespaces only
+   * (`namespace/*` and `namespace//*`). Default (true) restricts to the exact
+   * namespace; sibling namespaces are never included.
+   */
+  strict_scope: z.boolean().optional(),
   /** Query path only: truncate long content (~400 chars + ellipsis). Default (legacy): full content. */
   compact_content: z.boolean().optional(),
   /**

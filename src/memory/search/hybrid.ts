@@ -17,6 +17,13 @@ import {
 
 export interface SearchOptions {
   project_path?: string
+  /**
+   * Descendant-scoped retrieval: match `COALESCE(namespace, project_path)`
+   * equal to this value OR under it (`ns/%`, `ns//%`). Used by hierarchical
+   * funnel retrieval when strict_scope=false. Callers set either this or
+   * `project_path`, never both.
+   */
+  namespace_subtree?: string
   limit?: number
   type?: MemoryType
   /**
@@ -206,7 +213,20 @@ function ftsExec(
   const conditions: string[] = ['memories_fts MATCH ?']
   const values: unknown[] = [ftsQuery]
 
-  if (options.project_path) {
+  if (options.namespace_subtree) {
+    // Descendant scoping: the exact node OR any child/synthetic scope under
+    // it. Siblings (different parent prefixes) are never matched.
+    const ns = options.namespace_subtree
+    // _ and % are LIKE wildcards — escape them so a namespace with special
+    // chars cannot match sibling prefixes (isolation invariant).
+    const esc = ns.replace(/[\\%_]/g, '\\$&')
+    conditions.push(
+      '(COALESCE(m.namespace, m.project_path) = ?' +
+        " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'" +
+        " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'"
+    )
+    values.push(ns, `${esc}/%`, `${esc}//%`)
+  } else if (options.project_path) {
     // namespace + project_path coexist during the backfill window
     conditions.push('COALESCE(m.namespace, m.project_path) = ?')
     values.push(options.project_path)
@@ -268,7 +288,14 @@ export function vectorSearch(
   `
   const values: unknown[] = [queryVec, limit]
 
-  if (options.project_path) {
+  if (options.namespace_subtree) {
+    const ns = options.namespace_subtree
+    const esc = ns.replace(/[\\%_]/g, '\\$&')
+    sql += ' AND (COALESCE(m.namespace, m.project_path) = ?'
+    sql += " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'"
+    sql += " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\')"
+    values.push(ns, `${esc}/%`, `${esc}//%`)
+  } else if (options.project_path) {
     sql += ' AND COALESCE(m.namespace, m.project_path) = ?'
     values.push(options.project_path)
   }

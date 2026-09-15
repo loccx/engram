@@ -179,7 +179,7 @@ export function deepestKnownPrefix(db: Database.Database, ns: string): Namespace
     const segments = withoutRoot.split('/').filter((s) => s.length > 0)
     if (parsed.scope !== null) candidates.push(ns)
     for (let i = segments.length; i >= 1; i--) {
-      candidates.push(root + segments.slice(0, i).join('/'))
+      candidates.push(root + (root === '~' ? '/' : '') + segments.slice(0, i).join('/'))
     }
     candidates.push(root)
   } else {
@@ -276,10 +276,13 @@ export function backfillTree(db: Database.Database): number {
     .all() as Array<{ ns: string }>
 
   let ensured = 0
-  for (const { ns } of rows) {
-    ensureNode(db, ns)
-    ensured++
-    refreshNodeCounts(db, ns)
-  }
+  const run = db.transaction(() => {
+    for (const { ns } of rows) {
+      ensureNode(db, ns)
+      ensured++
+      refreshNodeCounts(db, ns)
+    }
+  })
+  run()
   return ensured
 }

@@ -2,6 +2,7 @@ import { z } from 'zod'
 import { getDatabase } from '../db/init.js'
 import { MemoryStore } from '../memory/store.js'
 import { MemorySearch } from '../memory/search.js'
+import type { SearchOptions } from '../memory/search.js'
 import { SessionManager } from '../session/manager.js'
 import { resolveNamespace } from '../namespace/resolver.js'
 import { getAdjudicationQueue } from '../contradictions/runtime.js'
@@ -14,6 +15,8 @@ import {
   type RecallSignal,
 } from '../memory/enrichment.js'
 import { getDigest, refreshDigest } from '../memory/digest.js'
+import { parseNamespacePath, ensureNode, ancestors } from '../namespace/tree.js'
+import { childRoster } from '../memory/nav.js'
 import { recallContext, type RecallMode } from '../memory/recall.js'
 import {
   enqueueEndSessionMaintenance,
@@ -76,6 +79,88 @@ function toRosterEntry(m: Memory) {
         ? `${m.content.slice(0, ROSTER_PREVIEW_CHARS)}…`
         : m.content,
   }
+}
+
+// Hierarchical funnel retrieval (docs/specs/hierarchical-memory-p1.md).
+// A leaf is "rich" with >= FUNNEL_K_MIN hits and a top score >= FUNNEL_THETA;
+// otherwise retrieval ascends ancestor nav layers for thin-layer guide entries.
+const FUNNEL_K_MIN = 3
+const FUNNEL_THETA = 0.35
+const GUIDE_EXCERPT_CHARS = 240
+
+type FunnelScope = 'leaf' | 'funnel'
+
+interface ScopeTraceEntry {
+  namespace: string
+  depth: number
+  hits?: number
+  top_score?: number | null
+  action: 'searched' | 'skipped' | 'guide_only'
+}
+
+interface GuideEntry {
+  namespace: string
+  kind: 'digest' | 'cluster' | 'child_roster'
+  source: string
+  excerpt: string
+}
+
+/** Match query tokens against a parent node's thin nav layer (digest + cluster
+ *  summaries) and return <=2 short excerpts. Guide is navigation metadata, never
+ *  a memory body. */
+function navGuideHits(db: import('better-sqlite3').Database, namespace: string, query: string): GuideEntry[] {
+  const tokens = query.trim().split(/\s+/).filter(Boolean).map((t) => t.toLowerCase())
+  if (tokens.length === 0) return []
+
+  const digest =
+    (
+      db
+        .prepare('SELECT digest FROM namespace_nodes WHERE path = ?')
+        .get(namespace) as { digest: string | null } | undefined
+    )?.digest ?? ''
+  const clusters = db
+    .prepare(
+      `SELECT summary FROM memory_clusters
+       WHERE project_path = ? AND TRIM(summary) != ''
+       ORDER BY updated_at DESC, id ASC`
+    )
+    .all(namespace) as Array<{ summary: string }>
+
+  const sources: Array<{ kind: 'digest' | 'cluster'; text: string }> = []
+  if (digest.trim()) sources.push({ kind: 'digest', text: digest })
+  for (const row of clusters) sources.push({ kind: 'cluster', text: row.summary })
+
+  const hits: GuideEntry[] = []
+  for (const { kind, text } of sources) {
+    if (hits.length >= 2) break
+    const excerpt = navExcerpt(text, tokens)
+    if (excerpt) hits.push({ namespace, kind, source: kind, excerpt })
+  }
+  return hits
+}
+
+function navExcerpt(text: string, tokens: string[]): string | null {
+  const lower = text.toLowerCase()
+  let first = -1
+  for (const token of tokens) {
+    const idx = lower.indexOf(token)
+    if (idx >= 0 && (first === -1 || idx < first)) first = idx
+  }
+  if (first < 0) return null
+
+  const half = Math.floor(GUIDE_EXCERPT_CHARS / 2)
+  const start = Math.max(0, first - half)
+  const end = Math.min(text.length, start + GUIDE_EXCERPT_CHARS)
+  const raw = text.slice(start, end).replace(/\s+/g, ' ').trim()
+  const prefix = start > 0 ? '…' : ''
+  const suffix = end < text.length ? '…' : ''
+  return `${prefix}${raw}${suffix}`.slice(0, GUIDE_EXCERPT_CHARS)
+}
+
+function clipNavExcerpt(text: string): string {
+  return text.length > GUIDE_EXCERPT_CHARS
+    ? `${text.slice(0, GUIDE_EXCERPT_CHARS - 1)}…`
+    : text
 }
 
 let _services: Services | null = null
@@ -223,25 +308,89 @@ export async function handleTool(
         const wrapContent = <T extends { content: string }>(items: T[]): T[] =>
           compactContent && !legacyFullRequested ? truncateContent(items) : items
 
+        // Hierarchical funnel scoping. Path-shaped namespaces resolve into the
+        // materialized tree; non-path namespaces remain leaf-only (invariant 3).
+        const parsed = parseNamespacePath(project_path)
+        const pathShaped = parsed.isPathShaped
+        const scopeArg = (args.scope as FunnelScope | undefined) ?? 'funnel'
+        const strictScope = args.strict_scope !== false
+        // ensureNode materializes the node + full ancestor chain (idempotent),
+        // which also guarantees the depth-0 root appears in scope_trace.
+        const node = pathShaped ? ensureNode(db, project_path) : null
+
         if (query) {
           const breakdown = new Map<string, Record<RecallSignal, number>>()
-          const results = await search.hybridSearch(
-            query,
-            {
-              project_path,
-              limit,
-              before: beforeFromArgs(args),
-              as_of: asOf,
-              include_superseded: args.include_superseded === true,
-            },
-            breakdown
-          )
+          const searchOptions: SearchOptions = {
+            limit,
+            before: beforeFromArgs(args),
+            as_of: asOf,
+            include_superseded: args.include_superseded === true,
+          }
+          if (node) {
+            if (strictScope) {
+              searchOptions.project_path = node.path
+            } else {
+              // Invariant 4: strict_scope=false expands to descendants only.
+              searchOptions.namespace_subtree = node.path
+            }
+          } else {
+            searchOptions.project_path = project_path
+          }
+
+          const results = await search.hybridSearch(query, searchOptions, breakdown)
           metrics.recordSearch(results, project_path)
+
+          const topScore = results.length > 0 ? Math.max(...results.map((r) => r.score)) : null
+          const topScoreNorm =
+            topScore === null ? null : Math.min(1, Math.max(0, topScore))
+
+          const scope_trace: ScopeTraceEntry[] = []
+          const guide: GuideEntry[] = []
+
+          if (node) {
+            const useFunnel = scopeArg !== 'leaf'
+            scope_trace.push({
+              namespace: node.path,
+              depth: node.depth,
+              hits: results.length,
+              top_score: topScoreNorm,
+              action: 'searched',
+            })
+
+            if (useFunnel) {
+              // Ancestors come back root-first; reverse for deepest-first trace
+              // that ends at the depth-0 root (invariant 5).
+              const parents = ancestors(db, node.path).reverse()
+              const rich =
+                results.length >= FUNNEL_K_MIN && (topScoreNorm ?? 0) >= FUNNEL_THETA
+              for (const parent of parents) {
+                if (rich) {
+                  scope_trace.push({
+                    namespace: parent.path,
+                    depth: parent.depth,
+                    action: 'skipped',
+                  })
+                } else {
+                  const hits = navGuideHits(db, parent.path, query)
+                  guide.push(...hits)
+                  scope_trace.push({
+                    namespace: parent.path,
+                    depth: parent.depth,
+                    hits: hits.length,
+                    action: 'guide_only',
+                  })
+                }
+              }
+            }
+          }
+
           return ok({
             namespace: project_path,
             digest: asOf === undefined ? getDigest(db, project_path) : null,
             memories: wrapContent(enrichSearchResults(db, results, breakdown)),
             topics: clusters,
+            ...(node ? { scope_trace } : {}),
+            ...(guide.length > 0 ? { guide } : {}),
             ...historicalLimitations,
           })
         }
@@ -256,11 +405,28 @@ export async function handleTool(
         // or get_memory, so accidental no-query calls stay small. Topics are
         // always summarized here to keep cluster membership out of the dump.
         metrics.recordContextLoad(memories, project_path)
+
+        // Blanket scope trace (single node) + child-roster nav guide. Both are
+        // navigation metadata; the roster never carries memory bodies.
+        const scope_trace: ScopeTraceEntry[] = node
+          ? [{ namespace: node.path, depth: node.depth, hits: memories.length, action: 'searched' }]
+          : []
+        const guide: GuideEntry[] = node
+          ? childRoster(db, node.path).map((c) => ({
+              namespace: node.path,
+              kind: 'child_roster' as const,
+              source: c.path,
+              excerpt: clipNavExcerpt(c.digest),
+            }))
+          : []
+
         return ok({
           namespace: project_path,
           digest: asOf === undefined ? getDigest(db, project_path) : null,
           memories: memories.map(toRosterEntry),
           topics: clusters,
+          ...(node ? { scope_trace } : {}),
+          ...(guide.length > 0 ? { guide } : {}),
           hint:
             'Blanket context (no query) returns a compact roster only; preview is capped at 160 chars. Pass query to scope retrieval via hybrid search and receive full content, or fetch a single memory with get_memory.',
           ...historicalLimitations,
