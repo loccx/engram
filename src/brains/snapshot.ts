@@ -1,7 +1,42 @@
 import Database from 'better-sqlite3'
+import { homedir } from 'os'
 import { DatabaseManager } from '../db/init.js'
 import { EMBEDDING_DIM, MODEL_ID } from '../embeddings/pipeline.js'
 import { ENGRAM_VERSION } from '../version.js'
+import { notSupersededClause } from '../contradictions/supersession.js'
+
+/**
+ * Rewrite a namespace into its portable, owner-relative form before export.
+ *
+ * A brain is handed to other people, so the owner's filesystem layout is not
+ * part of the payload:
+ *   /Users/alice/cb            -> ~/cb
+ *   /Users/alice/cb//payments  -> ~/cb//payments   (synthetic scope preserved)
+ *   /opt/data/proj             -> ext/proj         (non-home path: leaf only)
+ *   autonomous-crypto-desk     -> autonomous-crypto-desk  (alias, nothing to leak)
+ *
+ * The `//scope` suffix survives verbatim so layer/subtree matching keeps working
+ * on the follower side.
+ */
+export function redactNamespace(ns: string, home: string = homedir()): string {
+  if (!ns) return ns
+  const scopeIdx = ns.indexOf('//')
+  const base = scopeIdx === -1 ? ns : ns.slice(0, scopeIdx)
+  const scope = scopeIdx === -1 ? '' : ns.slice(scopeIdx)
+  let redacted: string
+  if (base === home || base.startsWith(home.endsWith('/') ? home : home + '/')) {
+    const rel = base.slice(home.length).replace(/^\/+/, '')
+    redacted = rel ? `~/${rel}` : '~'
+  } else if (base === '~' || base.startsWith('~/')) {
+    redacted = base
+  } else if (base.startsWith('/')) {
+    const leaf = base.replace(/\/+$/, '').split('/').filter(Boolean).pop() ?? 'root'
+    redacted = `ext/${leaf}`
+  } else {
+    redacted = base
+  }
+  return redacted + scope
+}
 
 export interface ExportOptions {
   namespace: string
@@ -47,6 +82,11 @@ export interface BrainManifest {
  * accepting older brains. Bump BOTH write sites when the format changes.
  */
 const BRAIN_SCHEMA_VERSION = 7
+
+function sourceTableExists(db: Database.Database, table: string): boolean {
+  const row = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table)
+  return row !== undefined
+}
 
 function sourceColumnExists(db: Database.Database, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
@@ -95,9 +135,16 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
   }
 
   const tx = target.transaction(() => {
+    // A correction usually lives in a memory that is not itself shareable, so
+    // without this predicate the retraction would not travel and a follower
+    // would keep reading the stale fact as current. Pre-migration sources have
+    // no link table at all, so the clause is conditional.
+    const supersessionExpr = sourceTableExists(sourceDb, 'memory_links')
+      ? ` AND ${notSupersededClause('memories.id')}`
+      : ''
     const shareableIds = sourceDb
       .prepare(
-        `SELECT id FROM memories WHERE (${layerPredicates.join(' OR ')}) AND ${shareableExpr}`
+        `SELECT id FROM memories WHERE (${layerPredicates.join(' OR ')}) AND ${shareableExpr}${supersessionExpr}`
       )
       .all(...layerParams) as Array<{ id: string }>
 
@@ -112,7 +159,7 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
         description: opts.description ?? null,
         exported_at: Date.now(),
         memory_count: 0,
-        source_namespace: opts.namespace,
+        source_namespace: redactNamespace(opts.namespace),
         included_layers: null,
       })
       return { count: 0 }
@@ -129,18 +176,27 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
 
     if (sessionIds.length > 0) {
       const sessPlaceholders = sessionIds.map(() => '?').join(',')
+      // Only structural timing travels. project_path/tool_name/summary are the
+      // owner's working context (paths, tooling, free-text narratives) and have
+      // no bearing on the shared knowledge.
       const sessions = sourceDb
-        .prepare(`SELECT * FROM sessions WHERE id IN (${sessPlaceholders})`)
+        .prepare(`SELECT id, started_at, ended_at FROM sessions WHERE id IN (${sessPlaceholders})`)
         .all(...sessionIds.map((s) => s.session_id)) as Array<Record<string, unknown>>
-      const sessionCols = sessions.length > 0 ? Object.keys(sessions[0]) : []
       if (sessions.length > 0) {
-        const colList = sessionCols.join(',')
-        const valPlaceholders = sessionCols.map(() => '?').join(',')
+        // Column list is explicit: `project_path` is NOT NULL in the snapshot
+        // schema, so it must be written, and it carries the redacted namespace
+        // rather than the owner's real path.
         const insertSess = target.prepare(
-          `INSERT OR IGNORE INTO sessions (${colList}) VALUES (${valPlaceholders})`
+          `INSERT OR IGNORE INTO sessions (id, project_path, started_at, ended_at) VALUES (?, ?, ?, ?)`
         )
+        const sessionNs = redactNamespace(opts.namespace)
         for (const s of sessions) {
-          insertSess.run(...sessionCols.map((c) => s[c]))
+          insertSess.run(
+            String(s.id),
+            sessionNs,
+            Number(s.started_at ?? Date.now()),
+            s.ended_at == null ? null : Number(s.ended_at)
+          )
         }
       }
       // A shareable memory whose session row is gone (pruned, imported, or
@@ -154,7 +210,8 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
         const insertMissing = target.prepare(
           `INSERT OR IGNORE INTO sessions (id, project_path, started_at) VALUES (?, ?, ?)`
         )
-        for (const id of missingSessions) insertMissing.run(id, opts.namespace, Date.now())
+        const placeholderNs = redactNamespace(opts.namespace)
+        for (const id of missingSessions) insertMissing.run(id, placeholderNs, Date.now())
       }
     }
 
@@ -169,7 +226,20 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
         `INSERT INTO memories (${colList}) VALUES (${valPlaceholders})`
       )
       for (const m of memories) {
-        insertMem.run(...memCols.map((c) => m[c]))
+        const row: Record<string, unknown> = { ...m }
+        const raw =
+          typeof row.namespace === 'string' && row.namespace
+            ? row.namespace
+            : typeof row.project_path === 'string'
+              ? row.project_path
+              : ''
+        const redacted = raw ? redactNamespace(raw) : ''
+        if (memCols.includes('namespace') && redacted) row.namespace = redacted
+        // project_path is NOT NULL in the snapshot schema; it carries the same
+        // redacted form so no absolute owner path is exposed while the
+        // follower's COALESCE(namespace, project_path) read path stays valid.
+        if (memCols.includes('project_path') && redacted) row.project_path = redacted
+        insertMem.run(...memCols.map((c) => row[c]))
       }
     }
 
@@ -252,6 +322,7 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
     )
       .map((r) => r.ns)
       .filter((ns): ns is string => typeof ns === 'string' && ns.length > 0)
+      .map((ns) => redactNamespace(ns))
       .sort()
 
     writeManifest(target, {
@@ -264,7 +335,9 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
       description: opts.description ?? null,
       exported_at: Date.now(),
       memory_count: idList.length,
-      source_namespace: opts.namespace,
+      // The manifest is committed in PLAINTEXT to the git remote, so provenance
+      // is recorded in redacted form only.
+      source_namespace: redactNamespace(opts.namespace),
       included_layers: JSON.stringify(includedLayers),
     })
 
