@@ -18,8 +18,7 @@ const paths = envPaths('engram')
 export const ENGRAM_HOME = paths.data
 export const IDENTITY_FILE = join(ENGRAM_HOME, 'identity')
 export const BRAINS_CONFIG_FILE = join(ENGRAM_HOME, 'brains-config.json')
-/** Overridable so tests never append to the real ~/…/engram-nodejs/audit.log. */
-export const AUDIT_LOG_FILE = process.env.ENGRAM_AUDIT_LOG ?? join(ENGRAM_HOME, 'audit.log')
+export const AUDIT_LOG_FILE = join(ENGRAM_HOME, 'audit.log')
 export const BRAINS_DIR = join(ENGRAM_HOME, 'brains')
 
 export function brainDir(name: string): string {
