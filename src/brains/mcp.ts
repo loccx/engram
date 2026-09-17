@@ -6,7 +6,8 @@ import { readManifest, readManifestFromFile, validateForImport, type BrainManife
 import { notSupersededClause } from '../contradictions/supersession.js'
 import { logAudit } from './audit.js'
 import * as sqliteVec from 'sqlite-vec'
-import { hybridSearch } from '../memory/search/hybrid.js'
+import { vectorSearch } from '../memory/search/hybrid.js'
+import { getEmbedding } from '../embeddings/pipeline.js'
 
 export interface BrainSummary {
   name: string
@@ -163,29 +164,92 @@ function assertBrainReadable(db: Database.Database, safe: string): void {
   }
 }
 
-async function tryHybridSearch(
+/**
+ * The lexical pass is authoritative: if it found anything, that is the answer.
+ * Only when it finds nothing do we consult the vectors, because a KNN search
+ * ALWAYS returns its nearest neighbour - without a similarity floor an
+ * unrelated memory becomes an answer, which is a precision bug, not recall.
+ *
+ * The floor is deliberately conservative. Too low ships wrong answers; too
+ * high merely reproduces the lexical behaviour. Calibrate against real
+ * embeddings before lowering it.
+ */
+const MIN_SEMANTIC_COSINE = 0.6
+
+export type EmbedQuery = (text: string) => Promise<Float32Array | null>
+
+function cosineSimilarity(a: Float32Array, b: Float32Array): number {
+  let dot = 0
+  let normA = 0
+  let normB = 0
+  const n = Math.min(a.length, b.length)
+  for (let i = 0; i < n; i++) {
+    dot += a[i] * b[i]
+    normA += a[i] * a[i]
+    normB += b[i] * b[i]
+  }
+  if (normA === 0 || normB === 0) return 0
+  return dot / (Math.sqrt(normA) * Math.sqrt(normB))
+}
+
+async function trySemanticSearch(
   db: Database.Database,
   query: string,
-  limit: number
+  limit: number,
+  embedQuery: EmbedQuery
 ): Promise<BrainSearchResult[] | null> {
   let vectorRows = 0
   try {
     sqliteVec.load(db)
     vectorRows = (db.prepare('SELECT COUNT(*) AS c FROM memory_vectors').get() as { c: number }).c
   } catch {
-    return null // sqlite-vec unavailable: lexical path
+    return null // sqlite-vec unavailable: lexical path only
   }
   if (vectorRows === 0) return null
 
+  let embedding: Float32Array | null = null
   try {
-    const results = await hybridSearch(db, true, query, {
-      limit,
-      touch: false, // read-only connection: never stamp access metadata
-      include_superseded: false,
-    })
-    if (results.length === 0) return []
+    embedding = await embedQuery(query)
+  } catch {
+    return null
+  }
+  if (!embedding) return null // no local model: lexical path only
+
+  try {
+    const candidates = vectorSearch(db, embedding, { include_superseded: false }, Math.max(limit * 4, 20))
+    if (candidates.length === 0) return []
+
+    const readVecRowid = db.prepare('SELECT vec_rowid FROM memories WHERE id = ?')
+    const readVec = db.prepare('SELECT embedding FROM memory_vectors WHERE rowid = ?')
+    const scored: Array<{ hit: BrainSearchResult; cos: number }> = []
+    for (const m of candidates) {
+      const row = readVecRowid.get(m.id) as { vec_rowid: number | null } | undefined
+      if (!row || row.vec_rowid === null || row.vec_rowid === undefined) continue
+      const blob = readVec.get(row.vec_rowid) as { embedding: Buffer } | undefined
+      if (!blob?.embedding) continue
+      const buf = blob.embedding
+      const stored = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4))
+      const cos = cosineSimilarity(embedding, stored)
+      if (cos < MIN_SEMANTIC_COSINE) continue
+      scored.push({
+        cos,
+        hit: {
+          id: m.id,
+          content: m.content,
+          type: m.type,
+          importance: m.importance,
+          tags: Array.isArray(m.tags) ? JSON.stringify(m.tags) : String(m.tags ?? '[]'),
+          created_at: m.created_at,
+        },
+      })
+    }
+    if (scored.length === 0) return []
+
+    scored.sort((a, b) => b.cos - a.cos)
+    const top = scored.slice(0, limit).map((s) => s.hit)
+
     // Defensive supersession filter: a retracted fact must never be served.
-    const ids = results.map((r) => r.id)
+    const ids = top.map((r) => r.id)
     const placeholders = ids.map(() => '?').join(',')
     const live = new Set(
       (
@@ -196,18 +260,9 @@ async function tryHybridSearch(
           .all(...ids) as Array<{ id: string }>
       ).map((r) => r.id)
     )
-    return results
-      .filter((r) => live.has(r.id))
-      .map((r) => ({
-        id: r.id,
-        content: r.content,
-        type: r.type,
-        importance: r.importance,
-        tags: Array.isArray(r.tags) ? JSON.stringify(r.tags) : String(r.tags ?? '[]'),
-        created_at: r.created_at,
-      }))
+    return top.filter((r) => live.has(r.id))
   } catch {
-    return null // embeddings/model unavailable: lexical path
+    return null // any vector failure degrades to lexical
   }
 }
 
@@ -224,7 +279,8 @@ export async function searchBrain(
   brainName: string,
   query: string,
   limit: number = 10,
-  brainsDir: string = BRAINS_DIR
+  brainsDir: string = BRAINS_DIR,
+  embedQuery: EmbedQuery = (text) => getEmbedding(text, 'query')
 ): Promise<BrainSearchResult[]> {
   const safe = sanitizeBrainName(brainName)
   const cachedDb = join(brainsDir, safe, '.cache', 'brain.db')
@@ -239,13 +295,6 @@ export async function searchBrain(
   const db = new Database(dbPath, { readonly: true })
   try {
     assertBrainReadable(db, safe)
-
-    // Semantic pass: a snapshot carries embeddings, so fuse them with the
-    // lexical hits. The brain DB is read-only (touch:false) and ANY failure —
-    // no sqlite-vec, no vectors, no local embedding model — degrades to the
-    // lexical path below rather than making a followed brain unsearchable.
-    const hybrid = await tryHybridSearch(db, query, limit)
-    if (hybrid) return hybrid
 
     const select = `SELECT m.id, m.content, m.type, m.importance, m.tags, m.created_at
        FROM memories_fts
@@ -264,8 +313,14 @@ export async function searchBrain(
     // wants. Only when that yields nothing do we fall back to OR, so multi-term
     // and natural-language questions still retrieve ranked partial matches.
     const rows = db.prepare(select).all(matchExpression(tokens, 'AND'), limit) as BrainSearchResult[]
-    if (rows.length > 0 || tokens.length === 1) return rows
-    return db.prepare(select).all(matchExpression(tokens, 'OR'), limit) as BrainSearchResult[]
+    const lexical =
+      rows.length > 0 || tokens.length === 1
+        ? rows
+        : (db.prepare(select).all(matchExpression(tokens, 'OR'), limit) as BrainSearchResult[])
+    // Lexical is authoritative. The vectors are a recall fallback for questions
+    // the keywords cannot answer - never a way to answer ones they already can.
+    if (lexical.length > 0) return lexical
+    return (await trySemanticSearch(db, query, limit, embedQuery)) ?? lexical
   } finally {
     db.close()
   }

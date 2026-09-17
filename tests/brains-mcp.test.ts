@@ -250,6 +250,44 @@ describe('brains/mcp', () => {
     expect(await searchBrain('work', 'postgres', 2, brainsDir)).toHaveLength(2)
   })
 
+  it('semantic fallback serves only high-similarity hits and never overrides lexical', async () => {
+    // Two memories with distinct, non-zero, orthogonal vectors. A zero vector
+    // (the earlier fixture) cannot exercise this path at all.
+    const vecA = new Float32Array(768)
+    vecA[0] = 1
+    const vecB = new Float32Array(768)
+    vecB[1] = 1
+    addMemory({ id: 'mem-sem-a', content: 'unrelated wording alpha here', type: 'note' })
+    addMemory({ id: 'mem-sem-b', content: 'unrelated wording beta here', type: 'note' })
+    const va = sourceMgr.db
+      .prepare('INSERT INTO memory_vectors(embedding) VALUES (?)')
+      .run(Buffer.from(vecA.buffer))
+    sourceMgr.db.prepare('UPDATE memories SET vec_rowid = ? WHERE id = ?').run(Number(va.lastInsertRowid), 'mem-sem-a')
+    const vb = sourceMgr.db
+      .prepare('INSERT INTO memory_vectors(embedding) VALUES (?)')
+      .run(Buffer.from(vecB.buffer))
+    sourceMgr.db.prepare('UPDATE memories SET vec_rowid = ? WHERE id = ?').run(Number(vb.lastInsertRowid), 'mem-sem-b')
+    buildBrainDb('work')
+
+    const near = new Float32Array(768)
+    near[0] = 1
+    const far = new Float32Array(768)
+    far[2] = 1
+
+    // No lexical overlap: only the near vector clears the similarity floor.
+    const viaVector = await searchBrain('work', 'zzzznomatch', 10, brainsDir, async () => near)
+    expect(viaVector.map((h) => h.id)).toEqual(['mem-sem-a'])
+
+    // Orthogonal to every stored vector: the floor rejects it, so no answer.
+    const rejected = await searchBrain('work', 'zzzznomatch', 10, brainsDir, async () => far)
+    expect(rejected).toEqual([])
+
+    // Lexical is authoritative: a lexical hit is returned even when a vector
+    // would also have matched.
+    const lexicalWins = await searchBrain('work', 'alpha', 10, brainsDir, async () => near)
+    expect(lexicalWins.map((h) => h.id)).toEqual(['mem-sem-a'])
+  })
+
   // --- supersession + manifest gating -------------------------------------
 
   it('searchBrain and getBrainMemory hide memories the owner has superseded', async () => {
