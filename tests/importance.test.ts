@@ -265,7 +265,7 @@ describe('importance scoring - end-to-end via MemoryStore', () => {
     expect(row.importance_model).toBeNull()
   })
 
-  it('non-blocking: store() returns in <50ms even when LLM is slow', async () => {
+  it('non-blocking: store() returns long before a slow LLM would resolve', async () => {
     configureLlm()
     fetchMock.mockImplementation(
       () =>
@@ -287,7 +287,11 @@ describe('importance scoring - end-to-end via MemoryStore', () => {
     })
     const elapsed = Date.now() - t0
 
-    expect(elapsed).toBeLessThan(50)
+    // The property is that store() does not BLOCK on scoring: the mocked LLM
+    // resolves after 5s, so anything near that would be a real regression. An
+    // absolute 50ms bound asserted machine speed instead (it failed at 190ms
+    // under CPU load with no behavioural change) and made the gate lie.
+    expect(elapsed).toBeLessThan(1000)
     expect(memory.importance_source).toBe('default')
     expect(queue.size()).toBeGreaterThanOrEqual(0)
   })
