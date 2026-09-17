@@ -328,6 +328,12 @@ export async function handleTool(
           origin: 'mcp',
         }
         const memory = await store.store(input)
+        // Honour `pinned` before enriching, so the response reflects it. Without
+        // this, a caller passing pinned:true got back pinned:false, tier:'warm'.
+        if (args.pinned === true) {
+          store.setPinned(memory.id, true)
+          Object.assign(memory, { pinned: true })
+        }
         metrics.recordStore(content, effectiveNamespace)
         const [enriched] = enrichMemories(db, [memory])
         const response: Record<string, unknown> = {
