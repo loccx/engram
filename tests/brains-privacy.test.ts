@@ -54,7 +54,15 @@ describe('brains/privacy: snapshots carry no owner filesystem layout', () => {
     expect(redactNamespace('/Users/alice/cb', '/Users/alice')).toBe('~/cb')
     expect(redactNamespace('/Users/alice/cb//payments', '/Users/alice')).toBe('~/cb//payments')
     expect(redactNamespace('/Users/alice', '/Users/alice')).toBe('~')
-    expect(redactNamespace('/opt/data/proj', '/Users/alice')).toBe('ext/proj')
+    // Foreign roots keep a leaf name for readability plus a stable digest so
+    // two roots sharing a leaf never collide into one layer.
+    expect(redactNamespace('/opt/data/proj', '/Users/alice')).toMatch(/^ext\/proj-[0-9a-f]{8}$/)
+    expect(redactNamespace('/opt/data/proj', '/Users/alice')).toBe(
+      redactNamespace('/opt/data/proj', '/Users/alice')
+    )
+    expect(redactNamespace('/work/a/payments', '/Users/alice')).not.toBe(
+      redactNamespace('/home/b/payments', '/Users/alice')
+    )
     expect(redactNamespace('autonomous-crypto-desk', '/Users/alice')).toBe('autonomous-crypto-desk')
     expect(redactNamespace('~/already/relative', '/Users/alice')).toBe('~/already/relative')
   })
@@ -151,7 +159,7 @@ describe('brains/privacy: snapshots carry no owner filesystem layout', () => {
       // Never absolute; either ~/proj (if this machine's home is /Users/tester)
       // or ext/proj (leaf-only form for a foreign root).
       expect(row.namespace.startsWith('/')).toBe(false)
-      expect(['~/proj', 'ext/proj']).toContain(row.namespace)
+      expect(row.namespace === '~/proj' || /^ext\/proj-[0-9a-f]{8}$/.test(String(row.namespace))).toBe(true)
     } finally {
       snap.close()
     }

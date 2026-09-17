@@ -11,6 +11,7 @@ export interface FollowOptions {
   brainName: string
   brainDir: string
   gitRemote: string
+  identityPath?: string
 }
 
 export interface FollowResult {
@@ -26,7 +27,7 @@ export async function followBrain(opts: FollowOptions): Promise<FollowResult> {
   }
   gitClone(opts.gitRemote, opts.brainDir)
   const sha = gitHeadSha(opts.brainDir)
-  const result = await decryptAndValidate(opts.brainDir)
+  const result = await decryptAndValidate(opts.brainDir, opts.identityPath)
   logAudit({ type: 'brain_follow', brain: opts.brainName, git_remote: opts.gitRemote })
   return { ...result, sha }
 }
@@ -55,7 +56,10 @@ export async function refreshBrain(opts: RefreshOptions): Promise<{ updated: boo
   return { updated: true, memoryCount: result.memoryCount, sha: pullResult.sha }
 }
 
-async function decryptAndValidate(brainDir: string): Promise<{ memoryCount: number; ownerName: string | null; ownerPubkey: string | null }> {
+async function decryptAndValidate(
+  brainDir: string,
+  identityPath?: string
+): Promise<{ memoryCount: number; ownerName: string | null; ownerPubkey: string | null }> {
   const encPath = join(brainDir, 'brain.db.age')
   if (!existsSync(encPath)) {
     throw new Error(`No brain.db.age in ${brainDir}. Remote may be empty or non-encrypted.`)
@@ -69,7 +73,7 @@ async function decryptAndValidate(brainDir: string): Promise<{ memoryCount: numb
   const tmpDb = join(cacheDir, `brain.db.tmp-${process.pid}`)
   if (existsSync(tmpDb)) unlinkSync(tmpDb)
 
-  const identity = await loadIdentity()
+  const identity = await loadIdentity(identityPath)
   try {
     await decryptFileWithIdentity(encPath, tmpDb, identity)
   } catch (err) {

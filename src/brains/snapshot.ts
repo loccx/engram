@@ -4,6 +4,7 @@ import { DatabaseManager } from '../db/init.js'
 import { EMBEDDING_DIM, MODEL_ID } from '../embeddings/pipeline.js'
 import { ENGRAM_VERSION } from '../version.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
+import * as sqliteVec from 'sqlite-vec'
 
 /**
  * Rewrite a namespace into its portable, owner-relative form before export.
@@ -44,6 +45,21 @@ function scrubRow(row: Record<string, unknown>): Record<string, unknown> {
   return out
 }
 
+/**
+ * Short, stable digest used to keep redacted foreign roots injective: two
+ * different roots that happen to share a leaf name must not collide into one
+ * layer (e.g. /work/a/payments vs /home/b/payments). Deterministic, so the same
+ * root always redacts to the same value across snapshots.
+ */
+function shortHash(input: string): string {
+  let h = 2166136261
+  for (let i = 0; i < input.length; i++) {
+    h ^= input.charCodeAt(i)
+    h = Math.imul(h, 16777619)
+  }
+  return (h >>> 0).toString(16).padStart(8, '0')
+}
+
 export function redactNamespace(ns: string, home: string = homedir()): string {
   if (!ns) return ns
   const scopeIdx = ns.indexOf('//')
@@ -57,7 +73,7 @@ export function redactNamespace(ns: string, home: string = homedir()): string {
     redacted = base
   } else if (base.startsWith('/')) {
     const leaf = base.replace(/\/+$/, '').split('/').filter(Boolean).pop() ?? 'root'
-    redacted = `ext/${leaf}`
+    redacted = `ext/${leaf}-${shortHash(base)}`
   } else {
     redacted = base
   }
@@ -273,6 +289,15 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
     // handle (publish.ts, cli/brain.ts) and may not have sqlite-vec loaded
     // even though the target does. Probe it first so export degrades to
     // FTS-only instead of throwing "no such module: vec0".
+    // Callers open the source with a plain better-sqlite3 handle that has no
+    // extensions loaded (publish.ts, cli/brain.ts). Load sqlite-vec here so
+    // embeddings actually travel with the snapshot; if the extension is
+    // unavailable the probe below still degrades cleanly to FTS-only.
+    try {
+      sqliteVec.load(sourceDb)
+    } catch {
+      /* extension unavailable: vectors stay behind, export still succeeds */
+    }
     let sourceVectorsAvailable = vectorsAvailable
     if (sourceVectorsAvailable) {
       try {
