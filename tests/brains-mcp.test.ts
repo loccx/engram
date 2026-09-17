@@ -94,27 +94,39 @@ describe('brains/mcp', () => {
     expect(brains[0].has_decrypted_cache).toBe(false)
   })
 
-  it('searchBrain returns full-text matches', () => {
+  it('searchBrain returns full-text matches', async () => {
     buildBrainDb('work')
-    const results = searchBrain('work', 'kubernetes', 10, brainsDir)
+    const results = await searchBrain('work', 'kubernetes', 10, brainsDir)
     expect(results).toHaveLength(1)
     expect(results[0].id).toBe('mem-shared')
     expect(results[0].content).toContain('kubernetes')
   })
 
-  it('searchBrain throws when brain has no decrypted DB', () => {
+  it('searchBrain throws when brain has no decrypted DB', async () => {
     mkdirSync(join(brainsDir, 'empty-brain'), { recursive: true })
-    expect(() => searchBrain('empty-brain', 'anything', 10, brainsDir)).toThrow(/no decrypted/i)
+    await expect(searchBrain('empty-brain', 'anything', 10, brainsDir)).rejects.toThrow(/no decrypted/i)
   })
 
-  it('searchBrain rejects invalid brain names', () => {
-    expect(() => searchBrain('../escape', 'anything', 10, brainsDir)).toThrow(/invalid/i)
+  it('searchBrain rejects invalid brain names', async () => {
+    await expect(searchBrain('../escape', 'anything', 10, brainsDir)).rejects.toThrow(/invalid/i)
   })
 
-  it('searchBrain does NOT return private/non-shareable memories', () => {
+  it('searchBrain does NOT return private/non-shareable memories', async () => {
     buildBrainDb('work')
-    const results = searchBrain('work', 'password', 10, brainsDir)
+    const results = await searchBrain('work', 'password', 10, brainsDir)
     expect(results).toEqual([])
+  })
+
+  it('searchBrain falls back to lexical when the snapshot carries no vectors', async () => {
+    buildBrainDb('work')
+    const lexical = await searchBrain('work', 'kubernetes', 10, brainsDir)
+    const hybrid = await searchBrain('work', 'kubernetes', 10, brainsDir)
+    expect(hybrid.map((r) => r.id)).toEqual(lexical.map((r) => r.id))
+    expect(hybrid.map((r) => r.id)).toEqual(['mem-shared'])
+  })
+
+  it('searchBrain rejects an invalid brain name', async () => {
+    await expect(searchBrain('../escape', 'anything', 10, brainsDir)).rejects.toThrow(/invalid/i)
   })
 
   it('getBrainMemory returns the memory by id', () => {
@@ -156,7 +168,7 @@ describe('brains/mcp', () => {
 
   // --- natural-language retrieval + FTS safety -----------------------------
 
-  it('searchBrain matches a multi-word query precisely when every term is present', () => {
+  it('searchBrain matches a multi-word query precisely when every term is present', async () => {
     addMemory({
       id: 'mem-pg',
       content: 'We picked postgres over mysql for the billing service because of transactional DDL',
@@ -170,11 +182,11 @@ describe('brains/mcp', () => {
       importance: 0.2,
     })
     buildBrainDb('work')
-    const ids = searchBrain('work', 'postgres billing', 10, brainsDir).map((r) => r.id)
+    const ids = (await searchBrain('work', 'postgres billing', 10, brainsDir)).map((r) => r.id)
     expect(ids).toEqual(['mem-pg'])
   })
 
-  it('searchBrain answers a natural-language question via the OR fallback', () => {
+  it('searchBrain answers a natural-language question via the OR fallback', async () => {
     addMemory({
       id: 'mem-pg',
       content: 'We picked postgres over mysql for the billing service because of transactional DDL',
@@ -182,21 +194,23 @@ describe('brains/mcp', () => {
       importance: 0.9,
     })
     buildBrainDb('work')
-    const ids = searchBrain('work', 'why did we pick postgres over mysql for the billing service', 10, brainsDir).map(
+    const ids = (
+      await searchBrain('work', 'why did we pick postgres over mysql for the billing service', 10, brainsDir)
+    ).map(
       (r) => r.id
     )
     expect(ids).toContain('mem-pg')
   })
 
-  it('searchBrain falls back to OR when no single memory contains every term', () => {
+  it('searchBrain falls back to OR when no single memory contains every term', async () => {
     addMemory({ id: 'mem-pg', content: 'We picked postgres over mysql for the billing service', type: 'decision', importance: 0.9 })
     buildBrainDb('work')
-    const ids = searchBrain('work', 'kubernetes postgres', 10, brainsDir).map((r) => r.id)
+    const ids = (await searchBrain('work', 'kubernetes postgres', 10, brainsDir)).map((r) => r.id)
     expect(ids).toContain('mem-shared')
     expect(ids).toContain('mem-pg')
   })
 
-  it('searchBrain treats FTS5 operators, quotes and parens as plain terms', () => {
+  it('searchBrain treats FTS5 operators, quotes and parens as plain terms', async () => {
     addMemory({ id: 'mem-pg', content: 'We picked postgres over mysql for billing', type: 'decision' })
     buildBrainDb('work')
     const hostile = [
@@ -210,35 +224,35 @@ describe('brains/mcp', () => {
       '^postgres$',
     ]
     for (const query of hostile) {
-      expect(() => searchBrain('work', query, 10, brainsDir)).not.toThrow()
-      expect(Array.isArray(searchBrain('work', query, 10, brainsDir))).toBe(true)
+      const parsed = await searchBrain('work', query, 10, brainsDir)
+      expect(Array.isArray(parsed)).toBe(true)
     }
   })
 
-  it('searchBrain returns nothing for empty or stopword-only queries', () => {
+  it('searchBrain returns nothing for empty or stopword-only queries', async () => {
     buildBrainDb('work')
-    expect(searchBrain('work', '', 10, brainsDir)).toEqual([])
-    expect(searchBrain('work', 'why did we the of', 10, brainsDir)).toEqual([])
+    expect(await searchBrain('work', '', 10, brainsDir)).toEqual([])
+    expect(await searchBrain('work', 'why did we the of', 10, brainsDir)).toEqual([])
   })
 
-  it('searchBrain ranks a prominent decision above a passing note for the same term', () => {
+  it('searchBrain ranks a prominent decision above a passing note for the same term', async () => {
     addMemory({ id: 'mem-pg', content: 'postgres was chosen for billing because of transactional DDL', type: 'decision', importance: 0.9 })
     addMemory({ id: 'mem-pg-note', content: 'postgres appeared in a dashboard note', type: 'note', importance: 0.1 })
     buildBrainDb('work')
-    expect(searchBrain('work', 'postgres', 10, brainsDir)[0]?.id).toBe('mem-pg')
+    expect((await searchBrain('work', 'postgres', 10, brainsDir))[0]?.id).toBe('mem-pg')
   })
 
-  it('searchBrain respects the limit', () => {
+  it('searchBrain respects the limit', async () => {
     addMemory({ id: 'mem-p1', content: 'postgres alpha', created_at: 1 })
     addMemory({ id: 'mem-p2', content: 'postgres beta', created_at: 2 })
     addMemory({ id: 'mem-p3', content: 'postgres gamma', created_at: 3 })
     buildBrainDb('work')
-    expect(searchBrain('work', 'postgres', 2, brainsDir)).toHaveLength(2)
+    expect(await searchBrain('work', 'postgres', 2, brainsDir)).toHaveLength(2)
   })
 
   // --- supersession + manifest gating -------------------------------------
 
-  it('searchBrain and getBrainMemory hide memories the owner has superseded', () => {
+  it('searchBrain and getBrainMemory hide memories the owner has superseded', async () => {
     addMemory({ id: 'mem-old', content: 'Billing uses mysql for the ledger', type: 'decision', importance: 0.8 })
     addMemory({ id: 'mem-new', content: 'Billing uses postgres for the ledger', type: 'decision', importance: 0.8 })
     sourceMgr.db
@@ -247,20 +261,20 @@ describe('brains/mcp', () => {
       )
       .run('mem-new', 'mem-old', 1, 'supersedes', 0.95, Date.now())
     buildBrainDb('work')
-    const ids = searchBrain('work', 'billing', 10, brainsDir).map((r) => r.id)
+    const ids = (await searchBrain('work', 'billing', 10, brainsDir)).map((r) => r.id)
     expect(ids).toContain('mem-new')
     expect(ids).not.toContain('mem-old')
     expect(getBrainMemory('work', 'mem-old', brainsDir)).toBeNull()
     expect(getBrainMemory('work', 'mem-new', brainsDir)?.id).toBe('mem-new')
   })
 
-  it('searchBrain and getBrainMemory refuse a brain published with a newer schema', () => {
+  it('searchBrain and getBrainMemory refuse a brain published with a newer schema', async () => {
     buildBrainDb('work')
     const cachePath = join(brainsDir, 'work', '.cache', 'brain.db')
     const db = new Database(cachePath)
     db.prepare("UPDATE brain_manifest SET value = '999' WHERE key = 'schema_version'").run()
     db.close()
-    expect(() => searchBrain('work', 'kubernetes', 10, brainsDir)).toThrow(/cannot be read/i)
+    await expect(searchBrain('work', 'kubernetes', 10, brainsDir)).rejects.toThrow(/cannot be read/i)
     expect(() => getBrainMemory('work', 'mem-shared', brainsDir)).toThrow(/cannot be read/i)
   })
 
