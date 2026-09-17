@@ -94,26 +94,26 @@ describe('brains/mcp', () => {
     expect(brains[0].has_decrypted_cache).toBe(false)
   })
 
-  it('searchBrain returns full-text matches', () => {
+  it('searchBrain returns full-text matches', async () => {
     buildBrainDb('work')
-    const results = searchBrain('work', 'kubernetes', 10, brainsDir)
+    const results = await searchBrain('work', 'kubernetes', 10, brainsDir)
     expect(results).toHaveLength(1)
     expect(results[0].id).toBe('mem-shared')
     expect(results[0].content).toContain('kubernetes')
   })
 
-  it('searchBrain throws when brain has no decrypted DB', () => {
+  it('searchBrain throws when brain has no decrypted DB', async () => {
     mkdirSync(join(brainsDir, 'empty-brain'), { recursive: true })
-    expect(() => searchBrain('empty-brain', 'anything', 10, brainsDir)).toThrow(/no decrypted/i)
+    await expect(searchBrain('empty-brain', 'anything', 10, brainsDir)).rejects.toThrow(/no decrypted/i)
   })
 
-  it('searchBrain rejects invalid brain names', () => {
-    expect(() => searchBrain('../escape', 'anything', 10, brainsDir)).toThrow(/invalid/i)
+  it('searchBrain rejects invalid brain names', async () => {
+    await expect(searchBrain('../escape', 'anything', 10, brainsDir)).rejects.toThrow(/invalid/i)
   })
 
-  it('searchBrain does NOT return private/non-shareable memories', () => {
+  it('searchBrain does NOT return private/non-shareable memories', async () => {
     buildBrainDb('work')
-    const results = searchBrain('work', 'password', 10, brainsDir)
+    const results = await searchBrain('work', 'password', 10, brainsDir)
     expect(results).toEqual([])
   })
 

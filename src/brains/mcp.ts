@@ -5,6 +5,8 @@ import { BRAINS_DIR, sanitizeBrainName } from './paths.js'
 import { readManifest, readManifestFromFile, validateForImport, type BrainManifest } from './snapshot.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
 import { logAudit } from './audit.js'
+import * as sqliteVec from 'sqlite-vec'
+import { hybridSearch } from '../memory/search/hybrid.js'
 
 export interface BrainSummary {
   name: string
@@ -161,6 +163,54 @@ function assertBrainReadable(db: Database.Database, safe: string): void {
   }
 }
 
+async function tryHybridSearch(
+  db: Database.Database,
+  query: string,
+  limit: number
+): Promise<BrainSearchResult[] | null> {
+  let vectorRows = 0
+  try {
+    sqliteVec.load(db)
+    vectorRows = (db.prepare('SELECT COUNT(*) AS c FROM memory_vectors').get() as { c: number }).c
+  } catch {
+    return null // sqlite-vec unavailable: lexical path
+  }
+  if (vectorRows === 0) return null
+
+  try {
+    const results = await hybridSearch(db, true, query, {
+      limit,
+      touch: false, // read-only connection: never stamp access metadata
+      include_superseded: false,
+    })
+    if (results.length === 0) return []
+    // Defensive supersession filter: a retracted fact must never be served.
+    const ids = results.map((r) => r.id)
+    const placeholders = ids.map(() => '?').join(',')
+    const live = new Set(
+      (
+        db
+          .prepare(
+            `SELECT m.id FROM memories m WHERE m.id IN (${placeholders}) AND ${notSupersededClause('m.id')}`
+          )
+          .all(...ids) as Array<{ id: string }>
+      ).map((r) => r.id)
+    )
+    return results
+      .filter((r) => live.has(r.id))
+      .map((r) => ({
+        id: r.id,
+        content: r.content,
+        type: r.type,
+        importance: r.importance,
+        tags: r.tags,
+        created_at: r.created_at,
+      }))
+  } catch {
+    return null // embeddings/model unavailable: lexical path
+  }
+}
+
 export interface BrainSearchResult {
   id: string
   content: string
@@ -170,12 +220,12 @@ export interface BrainSearchResult {
   created_at: number
 }
 
-export function searchBrain(
+export async function searchBrain(
   brainName: string,
   query: string,
   limit: number = 10,
   brainsDir: string = BRAINS_DIR
-): BrainSearchResult[] {
+): Promise<BrainSearchResult[]> {
   const safe = sanitizeBrainName(brainName)
   const cachedDb = join(brainsDir, safe, '.cache', 'brain.db')
   const ownedDb = join(brainsDir, safe, 'brain.db')
@@ -189,6 +239,14 @@ export function searchBrain(
   const db = new Database(dbPath, { readonly: true })
   try {
     assertBrainReadable(db, safe)
+
+    // Semantic pass: a snapshot carries embeddings, so fuse them with the
+    // lexical hits. The brain DB is read-only (touch:false) and ANY failure —
+    // no sqlite-vec, no vectors, no local embedding model — degrades to the
+    // lexical path below rather than making a followed brain unsearchable.
+    const hybrid = await tryHybridSearch(db, query, limit)
+    if (hybrid) return hybrid
+
     const select = `SELECT m.id, m.content, m.type, m.importance, m.tags, m.created_at
        FROM memories_fts
        JOIN memories m ON m.rowid = memories_fts.rowid

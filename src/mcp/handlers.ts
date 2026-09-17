@@ -778,7 +778,7 @@ export async function handleTool(
         const brain = args.brain as string
         const query = args.query as string
         const limit = typeof args.limit === 'number' ? args.limit : 10
-        const results = searchBrain(brain, query, limit)
+        const results = await searchBrain(brain, query, limit)
         return ok({ brain, query, count: results.length, results })
       }
 

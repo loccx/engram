@@ -152,7 +152,7 @@ describe.skipIf(!gitAvailable)('brains acceptance: publish -> follow -> search',
     expect(followed.ownerPubkey).toBeTruthy()
 
     // ---- the followed brain answers a natural-language question
-    const hits = searchBrain(brainName, 'why did we pick postgres over mysql for billing', 5, followerRoot)
+    const hits = await searchBrain(brainName, 'why did we pick postgres over mysql for billing', 5, followerRoot)
     expect(hits.length).toBeGreaterThan(0)
     expect(hits[0].content).toContain('postgres')
 
@@ -176,7 +176,7 @@ describe.skipIf(!gitAvailable)('brains acceptance: publish -> follow -> search',
     plain.close()
 
     // ---- the retracted fact did not travel
-    expect(searchBrain(brainName, 'retracted', 10, followerRoot).length).toBe(0)
+    expect((await searchBrain(brainName, 'retracted', 10, followerRoot)).length).toBe(0)
 
     // ---- embeddings travelled: the snapshot carries the vector row
     const snap = new DatabaseManager(cache)
