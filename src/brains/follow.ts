@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import Database from 'better-sqlite3'
 import { gitClone, gitPull, gitHeadSha } from './git.js'
+import { acquireBrainLock } from './lock.js'
 import { decryptFileWithIdentity } from './encrypt.js'
 import { readManifestFromFile, validateForImport } from './snapshot.js'
 import { loadIdentity } from './identity.js'
@@ -51,7 +52,16 @@ export async function refreshBrain(opts: RefreshOptions): Promise<{ updated: boo
       return { updated: false, memoryCount: count, sha: pullResult.sha }
     }
   }
-  const result = await decryptAndValidate(opts.brainDir)
+  // Serialize the decrypt + cache swap: concurrent refreshes race the git index
+  // and both write the same .cache/brain.db. Released in the finally below.
+  // Declared outside the try: it is read after the finally releases the lock.
+  let result: Awaited<ReturnType<typeof decryptAndValidate>>
+  const lock = acquireBrainLock(opts.brainDir)
+  try {
+  result = await decryptAndValidate(opts.brainDir)
+  } finally {
+    lock.release()
+  }
   logAudit({ type: 'brain_refresh', brain: opts.brainName, memory_count: result.memoryCount })
   return { updated: true, memoryCount: result.memoryCount, sha: pullResult.sha }
 }

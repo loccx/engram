@@ -10,6 +10,7 @@ import {
   gitPush,
   gitCurrentBranch,
 } from './git.js'
+import { acquireBrainLock } from './lock.js'
 import { exportBrain, readManifestFromFile } from './snapshot.js'
 import { encryptFileToRecipients } from './encrypt.js'
 import { readRecipients } from './recipients.js'
@@ -146,10 +147,17 @@ export async function publishBrain(opts: PublishOptions): Promise<PublishResult>
       }
     }
   }
-  gitAddFiles(opts.brainDir, ['brain.db.age', 'manifest.json', 'recipients.txt', '.gitignore'])
-  const commitResult = gitCommit(opts.brainDir, `engram brain: publish ${memoryCount} memories`)
-
+  // Serialize the mutating section: two publishes can interleave commits and see
+  // each other's temp export. Released in the finally below, so a git failure
+  // cannot leave the brain locked.
+  // Declared outside the try: they are read after the finally releases the lock.
+  let commitResult: { committed: boolean; sha: string | null } = { committed: false, sha: null }
   let pushed = false
+  const lock = acquireBrainLock(opts.brainDir)
+  try {
+  gitAddFiles(opts.brainDir, ['brain.db.age', 'manifest.json', 'recipients.txt', '.gitignore'])
+  commitResult = gitCommit(opts.brainDir, `engram brain: publish ${memoryCount} memories`)
+
   if (opts.gitRemote) {
     gitSetRemote(opts.brainDir, 'origin', opts.gitRemote)
     const branch = gitCurrentBranch(opts.brainDir)
@@ -157,6 +165,9 @@ export async function publishBrain(opts: PublishOptions): Promise<PublishResult>
     pushed = true
   }
 
+  } finally {
+    lock.release()
+  }
   logAudit({
     type: 'brain_publish',
     brain: opts.brainName,
