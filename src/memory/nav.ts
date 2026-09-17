@@ -99,7 +99,7 @@ export async function refreshNavDigest(
       `UPDATE namespace_nodes
        SET digest = ?, digest_source_hash = ?, updated_at = ?
        WHERE path = ?`
-    ).run(content, hash, Math.floor(Date.now() / 1000), namespace)
+    ).run(content, hash, Date.now(), namespace)
 
     return { content, changed: content !== (node.digest ?? '') }
   } catch (e) {

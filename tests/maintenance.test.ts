@@ -11,7 +11,9 @@ import {
   runPendingMaintenanceJobs,
   getMaintenanceStatus,
   enqueueEndSessionMaintenance,
+  enqueueNamespaceMaintenance,
 } from '../src/maintenance/jobs.js'
+import { getNode } from '../src/namespace/tree.js'
 
 const NS = '/home/user/maintenance-project'
 const T0 = 1_700_000_000_000
@@ -244,22 +246,65 @@ describe('maintenance jobs', () => {
     const queued = mcpDb
       .prepare("SELECT job_type, target_key, source FROM maintenance_jobs WHERE status = 'queued'")
       .all() as Array<{ job_type: string; target_key: string; source: string }>
-    expect(queued.length).toBe(6)
+    expect(queued.length).toBe(7)
     const nonNav = queued.filter((q) => !q.target_key.startsWith('nav:') && q.job_type !== 'promote')
     expect(nonNav.length).toBe(4)
     for (const q of nonNav) {
       expect(q.target_key).toBe(NS)
       expect(q.source).toBe('end_session')
     }
-    // P2: nav digest job for the namespace itself (no parent node in fixture).
+    // P2: nav digest jobs for the namespace itself AND its nearest ancestor.
+    // The enqueuer now materializes the node chain, so the parent nav layer is
+    // primed in the same call; previously an absent node made both the enqueue
+    // and the eventual refresh a silent no-op.
     expect(queued.some((q) => q.target_key === 'nav:' + NS)).toBe(true)
+    expect(queued.some((q) => q.target_key === 'nav:/home/user')).toBe(true)
 
     // Disabled: no enqueues.
     process.env.ENGRAM_MAINTENANCE_DISABLED = '1'
     const n = enqueueEndSessionMaintenance(mcpDb, 'sess-a', NS)
     expect(n).toBe(0)
     const total = (mcpDb.prepare('SELECT COUNT(*) AS n FROM maintenance_jobs').get() as { n: number }).n
-    expect(total).toBe(6)
+    expect(total).toBe(7)
+  })
+
+  it('startup enqueue primes the namespace tree and consolidates each forest root', () => {
+    resetDatabase()
+    resetServicesForTests()
+    getDatabase(':memory:')
+    const mcpDb = getDatabase().db
+    mcpDb.prepare("INSERT INTO sessions(id, project_path, started_at) VALUES ('s-start', ?, ?)").run(NS, T0)
+    mcpDb.prepare(
+      `INSERT INTO memories(id, session_id, project_path, namespace, content, type, importance, tags, created_at)
+       VALUES ('m-start', 's-start', ?, ?, 'primed fact', 'note', 0.5, '[]', ?)`
+    ).run(NS, NS, T0)
+
+    const namespaces = enqueueNamespaceMaintenance(mcpDb, T0)
+    expect(namespaces).toBe(1)
+
+    // Nodes + counts now exist for memories that predate the tree (live data
+    // reached 4063 memories with only 11 nodes and every count at 0).
+    expect(getNode(mcpDb, NS)?.memory_count).toBe(1)
+    expect(getNode(mcpDb, '/home/user')).not.toBeNull()
+
+    // One consolidation job per forest root, keyed off the materialized tree.
+    const roots = mcpDb
+      .prepare('SELECT path FROM namespace_nodes WHERE parent_path IS NULL ORDER BY path')
+      .all() as Array<{ path: string }>
+    expect(roots.length).toBeGreaterThan(0)
+    const navtree = mcpDb
+      .prepare(
+        "SELECT target_key FROM maintenance_jobs WHERE job_type = 'digest' AND target_key LIKE 'navtree:%' ORDER BY target_key"
+      )
+      .all() as Array<{ target_key: string }>
+    expect(navtree.map((r) => r.target_key)).toEqual(roots.map((r) => `navtree:${r.path}`))
+
+    // Idempotent across boots: the active-row index coalesces every re-enqueue.
+    const before = (mcpDb.prepare('SELECT COUNT(*) AS n FROM maintenance_jobs').get() as { n: number }).n
+    enqueueNamespaceMaintenance(mcpDb, T0 + 1)
+
+    const after = (mcpDb.prepare('SELECT COUNT(*) AS n FROM maintenance_jobs').get() as { n: number }).n
+    expect(after).toBe(before)
   })
 
   it('end_session never fails the tool call even if the jobs table is unusable', async () => {
