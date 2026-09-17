@@ -9,6 +9,11 @@ import { ENGRAM_VERSION } from './version.js'
 
 const startTime = Date.now()
 
+// Tool names known to this server. A bare JSON-RPC method must never be
+// dispatched into handleTool() — that would let a client invoke any tool
+// without going through the validated `tools/call` path.
+const TOOL_NAMES = new Set(tools.map((t) => t.name))
+
 export function createServer(): Hono {
   const app = new Hono()
 
@@ -101,12 +106,33 @@ export function createServer(): Hono {
             error: { code: -32602, message: 'params.name is required for tools/call' },
           }, 400)
         }
+        if (!TOOL_NAMES.has(toolName)) {
+          return c.json({
+            jsonrpc: '2.0',
+            id,
+            error: { code: -32602, message: `Unknown tool: ${toolName}` },
+          }, 400)
+        }
         const result = await handleTool(toolName, callParams?.arguments ?? {}, ctx)
         return c.json({ jsonrpc: '2.0', id, result })
       }
 
-      const result = await handleTool(method, (params as Record<string, unknown>) ?? {}, ctx)
-      return c.json({ jsonrpc: '2.0', id, result })
+      if (method === 'ping') {
+        return c.json({ jsonrpc: '2.0', id, result: {} })
+      }
+
+      // JSON-RPC notifications carry no id and must not receive a response.
+      if (method.startsWith('notifications/')) {
+        return c.body(null, 202)
+      }
+
+      // Only the methods above are implemented. Reaching here means the client
+      // sent an unsupported method; it must not be treated as a tool name.
+      return c.json({
+        jsonrpc: '2.0',
+        id,
+        error: { code: -32601, message: `Method not found: ${method}` },
+      }, 400)
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       logger.error({ method, error: message }, 'MCP handler error')
