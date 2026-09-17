@@ -18,6 +18,32 @@ import { notSupersededClause } from '../contradictions/supersession.js'
  * The `//scope` suffix survives verbatim so layer/subtree matching keeps working
  * on the follower side.
  */
+const HOME_PATH_PATTERNS: Array<[RegExp, string]> = [
+  [/\/Users\/[^/\s"'`]+/g, '~'], // macOS
+  [/\/home\/[^/\s"'`]+/g, '~'], // Linux
+  [/[A-Za-z]:\\?Users\\?[^\\\s"'`]+/g, '~'], // Windows
+]
+
+/**
+ * Free text can mention the owner's paths too: notes, procedure preconditions
+ * and extracted entities are full of them. The privacy decision is to redact
+ * the owner prefix everywhere it appears, not only in metadata columns.
+ */
+export function scrubHomePaths(value: string): string {
+  let out = value
+  for (const [re, to] of HOME_PATH_PATTERNS) out = out.replace(re, to)
+  return out
+}
+
+/** Scrub every string field of a row before it enters the snapshot. */
+function scrubRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out: Record<string, unknown> = {}
+  for (const [k, v] of Object.entries(row)) {
+    out[k] = typeof v === 'string' ? scrubHomePaths(v) : v
+  }
+  return out
+}
+
 export function redactNamespace(ns: string, home: string = homedir()): string {
   if (!ns) return ns
   const scopeIdx = ns.indexOf('//')
@@ -226,7 +252,7 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
         `INSERT INTO memories (${colList}) VALUES (${valPlaceholders})`
       )
       for (const m of memories) {
-        const row: Record<string, unknown> = { ...m }
+        const row = scrubRow({ ...m })
         const raw =
           typeof row.namespace === 'string' && row.namespace
             ? row.namespace
@@ -310,7 +336,8 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
           `INSERT INTO memory_entities (${colList}) VALUES (${valPlaceholders})`
         )
         for (const e of ents) {
-          insertEnt.run(...entCols.map((c) => e[c]))
+          const row = scrubRow(e)
+          insertEnt.run(...entCols.map((c) => row[c]))
         }
       }
     }
