@@ -43,18 +43,23 @@ function main() {
       const rows = db
         .prepare(
           `SELECT id, COALESCE(namespace, project_path) AS namespace, content,
-                  (access_count IS NULL) AS acc_null, access_count, created_at
+                  (access_count IS NULL) AS acc_null, access_count, created_at,
+                  pinned, importance
            FROM memories WHERE content = ?`
         )
-        .all(g.content) as Array<Row & { acc_null: number; access_count: number; created_at: number }>
-      // keep highest access_count (originals preferred on tie), delete rest
+      .all(g.content) as Array<Row & { acc_null: number; access_count: number; created_at: number; pinned: number; importance: number }>
+      // Keep the strongest row: pinned first, then importance, then access_count,
+      // then oldest (the original). Never let a pinned row be the victim.
       const sorted = [...rows].sort((a, b) => {
+        if ((b.pinned ?? 0) !== (a.pinned ?? 0)) return (b.pinned ?? 0) - (a.pinned ?? 0)
+        if ((b.importance ?? 0) !== (a.importance ?? 0)) return (b.importance ?? 0) - (a.importance ?? 0)
         const aa = a.acc_null ? -1 : a.access_count
         const bb = b.acc_null ? -1 : b.access_count
         if (bb !== aa) return bb - aa
         return a.created_at - b.created_at
       })
       for (const dup of sorted.slice(1)) {
+        if ((dup.pinned ?? 0) === 1) continue
         plan.push({ tier: 1, id: dup.id, why: 'exact-dup', ns: dup.namespace })
       }
     }
@@ -101,6 +106,23 @@ function main() {
       .all(cutoff) as Row[]
     for (const r of rows) plan.push({ tier: 4, id: r.id, why: 'stale-low-value', ns: r.namespace })
   }
+
+  // Safety net applied after every tier: never delete a pinned memory, and never
+  // plan the same row twice (one row can be selected by more than one tier).
+  // Tier 4 already filters pinned; this makes the guarantee global so no tier
+  // and no hardcoded drift list can bypass it.
+  const pinnedIds = new Set(
+    (db.prepare('SELECT id FROM memories WHERE pinned = 1').all() as Array<{ id: string }>).map((r) => r.id)
+  )
+  const seenIds = new Set<string>()
+  const safePlan = plan.filter((p) => {
+    if (pinnedIds.has(p.id)) return false
+    if (seenIds.has(p.id)) return false
+    seenIds.add(p.id)
+    return true
+  })
+  plan.length = 0
+  plan.push(...safePlan)
 
   // Report
   const byTier = new Map<number, number>()
