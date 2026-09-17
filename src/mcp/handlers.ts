@@ -28,6 +28,7 @@ import {
 } from '../maintenance/jobs.js'
 import { getMetricsTracker, type MetricsTracker } from '../metrics/tracker.js'
 import { logger } from '../utils/logger.js'
+import { logAudit } from '../brains/audit.js'
 import type {
   MemoryType,
   StoreMemoryInput,
@@ -684,6 +685,18 @@ export async function handleTool(
         }
         const result = await store.revise(input)
         if (!result) return err(`Memory ${id} not found`)
+        // `revise` can flip the export gate (shareable) without going through
+        // `mark_shareable`, which leaves the only audit trail the brains spec
+        // relies on incomplete: an agent could widen what is publishable with no
+        // record. Mirror the mark_shareable event here.
+        if (input.shareable === true) {
+          logAudit({
+            type: 'mark_shareable',
+            namespace: result.memory.namespace ?? result.memory.project_path,
+            memory_id: result.id,
+            actor: 'mcp',
+          })
+        }
         // Pin transfer moved with the revision; refresh the digest in the
         // background so the retired row's content never lingers in it. Key
         // by namespace (namespace ?? project_path) like every digest read.
