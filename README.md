@@ -1,111 +1,125 @@
-# Engram
+# engram
 
-Local memory for AI coding tools. Claude Code, Cursor, anything that speaks MCP, at the same time.
+Local memory for AI coding tools. Speaks MCP over HTTP, so Claude Code, Cursor,
+or anything else can share one memory store per project.
 
-```
-Claude Code
-Cursor        -> http://localhost:8888/mcp?project=/your/repo -> engram.db
-OpenCode
-```
+## Install and run
 
-## Setup
+Requires Node 20.19 or newer.
 
 ```bash
-npm install -g engram
-engram warm
-engram start
+npm install -g engram     # or: npm install && npm run build, then node dist/index.js
+engram warm               # fetch the embedding model once (nomic-embed-text-v1.5, ~137 MB)
+engram start              # daemon on 127.0.0.1:8888
 ```
 
-`.claude/settings.json`:
+The daemon binds loopback only. `ENGRAM_ALLOW_NONLOCAL=1` widens the bind, and is
+a deliberate opt-in because the daemon has no authentication.
+
+Point a client at it:
+
 ```json
-{
-  "mcpServers": {
-    "engram": {
-      "type": "http",
-      "url": "http://localhost:8888/mcp?project=/absolute/path/to/your/project"
-    }
-  }
-}
+{ "mcpServers": { "engram": {
+    "type": "http",
+    "url": "http://localhost:8888/mcp?project=/absolute/path/to/repo" } } }
 ```
 
-`?project=` scopes memories to that path. Skip it and engram walks up from cwd to find `.git`. Same `?project=` value from multiple tools shares the same memory pool.
+`?project=` scopes memories to that path. Without it, engram walks up from its own
+working directory to find `.git`.
+
+An HTTP server cannot see the client's directory, so `stdio-server.mjs` exists for
+per-workspace scoping: the client launches it with the project as cwd, it resolves
+that to the git root (a worktree resolves to its primary repo, not the throwaway
+path), and forwards with the right `?project=`.
+
+```json
+{ "mcpServers": { "engram": {
+    "command": "node",
+    "args": ["/path/to/engram/stdio-server.mjs"] } } }
+```
 
 ## Tools
 
-| Tool | What it does |
+| Tool | Purpose |
 |---|---|
-| `get_context` | Load memories for the current project, plus a pre-consolidated `digest` string of pinned facts. Call at session start. |
-| `store_memory` | Save a decision, bug, pattern, note. Extracts entities, embeds, auto links, checks for contradictions in the background. |
-| `search_memories` | FTS5 + semantic search, fused with RRF. |
-| `search_by_entity` | Find memories mentioning a file, function, class, library. |
-| `get_related` | Walk the memory graph from a memory. Depth 1 is direct links, depth 2+ is PageRank over the link graph. |
-| `list_memories` | Browse with tag, type, namespace filters. |
-| `get_memory` / `update_memory` / `forget_memory` | Fetch, patch, delete by id. |
-| `set_pin` | Pin a memory so it always shows up and never decays. |
-| `consolidate_memories` | Find near duplicates to clean up. |
-| `get_stats` | Local usage stats. |
-| `list_brains` / `search_brain` / `get_brain_memory` / `mark_shareable` | Share memories with teammates over git. See below. |
+| `get_context` | Memories for the current namespace, plus a digest of pinned facts. Call at session start. |
+| `recall_context` | Progressive retrieval for a specific question. |
+| `store_memory` | Save a note, decision, bug, pattern, gotcha, todo or procedure. Embeds, links to related memories, and queues a contradiction check. Pass `pinned: true` to make it permanent. |
+| `search_memories` | Hybrid search: FTS5 and local vectors fused with reciprocal rank fusion. |
+| `search_by_entity` | Look up a file, function, class or library. |
+| `get_related` | Walk the memory graph. Depth 1 is direct links; deeper runs PageRank. |
+| `list_memories` | Browse by tag, type or namespace. |
+| `get_memory`, `update_memory`, `forget_memory`, `revise_memory`, `get_memory_history` | Fetch, patch, delete, revise, and inspect revision history. |
+| `set_pin` | Pin or unpin. Pinned is the only tier that never decays. |
+| `consolidate_memories` | Find near-duplicates. |
+| `end_session` | Close the session and enqueue digest maintenance. |
+| `get_stats`, `get_maintenance_status`, `run_pending_maintenance` | Usage statistics and the background job queue. |
+| `list_brains`, `search_brain`, `get_brain_memory`, `mark_shareable` | Query and curate shared brains. See below. |
 
-Add to `CLAUDE.md`:
-```markdown
-## memory
-call get_context at the start of every session.
-use store_memory for decisions, bugs, patterns, gotchas.
-set importance 0 to 1. higher means it sticks around longer.
-```
-
-CLI:
-```bash
-engram search "authentication"
-engram ls --type decision
-engram status
-engram stop
-```
+CLI: `engram status`, `engram search <query>`, `engram ls --type decision`, `engram stop`.
 
 ## How it works
 
-Memories are scoped per project. `/projects/app-a` never sees `/projects/app-b`.
+Memories are scoped per namespace, and a namespace is a path, so the directory tree
+is the memory tree: retrieval searches the session's deepest scope first and ascends
+through parent layers only when the leaf is thin. `/projects/app-a` never sees
+`/projects/app-b`.
 
-Search is hybrid: FTS5 keyword match plus local vector embeddings ([all-MiniLM-L6-v2](https://huggingface.co/sentence-transformers/all-MiniLM-L6-v2)), fused with reciprocal rank fusion. Store "WAL mode SQLite", search "concurrent database access", still finds it. `use_reranker=true` adds a cross encoder pass on top, costs 500 to 1000ms, needs `ENGRAM_RERANKER_ENABLED=1`.
+Storage is SQLite with sqlite-vec. Keyword and vector results are fused rather than
+ranked separately, so storing "WAL mode SQLite" and searching "concurrent database
+access" still finds it.
 
-Memories decay. Importance and access frequency set how fast, following an Ebbinghaus curve. High importance and frequent use stays near the top for months. A throwaway note drops off in days. `set_pin` exempts a memory from decay entirely.
+**Tiers.** `pinned` is the only permanent tier. Everything else is scored
+`0.5·importance + 0.3·access + 0.2·recency` and classified hot, warm or cold — which
+means importance alone does not make a memory survive; it has to be pinned.
 
-Pinned memories also roll up into a digest: a small, always-present markdown snapshot that `get_context` hands back with zero search cost, so the facts you care most about are in context before the agent asks for anything. It is derived from the pinned set and cached until that set changes, never a rewrite of it. `ENGRAM_DIGEST_BUDGET_CHARS` caps its size (default 2000); over budget, an LLM condenses it if one is configured, otherwise it truncates.
+**Digest.** Pinned memories roll up into a cached markdown digest returned by
+`get_context` with no search cost. `ENGRAM_DIGEST_BUDGET_CHARS` caps it (default
+2000). With an LLM configured, an over-budget digest is condensed rather than
+truncated.
 
-Storing a memory auto links it to similar existing ones. `get_related` walks those links: depth 1 is direct, depth 2+ runs PageRank over the graph for multi hop discovery.
+**Contradictions.** When a new memory contradicts an older one, a background pass can
+mark the old one superseded rather than deleting it. Reads hide superseded facts
+unless you ask for them.
 
-Facts get corrected, not just deleted. When a new memory contradicts an old one, a background LLM pass (set `ENGRAM_LLM_BASE_URL` and `ENGRAM_LLM_API_KEY`) marks the old one superseded instead of removing it. Superseded facts stay hidden from search unless you pass `include_superseded=true`.
+**Local by default.** Nothing leaves the machine unless you configure
+`ENGRAM_LLM_BASE_URL` and `ENGRAM_LLM_API_KEY`, which enable LLM-backed importance
+scoring, contradiction adjudication, promotion distillation and digest
+consolidation. With no LLM configured those paths are either off or deterministic.
 
-File paths, function names, classes, libraries get extracted and indexed on store, so `search_by_entity` can do exact lookups without going through semantic search.
-
-Everything is local. Nothing leaves your machine.
-
-```
-~/Library/Application Support/engram/engram.db   # macOS
-~/.local/share/engram/engram.db                   # Linux
-```
+Database: `~/Library/Application Support/engram-nodejs/engram.db` on macOS,
+`~/.local/share/engram-nodejs/engram.db` on Linux.
 
 ## Brains
 
-A brain is an encrypted, git versioned snapshot of one namespace's shareable memories. Publish yours, teammates follow it, their agents query it directly.
+A brain is an encrypted, git-distributed snapshot of the memories you mark shareable.
+Publish yours; teammates follow it and their agents query it directly.
 
 ```bash
 engram init
-engram brain init my-eng-brain
-engram brain grant my-eng-brain bob <bob's engram_pub_...>
-engram brain publish my-eng-brain --confirm
+engram brain init my-brain
+engram brain grant my-brain <teammate's engram_pub_...>
+engram brain publish my-brain --confirm --remote <git-url>
 
 # teammate
-engram brain follow <git-url> --as alice
+engram brain follow alice <git-url>
 engram brain refresh alice
 ```
 
-Then `search_brain(brain="alice", query="why postgres over mysql")` returns Alice's actual memories with attribution. Nothing gets published unless you mark it shareable first. Encryption is plain `age`, no custom crypto, decryptable with the `age` CLI alone if you ever want out. No server, just a git remote. Full design in `docs/brains-spec.md`.
+Then `search_brain(brain="alice", query="why postgres over mysql")` returns Alice's
+memories with attribution.
+
+Encryption is `age`; keys are `engram_pub_...` / `engram_priv_...` (bech32 over age).
+Distribution is a plain git remote — no server, and the encrypted snapshot is the
+only artefact that ships.
+
+What travels: the memories you marked shareable, their entities and links, their
+embeddings, and reduced session rows. Namespaces are rewritten owner-relative
+(`/Users/you/cb` becomes `~/cb`, foreign roots become `ext/<leaf>-<hash>`), absolute
+project paths are dropped, and superseded memories are excluded — so a follower sees
+your knowledge, not your filesystem. Revocation applies to future snapshots only,
+because a recipient who already decrypted one keeps it.
 
 ## Memory types
 
 note, decision, bug, pattern, gotcha, todo, procedure
-
-## Requirements
-
-Node 20+. Internet once, to pull the embedding model.
