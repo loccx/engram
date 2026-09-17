@@ -192,7 +192,7 @@ describe('compat: brain snapshot schema gate + pre-migration exports', () => {
   }
 
   it('validateForImport refuses brains from a newer schema', () => {
-    const err = validateForImport(manifest({ schema_version: 7, engram_version: '0.9.0' }))
+    const err = validateForImport(manifest({ schema_version: 8, engram_version: '0.9.0' }))
     expect(err?.kind).toBe('schema_version')
   })
 

@@ -1,5 +1,5 @@
 import { Command } from 'commander'
-import { existsSync, mkdirSync, readdirSync, statSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import Database from 'better-sqlite3'
 import { ENGRAM_HOME, BRAINS_DIR, IDENTITY_FILE, sanitizeBrainName } from '../brains/paths.js'
@@ -10,6 +10,7 @@ import { encryptFileToRecipients, decryptFileWithIdentity } from '../brains/encr
 import { logAudit } from '../brains/audit.js'
 import { publishBrain } from '../brains/publish.js'
 import { followBrain, refreshBrain } from '../brains/follow.js'
+import { getBrainConfig, setBrainConfig } from '../brains/config.js'
 
 export function registerBrainCommands(program: Command): void {
   program
@@ -59,6 +60,7 @@ export function registerBrainCommands(program: Command): void {
         return
       }
       mkdirSync(dir, { recursive: true })
+      setBrainConfig(safe, { namespace: opts.namespace, description: opts.description })
       console.log(`Created brain "${safe}" at ${dir}`)
       console.log(`  namespace: ${opts.namespace}`)
       if (opts.description) console.log(`  description: ${opts.description}`)
@@ -68,10 +70,11 @@ export function registerBrainCommands(program: Command): void {
   brain
     .command('export <name>')
     .description('Export shareable memories from a namespace into the brain snapshot')
-    .option('-n, --namespace <namespace>', 'Engram namespace', 'default')
+    .option('-n, --namespace <namespace>', 'Engram namespace (default: the namespace recorded at brain init)')
     .option('-d, --description <text>', 'Brain description (stored in manifest)')
+    .option('--include-scopes', 'Also export descendant layers (<ns>//<scope> and deeper)', false)
     .option('--db <path>', 'Source engram.db path', join(ENGRAM_HOME, 'engram.db'))
-    .action(async (name: string, opts: { namespace: string; description?: string; db: string }) => {
+    .action(async (name: string, opts: { namespace?: string; description?: string; includeScopes: boolean; db: string }) => {
       const safe = sanitizeBrainName(name)
       const brainDir = join(BRAINS_DIR, safe)
       if (!existsSync(brainDir)) {
@@ -84,17 +87,34 @@ export function registerBrainCommands(program: Command): void {
         process.exitCode = 1
         return
       }
+      const config = getBrainConfig(safe)
+      const namespace = opts.namespace ?? config?.namespace ?? 'default'
       const identity = identityExists() ? await loadIdentity() : null
       const source = new Database(opts.db, { readonly: true })
       try {
         const outputPath = join(brainDir, 'brain.db')
-        const result = exportBrain(source, {
-          namespace: opts.namespace,
-          outputPath,
-          description: opts.description,
-          ownerPubkey: identity?.publicKey,
-        })
+        // exportBrain cannot re-use a populated target (memories PK insert), so
+        // a second `brain export` used to fail outright. Export into a staging
+        // file and rename: repeatable, and the swap is atomic.
+        const stagingPath = `${outputPath}.staging-${process.pid}`
+        let result: ReturnType<typeof exportBrain>
+        try {
+          result = exportBrain(source, {
+            namespace,
+            outputPath: stagingPath,
+            description: opts.description ?? config?.description,
+            ownerPubkey: identity?.publicKey,
+            includeScopes: opts.includeScopes,
+          })
+        } catch (err) {
+          if (existsSync(stagingPath)) unlinkSync(stagingPath)
+          throw err
+        }
+        renameSync(stagingPath, outputPath)
         console.log(`Exported ${result.memoryCount} shareable memories to ${outputPath}`)
+        console.log(
+          `  namespace:  ${result.manifest.source_namespace}${opts.includeScopes ? ' (+ descendant layers)' : ''}`
+        )
         console.log(`  embedding_model: ${result.manifest.embedding_model}`)
         console.log(`  owner_pubkey: ${result.manifest.owner_pubkey ?? '(none — run \`engram init\`)'}`)
       } finally {
@@ -204,12 +224,13 @@ export function registerBrainCommands(program: Command): void {
   brain
     .command('publish <name>')
     .description('Snapshot + encrypt + git commit/push (use --confirm to actually push)')
-    .option('-n, --namespace <namespace>', 'Engram namespace', 'default')
+    .option('-n, --namespace <namespace>', 'Engram namespace (default: the namespace recorded at brain init)')
     .option('-d, --description <text>', 'Brain description (stored in manifest)')
+    .option('--include-scopes', 'Also export descendant layers (<ns>//<scope> and deeper)', false)
     .option('--db <path>', 'Source engram.db path', join(ENGRAM_HOME, 'engram.db'))
     .option('--remote <url>', 'Git remote URL (e.g. git@github.com:you/brain-work.git)')
     .option('--confirm', 'Actually commit + push (default is dry-run)', false)
-    .action(async (name: string, opts: { namespace: string; description?: string; db: string; remote?: string; confirm: boolean }) => {
+    .action(async (name: string, opts: { namespace?: string; description?: string; includeScopes: boolean; db: string; remote?: string; confirm: boolean }) => {
       const safe = sanitizeBrainName(name)
       const brainDir = join(BRAINS_DIR, safe)
       if (!existsSync(brainDir)) {
@@ -222,19 +243,23 @@ export function registerBrainCommands(program: Command): void {
         process.exitCode = 1
         return
       }
+      const config = getBrainConfig(safe)
+      const namespace = opts.namespace ?? config?.namespace ?? 'default'
       const identity = identityExists() ? await loadIdentity() : null
       try {
         const result = await publishBrain({
           brainName: safe,
           brainDir,
           sourceDbPath: opts.db,
-          namespace: opts.namespace,
-          description: opts.description,
+          namespace,
+          includeScopes: opts.includeScopes,
+          description: opts.description ?? config?.description,
           ownerPubkey: identity?.publicKey ?? null,
           gitRemote: opts.remote ?? null,
           dryRun: !opts.confirm,
         })
         console.log(`Publish ${opts.confirm ? 'COMPLETE' : 'DRY-RUN'}:`)
+        console.log(`  namespace:  ${namespace}${opts.includeScopes ? ' (+ descendant layers)' : ''}`)
         console.log(`  memories:   ${result.memoryCount}`)
         console.log(`  recipients: ${result.recipientCount}`)
         console.log(`  committed:  ${result.committed}${result.sha ? ` (${result.sha.slice(0, 8)})` : ''}`)

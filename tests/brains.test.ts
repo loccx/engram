@@ -159,7 +159,7 @@ describe('brains/snapshot', () => {
     expect(manifest.description).toBe('test brain')
     expect(manifest.owner_name).toBe('alice')
     expect(manifest.owner_pubkey).toBe('engram_pub_xxx')
-    expect(manifest.schema_version).toBe(6)
+    expect(manifest.schema_version).toBe(7)
     expect(manifest.embedding_model).toBe('nomic-ai/nomic-embed-text-v1.5')
     expect(manifest.embedding_dim).toBe(768)
   })
@@ -214,6 +214,8 @@ describe('brains/snapshot', () => {
       description: null,
       exported_at: Date.now(),
       memory_count: 1,
+      source_namespace: 'work',
+      included_layers: null,
     }
     const err = validateForImport(bad)
     expect(err?.kind).toBe('embedding_model')
@@ -230,8 +232,93 @@ describe('brains/snapshot', () => {
       description: null,
       exported_at: 0,
       memory_count: 0,
+      source_namespace: '',
+      included_layers: null,
     }
     const err = validateForImport(bad)
     expect(err?.kind).toBe('corrupt')
+  })
+
+  it('includes synthetic scope layers only when includeScopes is set', () => {
+    insertMemory('m1', 'work', 1)
+    insertMemory('m2', 'work//payments', 1)
+    insertMemory('m3', 'work/child', 1)
+    insertMemory('m4', 'workshop', 1) // sibling prefix must never match
+    insertMemory('m5', 'personal', 1)
+
+    const exactPath = join(tmp, 'brain-exact.db')
+    const exact = exportBrain(sourceMgr.db, { namespace: 'work', outputPath: exactPath })
+    expect(exact.memoryCount).toBe(1)
+
+    const layeredPath = join(tmp, 'brain-layers.db')
+    const layered = exportBrain(sourceMgr.db, {
+      namespace: 'work',
+      outputPath: layeredPath,
+      includeScopes: true,
+    })
+    expect(layered.memoryCount).toBe(3)
+
+    const target = new Database(layeredPath, { readonly: true })
+    const ids = target.prepare('SELECT id FROM memories ORDER BY id').all() as Array<{ id: string }>
+    target.close()
+    expect(ids.map((r) => r.id)).toEqual(['m1', 'm2', 'm3'])
+  })
+
+  it('records source_namespace and the included layers in the manifest', () => {
+    insertMemory('m1', 'work', 1)
+    insertMemory('m2', 'work//payments', 1)
+    const layeredPath = join(tmp, 'brain-layers-manifest.db')
+    exportBrain(sourceMgr.db, { namespace: 'work', outputPath: layeredPath, includeScopes: true })
+
+    const manifest = readManifestFromFile(layeredPath)
+    expect(manifest.source_namespace).toBe('work')
+    expect(JSON.parse(manifest.included_layers ?? '[]')).toEqual(['work', 'work//payments'])
+  })
+
+  it('exports when the source connection has no sqlite-vec loaded', () => {
+    const srcPath = join(tmp, 'plain-source.db')
+    const mgr = new DatabaseManager(srcPath)
+    mgr.db
+      .prepare('INSERT INTO sessions(id, project_path, started_at) VALUES (?, ?, ?)')
+      .run('sess1', '/proj', Date.now())
+    mgr.db
+      .prepare(
+        'INSERT INTO memories(id, session_id, project_path, content, type, importance, tags, created_at, access_count, namespace, shareable, vec_rowid) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run('m1', 'sess1', '/proj', 'hello', 'note', 0.5, '[]', Date.now(), 0, 'work', 1, 1)
+    mgr.close()
+
+    // Mirrors publish.ts / cli/brain.ts: a plain better-sqlite3 handle with no
+    // sqlite-vec extension. The vector copy must degrade, not throw
+    // "no such module: vec0".
+    const plain = new Database(srcPath, { readonly: true })
+    const vecPath = join(tmp, 'brain-novec.db')
+    const result = exportBrain(plain, { namespace: 'work', outputPath: vecPath })
+    plain.close()
+    expect(result.memoryCount).toBe(1)
+  })
+
+  it('materializes a missing session row instead of aborting the export', () => {
+    sourceMgr.db.pragma('foreign_keys = OFF')
+    try {
+      sourceMgr.db
+        .prepare(
+          'INSERT INTO memories(id, session_id, project_path, content, type, importance, tags, created_at, access_count, namespace, shareable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+        )
+        .run('m1', 'ghost-session', '/proj', 'orphan', 'note', 0.5, '[]', Date.now(), 0, 'work', 1)
+    } finally {
+      sourceMgr.db.pragma('foreign_keys = ON')
+    }
+
+    const ghostPath = join(tmp, 'brain-ghost.db')
+    const result = exportBrain(sourceMgr.db, { namespace: 'work', outputPath: ghostPath })
+    expect(result.memoryCount).toBe(1)
+
+    const target = new Database(ghostPath, { readonly: true })
+    const row = target.prepare('SELECT id FROM sessions WHERE id = ?').get('ghost-session') as
+      | { id: string }
+      | undefined
+    target.close()
+    expect(row?.id).toBe('ghost-session')
   })
 })
