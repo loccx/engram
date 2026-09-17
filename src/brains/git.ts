@@ -37,6 +37,18 @@ export function gitAddAll(cwd: string): void {
   gitOrThrow(['add', '-A'], cwd)
 }
 
+/**
+ * Stage an explicit allowlist of paths. Publish must never use `add -A`: the
+ * brain directory transiently holds plaintext artifacts (the exported brain.db,
+ * its WAL/SHM, migration .bak sidecars, and export temp files), and `add -A`
+ * has been reproduced committing and pushing those to the shared remote, which
+ * defeats encryption entirely. Only the encrypted snapshot and its metadata ship.
+ */
+export function gitAddFiles(cwd: string, paths: string[]): void {
+  if (paths.length === 0) return
+  gitOrThrow(['add', '--', ...paths], cwd)
+}
+
 export function gitCommit(cwd: string, message: string): { committed: boolean; sha: string | null } {
   const status = gitOrThrow(['status', '--porcelain'], cwd)
   if (status.trim() === '') {

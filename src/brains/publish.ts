@@ -1,10 +1,10 @@
-import { existsSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, readdirSync, unlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import Database from 'better-sqlite3'
 import {
   isGitRepo,
   gitInit,
-  gitAddAll,
+  gitAddFiles,
   gitCommit,
   gitSetRemote,
   gitPush,
@@ -112,6 +112,7 @@ export async function publishBrain(opts: PublishOptions): Promise<PublishResult>
         // an unencrypted copy of the brain to the shared remote.
         'brain.db.bak.*',
         '*.bak.*',
+        'brain.db.export-*',
         '.cache/',
       ].join('\n') + '\n',
       'utf8'
@@ -132,7 +133,20 @@ export async function publishBrain(opts: PublishOptions): Promise<PublishResult>
   if (!isGitRepo(opts.brainDir)) {
     gitInit(opts.brainDir)
   }
-  gitAddAll(opts.brainDir)
+  // Remove transient plaintext artifacts, then stage ONLY the encrypted snapshot
+  // and its metadata. `git add -A` must never be used here: a concurrent publish
+  // or a migration sidecar has been reproduced committing plaintext rows to the
+  // remote. The allowlist below is the guarantee; the sweep is belt and braces.
+  for (const stray of readdirSync(opts.brainDir)) {
+    if (/^brain\.db\.export-.*\.tmp/.test(stray) || /\.bak\./.test(stray)) {
+      try {
+        unlinkSync(join(opts.brainDir, stray))
+      } catch {
+        // best effort; the explicit add below is what protects the remote
+      }
+    }
+  }
+  gitAddFiles(opts.brainDir, ['brain.db.age', 'manifest.json', 'recipients.txt', '.gitignore'])
   const commitResult = gitCommit(opts.brainDir, `engram brain: publish ${memoryCount} memories`)
 
   let pushed = false
