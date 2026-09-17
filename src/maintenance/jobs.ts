@@ -24,6 +24,13 @@
  *   scope's memories into a single pattern memory in the parent namespace
  *   and links the sources. This is the consolidation pipeline, same class as
  *   digest refresh; it writes canonical pattern memories and memory_links.
+ * - TREE PRIMING (part of #1): enqueueNamespaceMaintenance backfills
+ *   namespace_nodes rows/counts, and enqueueEndSessionMaintenance ensures the
+ *   node chain for the namespace it enqueues nav work for. Both write only
+ *   tree metadata (namespace_nodes), which the nav layer needs in order to
+ *   exist at all; neither touches canonical memories. Tree metadata feeds the
+ *   guide/roster/routing inputs and the write-side scope candidates, so
+ *   materializing it makes previously-inert scopes visible to those paths.
  *
  * Existing in-memory BackgroundJobQueues (adjudication/importance) are
  * preserved and independent; this layer runs beside them, not instead of.
@@ -31,7 +38,7 @@
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { logger } from '../utils/logger.js'
-import { ancestors } from '../namespace/tree.js'
+import { ancestors, backfillTree, ensureNode, refreshNodeCounts } from '../namespace/tree.js'
 import { refreshNavDigest } from '../memory/nav.js'
 import { promoteScopePatterns } from './promote.js'
 import { consolidateTree } from './consolidate.js'
@@ -504,9 +511,16 @@ export function enqueueEndSessionMaintenance(
       }
 
       // Nav-layer digests: refresh this namespace's thin digest and, when a
-      // parent node exists, its nearest existing ancestor's digest. Both no-op
-      // safely when the node row is absent (refreshNavDigest returns empty),
-      // so a fresh namespace never fails an end_session call.
+      // parent node exists, its nearest existing ancestor's digest. The node
+      // chain must be materialized first: refreshNavDigest silently no-ops
+      // without a node row and ancestors() only returns materialized rows, so
+      // before this the first end_session for a namespace enqueued nav jobs
+      // that could never write anything. Materializing is idempotent, bounded
+      // (a path chain is a handful of rows) and stays inside the never-throws
+      // guarantee.
+      ensureNode(db, targetKey)
+      refreshNodeCounts(db, targetKey)
+
       const navSelf = enqueueMaintenanceJob(db, {
         jobType: 'digest',
         targetKey: `nav:${targetKey}`,
@@ -546,7 +560,19 @@ export function enqueueEndSessionMaintenance(
   }
 }
 
-/** Enqueue digest/cluster shadow jobs for every distinct namespace. */
+/**
+ * Startup maintenance for every distinct namespace: shadow digest + cluster
+ * jobs, tree priming, and one recursive consolidation job per forest root.
+ *
+ * Tree priming is the difference between a working nav layer and an empty one:
+ * nothing else materializes `namespace_nodes` for memories that already exist
+ * (nodes are otherwise created lazily by get_context / scoped store_memory), so
+ * live data sat at 11 nodes / 3 digests with every memory_count at 0, and the
+ * navtree executor had no enqueuer at all — recursive consolidation could never
+ * run. `backfillTree` is idempotent, bounded and cheap (measured ~120ms for 15
+ * namespaces) and writes tree metadata only: it cannot change which memories
+ * any query returns, only the guide/roster/routing inputs derived from the tree.
+ */
 export function enqueueNamespaceMaintenance(db: Database.Database, now?: number): number {
   const namespaces = db
     .prepare('SELECT DISTINCT COALESCE(namespace, project_path) AS ns FROM memories')
@@ -559,5 +585,31 @@ export function enqueueNamespaceMaintenance(db: Database.Database, now?: number)
       enqueued++
     }
   }
+
+  // Materialize nodes + counts before enqueueing nav work so the digest jobs
+  // have rows to write. Guarded so a priming failure cannot stop the shadow
+  // enqueues (or daemon startup).
+  try {
+    const ensured = backfillTree(db)
+    logger.debug({ ensured }, 'maintenance: namespace tree backfilled')
+  } catch (err) {
+    logger.warn({ err }, 'maintenance: tree backfill failed; nav layer stays unprimed')
+  }
+
+  // Forest roots are the nodes without a parent: '/', '~' and non-path roots.
+  // consolidateTree walks a subtree bottom-up, so one job per root refreshes
+  // every materialized descendant.
+  const roots = db
+    .prepare('SELECT path FROM namespace_nodes WHERE parent_path IS NULL ORDER BY path')
+    .all() as Array<{ path: string }>
+  for (const { path } of roots) {
+    enqueueMaintenanceJob(db, {
+      jobType: 'digest',
+      targetKey: `navtree:${path}`,
+      source: 'startup',
+      now,
+    })
+  }
+
   return enqueued
 }

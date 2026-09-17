@@ -189,6 +189,19 @@ describe('nav: thin navigation layer', () => {
     expect(result.content).toContain('Deploy must run from the release branch')
   })
 
+  it('stamps updated_at in milliseconds, matching tree.ts (not seconds)', async () => {
+    seedSources(db) // inserts NS with no digest, so refreshNavDigest writes one
+
+    await refreshNavDigest(db, NS)
+
+    const row = db
+      .prepare('SELECT updated_at FROM namespace_nodes WHERE path = ?')
+      .get(NS) as { updated_at: number }
+    // A seconds-based stamp (~1.7e9) would fail this; tree.ts writes ms.
+    expect(row.updated_at).toBeGreaterThan(1_000_000_000_000)
+    expect(Math.abs(Date.now() - row.updated_at)).toBeLessThan(60_000)
+  })
+
   it('is a no-op when the node row does not exist (tree.ensureNode owns creation)', async () => {
     seedSources(db)
 

@@ -86,7 +86,15 @@ async function runStartupWorkers(): Promise<void> {
   if (isMaintenanceEnabled()) {
     try {
       const namespaces = enqueueNamespaceMaintenance(dbm.db)
-      const ran = await runPendingMaintenanceJobs(dbm.db, { owner: MAINTENANCE_OWNER })
+      // Size the startup drain to the burst we just enqueued: digest + cluster
+      // per namespace, plus one navtree consolidation job per forest root. The
+      // default cap of 20 sat below the burst (2 per namespace alone) and left
+      // jobs queued on every boot; the ceiling keeps a boot bounded.
+      const startupBudget = Math.min(Math.max(20, namespaces * 2 + 40), 400)
+      const ran = await runPendingMaintenanceJobs(dbm.db, {
+        owner: MAINTENANCE_OWNER,
+        maxJobs: startupBudget,
+      })
       logger.info(
         { namespaces, ...ran },
         'maintenance: startup enqueue + bounded shadow drain complete'
