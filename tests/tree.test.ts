@@ -15,13 +15,16 @@ import {
 } from '../src/namespace/tree.js'
 
 describe('parseNamespacePath', () => {
+  // Fixtures are synthetic absolute paths rather than a real home directory:
+  // depth is derived from the segment count, so a homedir()-based fixture would
+  // assert a different depth on every machine.
   it('treats deep absolute paths as depth = segment count', () => {
-    const p = parseNamespacePath('/Users/locc/git/research/hive')
+    const p = parseNamespacePath('/opt/apps/engram/data/hive')
     expect(p.isPathShaped).toBe(true)
     expect(p.realPath).toBeNull()
     expect(p.scope).toBeNull()
     expect(p.depth).toBe(5)
-    expect(p.parentPath).toBe('/Users/locc/git/research')
+    expect(p.parentPath).toBe('/opt/apps/engram/data')
   })
 
   it('parents a top-level absolute path at the fs root', () => {
@@ -42,11 +45,11 @@ describe('parseNamespacePath', () => {
   })
 
   it('parses synthetic // scopes with the real path as parent', () => {
-    const p = parseNamespacePath('/Users/locc/cb//payments')
+    const p = parseNamespacePath('/opt/apps/cb//payments')
     expect(p.isPathShaped).toBe(true)
-    expect(p.realPath).toBe('/Users/locc/cb')
+    expect(p.realPath).toBe('/opt/apps/cb')
     expect(p.scope).toBe('payments')
-    expect(p.parentPath).toBe('/Users/locc/cb')
+    expect(p.parentPath).toBe('/opt/apps/cb')
     expect(p.depth).toBe(4)
   })
 

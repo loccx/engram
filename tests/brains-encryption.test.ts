@@ -91,7 +91,7 @@ describe('brains/encryption streaming', { timeout: 60_000 }, () => {
     const growth = process.memoryUsage().rss - before
 
     // Buffering the plaintext alone would add ~SIZE. The bound is loose so the
-    // assertion stays robust on a busy machine while still failing loudly if the
+    // assertion holds on a busy machine while still failing loudly if the
     // implementation regresses to reading the whole file.
     // Streaming measured ~0.63*SIZE under load (15.8MB on a 25MB input) and ~0.07*SIZE
     // on the large case; buffering is >= 1.0*SIZE because the whole file plus the
