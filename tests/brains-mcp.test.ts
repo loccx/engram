@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { DatabaseManager } from '../src/db/init.js'
 import { exportBrain } from '../src/brains/snapshot.js'
-import { listLocalBrains, searchBrain, getBrainMemory, markShareable } from '../src/brains/mcp.js'
+import { listLocalBrains, searchBrain, searchBrainHybrid, getBrainMemory, markShareable } from '../src/brains/mcp.js'
 
 describe('brains/mcp', () => {
   let tmp: string
@@ -115,6 +115,17 @@ describe('brains/mcp', () => {
     buildBrainDb('work')
     const results = await searchBrain('work', 'password', 10, brainsDir)
     expect(results).toEqual([])
+  })
+
+  it('searchBrainHybrid falls back to lexical when the snapshot carries no vectors', async () => {
+    buildBrainDb('work')
+    const lexical = searchBrain('work', 'kubernetes', 10, brainsDir)
+    const hybrid = await searchBrainHybrid('work', 'kubernetes', 10, brainsDir)
+    expect(hybrid.map((r) => r.id)).toEqual(lexical.map((r) => r.id))
+  })
+
+  it('searchBrainHybrid rejects an invalid brain name', async () => {
+    await expect(searchBrainHybrid('../escape', 'anything', 10, brainsDir)).rejects.toThrow(/invalid/i)
   })
 
   it('getBrainMemory returns the memory by id', () => {

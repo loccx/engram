@@ -203,7 +203,7 @@ async function tryHybridSearch(
         content: r.content,
         type: r.type,
         importance: r.importance,
-        tags: r.tags,
+        tags: Array.isArray(r.tags) ? JSON.stringify(r.tags) : String(r.tags ?? '[]'),
         created_at: r.created_at,
       }))
   } catch {

@@ -35,7 +35,7 @@ import type {
   ReviseMemoryInput,
 } from '../memory/types.js'
 import { SCHEMAS } from './schemas.js'
-import { listLocalBrains, searchBrain, getBrainMemory, markShareable } from '../brains/mcp.js'
+import { listLocalBrains, searchBrain, searchBrainHybrid, getBrainMemory, markShareable } from '../brains/mcp.js'
 import type { Memory } from '../memory/types.js'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
@@ -778,7 +778,7 @@ export async function handleTool(
         const brain = args.brain as string
         const query = args.query as string
         const limit = typeof args.limit === 'number' ? args.limit : 10
-        const results = await searchBrain(brain, query, limit)
+        const results = await searchBrainHybrid(brain, query, limit)
         return ok({ brain, query, count: results.length, results })
       }
 
