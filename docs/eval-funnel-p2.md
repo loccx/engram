@@ -5,7 +5,7 @@ of the live DB; the live DB is opened read-only and never written.
 
 ## Method
 
-- Largest flat namespace: `/Users/locc/git/research/hive` (2995 memories).
+- Largest flat namespace: `hive` (2995 memories).
 - For k in {5, 20, 50}: shard those memories into `<ns>//s0..s(k-1)` synthetic scopes,
 assigning each memory by `fnv1a(first entity token) % k (id fallback)` (deterministic, so same-entity memories co-locate).
 - Probes: sampled source memories; each kept only if its own terms retrieve it in whole-project search.

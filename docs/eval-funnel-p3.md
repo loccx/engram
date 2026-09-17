@@ -7,7 +7,7 @@ exercise their deterministic extractive fallbacks — no endpoint dependency.
 
 ## Method
 
-- Largest flat namespace `/Users/locc/git/research/hive` (2995 memories) sharded into 4 synthetic scopes 
+- Largest flat namespace `hive` (2995 memories) sharded into 4 synthetic scopes 
   (`<ns>//s0..s3`) by `fnv1a(first entity token) % 4` (P2 co-location policy).
 - Baseline flat recall/context measured on the pristine (pre-shard) copy before redistribution.
 - Per scope, one `memory_clusters` summary is backfilled (its scope-EXCLUSIVE entity token) so

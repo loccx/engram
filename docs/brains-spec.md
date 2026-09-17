@@ -1,6 +1,8 @@
 # Engram Brains — Feature Spec
 
-**Status:** Draft · **Owner:** locc · **Target:** v0.2.0
+**Status:** shipped. This document describes the feature as built; sections that were
+never implemented are marked, and the sequenced build plan has been removed since the
+work is done. Where the code has since moved on, the code is authoritative.
 
 ## 1. Goal
 
@@ -191,8 +193,8 @@ src/
 ```bash
 engram init                          # creates ~/.engram/identity, prints pubkey
 engram whoami                        # prints your engram_pub_...
-engram identity export               # dumps identity (for backup; warns loudly)
-engram identity import <path>        # restores from backup
+# identity export/import are not implemented. The private key lives at
+# <ENGRAM_HOME>/identity; copy it by hand to back it up.
 ```
 
 ### Publishing your own brain
@@ -237,7 +239,7 @@ $ engram brain publish my-eng-brain
 DRY RUN — no commit, no push. Use --confirm to publish.
 
 Brain:        my-eng-brain
-Namespace:    /Users/locc/git/research
+Namespace:    ~/git/research
 Recipients:   3 (alice, bob, carol)
 Embedding:    Xenova/bge-small-en-v1.5
 Memories:     1432 shareable (of 8201 total in namespace)
@@ -485,86 +487,6 @@ Match the existing standard: ≥ 90% line coverage on `src/brains/`. Adds ~30-40
 
 No other new dependencies. Git is shelled out. SQLite is already there. Hono is already there.
 
-## 17. Sequenced implementation plan
-
-### Phase 1a — Identity + export/import (no encryption, no git)
-
-**Goal:** ship local file-based brain transfer. Useful by itself ("here's my brain on a USB stick").
-
-| File | Action | Est. LOC |
-|---|---|---|
-| `src/brains/paths.ts` | new | 40 |
-| `src/brains/identity.ts` | new (stub — just generates raw keys, no age yet) | 60 |
-| `src/brains/keyformat.ts` | new (bech32 round-trip) | 50 |
-| `src/brains/snapshot.ts` | new (SQLite export/import) | 150 |
-| `src/db/migrations/006_brain_support.ts` | new | 60 |
-| `src/cli/brain.ts` | new (commands: init, export, import) | 80 |
-| `src/index.ts` | wire new CLI subcommand | 10 |
-| `tests/brains/snapshot.test.ts` | new | 100 |
-| `tests/brains/keyformat.test.ts` | new | 40 |
-
-**Acceptance:** `engram brain init my-brain && engram brain export my-brain --to /tmp/me.brain && engram brain import /tmp/me.brain --as imported` round-trips memories.
-
-### Phase 1b — Encryption + whitelist
-
-**Goal:** ship `recipients.txt`-driven encryption. Snapshots are now encrypted blobs.
-
-| File | Action | Est. LOC |
-|---|---|---|
-| `src/brains/identity.ts` | extend (real age key gen) | +60 |
-| `src/brains/whitelist.ts` | new | 100 |
-| `src/brains/publish.ts` | new (encrypt path; no git yet) | 120 |
-| `src/brains/refresh.ts` | new (decrypt path; no git yet) | 80 |
-| `src/brains/audit.ts` | new | 50 |
-| `src/cli/brain.ts` | extend (grant, revoke, whitelist) | +60 |
-| `tests/brains/publish.test.ts` | new | 120 |
-| `tests/brains/whitelist.test.ts` | new | 80 |
-| `tests/brains/audit.test.ts` | new | 40 |
-
-**Acceptance:** Alice publishes encrypted blob to local file; Bob (in whitelist) decrypts successfully; Eve (not in whitelist) gets clean error.
-
-### Phase 1c — Git integration
-
-**Goal:** GitHub-hosted brains.
-
-| File | Action | Est. LOC |
-|---|---|---|
-| `src/brains/git.ts` | new (subprocess wrappers) | 100 |
-| `src/brains/publish.ts` | extend (git push after encrypt) | +40 |
-| `src/brains/follow.ts` | new (git clone + register) | 80 |
-| `src/brains/refresh.ts` | extend (git pull first) | +30 |
-| `src/cli/brain.ts` | extend (publish, follow, refresh, list) | +80 |
-| `tests/brains/end-to-end.test.ts` | new (uses local bare git repo) | 200 |
-
-**Acceptance:** Full publish/follow/refresh round-trip via a local bare git repo in a tmp dir.
-
-### Phase 1d — MCP tools
-
-**Goal:** agents can use brains without leaving Claude Code / Cursor.
-
-| File | Action | Est. LOC |
-|---|---|---|
-| `src/mcp/handlers/list_brains.ts` | new | 50 |
-| `src/mcp/handlers/search_brain.ts` | new (ATTACH + query) | 120 |
-| `src/mcp/handlers/get_brain_memory.ts` | new | 40 |
-| `src/mcp/handlers/mark_shareable.ts` | new | 30 |
-| `src/mcp/tools.ts` | register 4 new tools in schema | +60 |
-| `src/mcp/handlers.ts` | dispatch new tools | +20 |
-| `tests/brains/mcp.test.ts` | new | 150 |
-
-**Acceptance:** with a followed brain, an MCP client calls `list_brains` → `search_brain` and gets attributed results back.
-
-### Effort summary
-
-| Phase | LOC (impl + tests) | Risk | Days |
-|---|---|---|---|
-| 1a | ~590 | Low | 2 |
-| 1b | ~710 | Medium (crypto) | 3 |
-| 1c | ~530 | Low | 2 |
-| 1d | ~470 | Low | 2 |
-| **Total** | **~2300** | — | **~9 working days** |
-
-Each phase is independently mergeable.
 
 ## 18. Open questions for the owner
 

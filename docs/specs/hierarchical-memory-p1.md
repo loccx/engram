@@ -1,7 +1,6 @@
 # Spec: Hierarchical Memory Tree + Funnel Retrieval (P1)
 
-Status: IMPLEMENTATION SPEC — build to this document, deviations go in your lane report.
-Parent coordinates lanes; this file is the single source of truth.
+The memory tree, funnel retrieval, and the `namespace_nodes` schema. Scope routing and navigation digests live in `hierarchical-memory-p2.md`; inference, promotion, and consolidation in `hierarchical-memory-p3.md`.
 
 ## Goal
 
@@ -17,13 +16,13 @@ cross-machine brain sync of trees.
 ## Namespace tree semantics
 
 - A namespace is path-shaped when it starts with `/` or `~` (existing examples:
-  `/Users/locc/git/research/hive`). Non-path namespaces (`autonomous-crypto-desk`,
+  `~/git/research/hive`). Non-path namespaces (`autonomous-crypto-desk`,
   `research`) are their own roots: depth 0, no parent, funnel degrades to leaf-only.
 - Parent of `/a/b/c` is `/a/b`; parent of `/a` is `/` (fs root, depth 0). Depth =
-  number of segments (root `/` = 0, `/a` = 1, ...). `~` and `/Users/locc` collapse
+  number of segments (root `/` = 0, `/a` = 1, ...). `~` and the home directory collapse
   to depth 0 roots the same way.
 - Synthetic scopes: a namespace may carry a suffix `//scope`, e.g.
-  `/Users/locc/cb//payments`. The real path part is `/Users/locc/cb`; the synthetic
+  `~/cb//payments`. The real path part is `~/cb`; the synthetic
   node's full path is the literal string including `//scope`. Parent of a synthetic
   node is its real path. Synthetics are always created on demand.
 - Tree persistence is derived + materialized: `namespace_nodes` rows are created
@@ -55,7 +54,7 @@ CREATE INDEX IF NOT EXISTS idx_namespace_nodes_depth ON namespace_nodes(depth);
 
 ## Module APIs
 
-### `src/namespace/tree.ts` (lane tree owns)
+### `src/namespace/tree.ts`
 
 ```ts
 export interface NamespaceNode {
@@ -100,7 +99,7 @@ export function backfillTree(db: Database.Database): number
 
 No filesystem I/O in tree.ts — the tree is built from stored namespace strings only.
 
-### `src/memory/nav.ts` (lane nav owns)
+### `src/memory/nav.ts`
 
 ```ts
 export const NAV_DIGEST_BUDGET_CHARS = 1200
@@ -119,7 +118,7 @@ export function childRoster(db, namespace: string): ChildRosterEntry[]
 // Empty digest -> '' (still listed; it is a navigation signal that the child exists).
 ```
 
-## Funnel retrieval (handlers.ts — lane funnel owns)
+## Funnel retrieval (handlers.ts)
 
 `get_context` gains args (schemas.ts + tools.ts):
 
@@ -149,7 +148,7 @@ for parent of ancestors(node):                       // root-first
 Constants: `K_MIN = 3`, `THETA = 0.35` — module-level consts in handlers.ts, tune
 via eval later. Normalization: reuse whatever normalized score hybridSearch already
 exposes; if it exposes none, add a `score` field to search results (min-max normalized
-within the result set) — that edit lives in search.ts and is owned by lane funnel.
+within the result set) — that edit lives in search.ts.
 
 Response additions (both paths):
 - `scope_trace`: as above; always present for path-shaped namespaces.
@@ -166,7 +165,7 @@ Isolation invariants (funnel.test.ts must assert all):
    never siblings.
 5. scope_trace shape/order: deepest first, ends at depth-0 root.
 
-## Eval harness (lane eval owns)
+## Eval harness
 
 `scripts/eval-funnel.ts`: read-only against the live DB
 (`~/Library/Application Support/engram-nodejs/engram.db` — open with
@@ -189,22 +188,3 @@ recommended THETA/K_MIN. Pure script (`tsx scripts/eval-funnel.ts`), no src/ edi
 - funnel.test.ts: the 5 isolation invariants above + thin-leaf ascent triggers
   guide hits from parent digest + skipped-ascend when leaf is rich.
 
-## Lane ownership (hard boundaries)
-
-| Lane | Owns (may create/edit ONLY these) |
-| --- | --- |
-| tree | `src/db/migrations/010_namespace_nodes.ts`, `src/db/migrations/index.ts` (add migration010 only), `src/namespace/tree.ts`, `tests/tree.test.ts` |
-| nav | `src/memory/nav.ts`, `tests/nav.test.ts` |
-| funnel | `src/mcp/handlers.ts`, `src/mcp/schemas.ts`, `src/mcp/tools.ts`, `src/memory/search.ts`, `tests/funnel.test.ts` |
-| eval | `scripts/eval-funnel.ts`, `docs/eval-funnel-p1.md` |
-
-Forbidden to all lanes: package.json, tsconfig.json, src/db/init.ts, src/daemon.ts,
-src/server.ts, existing tests, any file not in your lane. Do NOT run `git commit`,
-`git add`, or any state-changing git command — the parent stages and commits.
-Do NOT start/restart the daemon.
-
-## Sequence
-
-1. tree + nav in parallel (nav codes against tree.ts signatures from this spec).
-2. funnel after both merge (handlers wiring + tsc must pass against real tree/nav).
-3. eval + fresh-context review in parallel after funnel.

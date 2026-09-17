@@ -35,8 +35,8 @@ Per namespace:
 
 | Namespace | probes | flat recall@5 | funnel recall@5 | flat context @5 | funnel context @5 |
 | --- | --- | --- | --- | --- | --- |
-| /Users/locc/git/research/hive | 14 | 0.786 | 0.786 | 1,067 | 1,067 |
-| /Users/locc/cb | 15 | 0.933 | 0.933 | 1,439 | 1,439 |
+| hive | 14 | 0.786 | 0.786 | 1,067 | 1,067 |
+| cb | 15 | 0.933 | 0.933 | 1,439 | 1,439 |
 
 ## Findings
 
@@ -102,7 +102,7 @@ gap in P1 retrieval.
   savings to scoping granularity — it cannot yet show an end-to-end savings number.
 - **Lexical-only**: vectors are disabled for determinism and side-effect freedom;
   recall figures are a lower bound vs the full hybrid FTS+vector path.
-- **1 probe dropped**: `/Users/locc/git/research/hive/bdc9b342…` whose own terms do
+- **1 probe dropped**: `hive/bdc9b342…` whose own terms do
   not FTS-match its content (likely content with no indexable distinctive token);
   an artificial (broken) probe, not a recall deficiency.
 - **Digest excluded from byte parity**: the `digest` field is identical across
