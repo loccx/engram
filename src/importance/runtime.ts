@@ -65,6 +65,17 @@ async function runScoringJob(db: Database.Database, memoryId: string): Promise<v
 
   const score = await scoreImportance({ content: row.content, type: row.type, tags })
 
+  // Concept memories are permanent: `pinned` is the only tier that never decays,
+  // while everything else falls through hot -> warm -> cold. A code-quality rule,
+  // an architecture decision or a convention must not be left to age out just
+  // because it has not been read recently, so pin it when the model rates it
+  // highly or when it is explicitly tagged as a concept. Never unpins anything.
+  const CONCEPT_TAGS = ['code-quality', 'architecture', 'convention', 'universal', 'construct']
+  const taggedConcept = tags.some((t) => CONCEPT_TAGS.includes(t.trim().toLowerCase()))
+  const scoredConcept =
+    score.importance >= 0.9 && ['pattern', 'decision', 'procedure'].includes(row.type)
+  const shouldPin = taggedConcept || scoredConcept
+
   const now = Date.now()
   const result = db
     .prepare(
@@ -73,10 +84,11 @@ async function runScoringJob(db: Database.Database, memoryId: string): Promise<v
            importance_source = 'llm',
            importance_model = ?,
            importance_prompt_version = ?,
-           importance_scored_at = ?
+           importance_scored_at = ?,
+           pinned = CASE WHEN ? = 1 THEN 1 ELSE pinned END
        WHERE id = ? AND importance_source != 'user'`
     )
-    .run(score.importance, score.model, score.promptVersion, now, memoryId)
+    .run(score.importance, score.model, score.promptVersion, now, shouldPin ? 1 : 0, memoryId)
 
   if (result.changes === 0) {
     logger.debug(
