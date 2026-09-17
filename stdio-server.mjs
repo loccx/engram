@@ -14,8 +14,9 @@
 //       "args": ["/Users/locc/git/research/engram/stdio-server.mjs"] } } }
 
 import { createInterface } from 'node:readline';
-import { existsSync } from 'node:fs';
+import { existsSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import { execFileSync } from 'node:child_process';
 
 const DAEMON = process.env.ENGRAM_DAEMON_URL ?? 'http://localhost:8888';
 
@@ -30,7 +31,32 @@ function findProjectRoot(start) {
   }
 }
 
-const project = findProjectRoot(process.cwd());
+/**
+ * A git worktree has a `.git` FILE pointing into the primary repo's
+ * `.git/worktrees/<name>`. Scoping memory to the worktree path would give every
+ * branch its own empty namespace - which silently costs a session all of its
+ * workspace memory, precisely when the workspace convention is to work in
+ * worktrees. Canonicalize back to the primary working tree instead.
+ */
+function canonicalWorkspace(root) {
+  try {
+    const dotGit = join(root, '.git');
+    if (!existsSync(dotGit) || !statSync(dotGit).isFile()) return root;
+    const commonDir = execFileSync('git', ['-C', root, 'rev-parse', '--git-common-dir'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (!commonDir) return root;
+    // `--git-common-dir` is the primary repo's .git directory; its parent is the
+    // working tree whose namespace already holds this project's memories.
+    const primary = dirname(resolve(root, commonDir));
+    return primary && existsSync(join(primary, '.git')) ? primary : root;
+  } catch {
+    return root; // git unavailable: fall back to the resolved cwd
+  }
+}
+
+const project = canonicalWorkspace(findProjectRoot(process.cwd()));
 process.stderr.write(`[engram-stdio] project=${project}\n`);
 
 async function forward(msg) {
