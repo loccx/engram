@@ -15,6 +15,7 @@
  */
 import { getDatabase, resetDatabase } from '../src/db/init.js'
 import { MemoryStore } from '../src/memory/store.js'
+import { existsSync } from 'fs'
 
 const EXECUTE = process.argv.includes('--execute')
 const tierArg = process.argv.find((a) => a.startsWith('--tier='))
@@ -81,7 +82,15 @@ function main() {
 
   // ---- Tier 3: drift / accidental namespaces ----
   if (TIERS.includes(3)) {
-    const drift = ['research', 'hlmm', '/Users/locc/cb/rn/react-native', '/Users/locc/git/research/88fafa']
+    // A live directory is never drift, no matter how it looks; only non-path
+    // names or paths that no longer exist on disk qualify. This prevents deleting
+    // a valid, recently-written memory just because its name was on an old list.
+    const drift = [
+      'research',
+      'hlmm',
+      '/Users/locc/cb/rn/react-native',
+      '/Users/locc/git/research/88fafa',
+    ].filter((ns) => !ns.startsWith('/') || !existsSync(ns))
     for (const ns of drift) {
       const rows = db
         .prepare(
