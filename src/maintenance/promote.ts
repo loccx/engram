@@ -71,7 +71,9 @@ function alreadyPromoted(db: Database.Database, parentPath: string, token: strin
   const rows = db
     .prepare(
       `SELECT tags FROM memories
-       WHERE COALESCE(namespace, project_path) = ? AND type = 'pattern'`
+       WHERE COALESCE(namespace, project_path) = ? AND type = 'pattern'
+         AND origin = 'promotion'
+         AND ${notSupersededClause('memories.id')}`
     )
     .all(parentPath) as Array<{ tags: string }>
   for (const row of rows) {
@@ -95,7 +97,7 @@ function extractiveContent(memories: ScopeMemory[]): string {
 async function distill(
   scopePath: string,
   memories: ScopeMemory[]
-): Promise<string> {
+): Promise<string | null> {
   if (isLlmConfigured()) {
     try {
       const input = memories.map((m) => `- ${m.content}`).join('\n')
@@ -111,11 +113,17 @@ async function distill(
     } catch (e) {
       logger.warn(
         { err: e instanceof Error ? e.message : String(e), scopePath },
-        'promotion: LLM distill failed; using extractive fallback'
+        'promotion: LLM distill failed'
       )
     }
   }
-  return extractiveContent(memories)
+  // No LLM: do NOT mint an extractive blob. A concatenation of the top memories
+  // ("<160c of mem6> | <160c of mem7>") is not a summary, and it propagates into
+  // the parent nav digest where every agent then reads it - that is how a
+  // garbled policy reached cevin. Skipping is the safe default;
+  // ENGRAM_PROMOTE_EXTRACTIVE=1 restores the old behaviour for tests and ops.
+  if (process.env.ENGRAM_PROMOTE_EXTRACTIVE === '1') return extractiveContent(memories)
+  return null
 }
 
 function ensurePromotionSession(db: Database.Database, parentPath: string): string {
@@ -195,6 +203,11 @@ export async function promoteScopePatterns(
 
     const memories = loadTopMemories(db, leaf.path, TOP_MEMORIES)
     const distilled = await distill(leaf.path, memories)
+    if (distilled === null) {
+      report.skipped.push(token)
+      report.reasons[token] = 'no_llm'
+      continue
+    }
     const patternId = insertPattern(db, parentPath, token, distilled)
     linkSources(db, patternId, memories)
     report.promoted.push(token)

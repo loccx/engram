@@ -57,6 +57,11 @@ function clearLlm(): void {
   delete process.env.ENGRAM_LLM_BASE_URL
   delete process.env.ENGRAM_LLM_API_KEY
   delete process.env.ENGRAM_LLM_MODEL
+  // Promotion now REFUSES to mint an extractive blob without an LLM (that blob
+  // is what propagated into parent nav digests). Tests that exercise promotion
+  // mechanics while clearing the LLM therefore opt in explicitly; the skip
+  // behaviour itself is asserted in its own test below.
+  process.env.ENGRAM_PROMOTE_EXTRACTIVE = '1'
   resetLlmConfigForTests()
 }
 
@@ -163,21 +168,40 @@ describe('promotion + recursive consolidation', () => {
     expect(nodeDigest(db, PROJECT)).toContain('payments parent topic')
   })
 
-  it('falls back to extractive content when the LLM is unconfigured and never throws', async () => {
+  it('skips (no_llm) when the LLM is unavailable, and promotes only on the explicit opt-in', async () => {
     ensureNode(db, `${PROJECT}//payments`)
+    // Drive the real failure mode: an LLM is configured but unusable (gateway
+    // down). Relying on 'unconfigured' made this test depend on ambient env,
+    // which is how it first passed the LLM branch and still promoted.
+    configureLlm()
+    delete process.env.ENGRAM_PROMOTE_EXTRACTIVE
     seedMemory(db, 'hi-1', `${PROJECT}//payments`, 'STRIPE-IDEMPOTENCY-KEYS', 0.9)
     seedMemory(db, 'hi-2', `${PROJECT}//payments`, 'retry on 409', 0.8)
     seedMemory(db, 'hi-3', `${PROJECT}//payments`, 'webhook signature verify', 0.7)
     for (let i = 0; i < PROMOTE_MIN_MEMORIES - 3; i++) {
       seedMemory(db, `lo-${i}`, `${PROJECT}//payments`, `filler ${i}`, 0.1)
     }
-    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('gateway down'))
 
     const report = await promoteScopePatterns(db, PROJECT)
 
-    expect(report.promoted).toEqual(['payments'])
-    expect(fetchSpy).not.toHaveBeenCalled()
+    // No LLM and no opt-in: promotion must SKIP. Minting a concatenation of the
+    // top memories is not a distillation, and that blob reaches every agent via
+    // the parent nav digest - the mechanism that put a garbled policy in cevin.
+    expect(report.promoted).toEqual([])
+    expect(report.reasons.payments).toBe('no_llm')
+    expect(fetchSpy).toHaveBeenCalled()
+    const none = db
+      .prepare(
+        `SELECT COUNT(*) AS c FROM memories WHERE COALESCE(namespace, project_path) = ? AND type = 'pattern'`
+      )
+      .get(PROJECT) as { c: number }
+    expect(none.c).toBe(0)
 
+    // The old behaviour stays reachable, but only deliberately.
+    process.env.ENGRAM_PROMOTE_EXTRACTIVE = '1'
+    const opted = await promoteScopePatterns(db, PROJECT)
+    expect(opted.promoted).toEqual(['payments'])
     const pattern = db
       .prepare(
         `SELECT content FROM memories WHERE COALESCE(namespace, project_path) = ? AND type = 'pattern'`
