@@ -2,7 +2,8 @@ import { existsSync, readdirSync, readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import Database from 'better-sqlite3'
 import { BRAINS_DIR, sanitizeBrainName } from './paths.js'
-import { readManifestFromFile, type BrainManifest } from './snapshot.js'
+import { readManifest, readManifestFromFile, validateForImport, type BrainManifest } from './snapshot.js'
+import { notSupersededClause } from '../contradictions/supersession.js'
 import { logAudit } from './audit.js'
 
 export interface BrainSummary {
@@ -96,6 +97,70 @@ function summaryFromManifestSidecar(name: string, dir: string): BrainSummary {
   }
 }
 
+/**
+ * Query terms are lowercased word runs. Everything else (quotes, parens, NEAR,
+ * '*', column filters) is discarded by construction, so untrusted input can
+ * never be interpreted as FTS5 syntax. FTS5's default unicode61 tokenizer
+ * splits on the same boundaries.
+ */
+const QUERY_TOKEN_LIMIT = 12
+
+const STOPWORDS = new Set([
+  'a', 'about', 'an', 'and', 'are', 'as', 'at', 'be', 'been', 'but', 'by',
+  'can', 'could', 'did', 'do', 'does', 'for', 'from', 'had', 'has', 'have',
+  'how', 'i', 'if', 'in', 'into', 'is', 'it', 'its', 'me', 'my', 'not', 'of',
+  'on', 'or', 'our', 'should', 'so', 'than', 'that', 'the', 'their', 'them',
+  'then', 'there', 'these', 'they', 'this', 'to', 'was', 'we', 'were', 'what',
+  'when', 'where', 'which', 'who', 'why', 'will', 'with', 'would', 'you', 'your',
+])
+
+export function tokenizeBrainQuery(query: string): string[] {
+  const matches = query.toLowerCase().normalize('NFKC').match(/[\p{L}\p{N}_]+/gu) ?? []
+  const seen = new Set<string>()
+  const tokens: string[] = []
+  for (const token of matches) {
+    if (token.length < 2 || STOPWORDS.has(token) || seen.has(token)) continue
+    seen.add(token)
+    tokens.push(token)
+    if (tokens.length >= QUERY_TOKEN_LIMIT) break
+  }
+  return tokens
+}
+
+// FTS5 treats bare AND/OR/NOT as operators, so the expression is built from
+// quoted phrases only; the tokenizer above guarantees no quote can appear.
+function matchExpression(tokens: string[], operator: 'AND' | 'OR'): string {
+  return tokens.map((token) => `"${token}"`).join(` ${operator} `)
+}
+
+// Bounded relevance boosts, applied on top of bm25 rank (lower = better).
+// Kept small so a weak match can never outrank a strong one on metadata alone.
+const IMPORTANCE_BOOST = 0.35
+const PROMINENT_TYPE_BOOST = 0.25
+const PINNED_BOOST = 0.25
+const PROMINENT_TYPES = ['decision', 'pattern', 'gotcha', 'procedure']
+
+/**
+ * Both brain read paths go through here: a snapshot whose manifest is missing
+ * or incompatible (newer schema, different embedding model) must fail loudly
+ * rather than silently return misleading results from a cache the follower
+ * cannot actually interpret.
+ */
+function assertBrainReadable(db: Database.Database, safe: string): void {
+  let manifest: BrainManifest
+  try {
+    manifest = readManifest(db)
+  } catch {
+    throw new Error(`Brain "${safe}" has no readable manifest. Run \`engram brain refresh ${safe}\`.`)
+  }
+  const invalid = validateForImport(manifest)
+  if (invalid) {
+    throw new Error(
+      `Brain "${safe}" cannot be read: ${invalid.message} Run \`engram brain refresh ${safe}\`, or update engram if it was published by a newer version.`
+    )
+  }
+}
+
 export interface BrainSearchResult {
   id: string
   content: string
@@ -118,20 +183,31 @@ export function searchBrain(
   if (!dbPath) {
     throw new Error(`Brain "${safe}" has no decrypted database. Run \`engram brain refresh ${safe}\`.`)
   }
+  const tokens = tokenizeBrainQuery(query)
+  if (tokens.length === 0) return []
+
   const db = new Database(dbPath, { readonly: true })
   try {
-    const escaped = query.replace(/"/g, '""')
-    const rows = db
-      .prepare(
-        `SELECT m.id, m.content, m.type, m.importance, m.tags, m.created_at
-         FROM memories_fts fts
-         JOIN memories m ON m.rowid = fts.rowid
-         WHERE memories_fts MATCH ?
-         ORDER BY rank
-         LIMIT ?`
-      )
-      .all(`"${escaped}"`, limit) as BrainSearchResult[]
-    return rows
+    assertBrainReadable(db, safe)
+    const select = `SELECT m.id, m.content, m.type, m.importance, m.tags, m.created_at
+       FROM memories_fts
+       JOIN memories m ON m.rowid = memories_fts.rowid
+       WHERE memories_fts MATCH ?
+         AND ${notSupersededClause('m.id')}
+       ORDER BY
+         bm25(memories_fts, 10.0, 5.0)
+           - (${IMPORTANCE_BOOST} * COALESCE(m.importance, 0.5))
+           - (CASE WHEN m.type IN (${PROMINENT_TYPES.map((t) => `'${t}'`).join(', ')}) THEN ${PROMINENT_TYPE_BOOST} ELSE 0 END)
+           - (CASE WHEN m.pinned = 1 THEN ${PINNED_BOOST} ELSE 0 END) ASC,
+         m.created_at DESC
+       LIMIT ?`
+
+    // AND first: when every term is present, the precise hits are what the user
+    // wants. Only when that yields nothing do we fall back to OR, so multi-term
+    // and natural-language questions still retrieve ranked partial matches.
+    const rows = db.prepare(select).all(matchExpression(tokens, 'AND'), limit) as BrainSearchResult[]
+    if (rows.length > 0 || tokens.length === 1) return rows
+    return db.prepare(select).all(matchExpression(tokens, 'OR'), limit) as BrainSearchResult[]
   } finally {
     db.close()
   }
@@ -147,12 +223,18 @@ export function getBrainMemory(
   const ownedDb = join(brainsDir, safe, 'brain.db')
   const dbPath = existsSync(cachedDb) ? cachedDb : existsSync(ownedDb) ? ownedDb : null
   if (!dbPath) {
-    throw new Error(`Brain "${safe}" has no decrypted database.`)
+    throw new Error(`Brain "${safe}" has no decrypted database. Run \`engram brain refresh ${safe}\`.`)
   }
   const db = new Database(dbPath, { readonly: true })
   try {
+    assertBrainReadable(db, safe)
     const row = db
-      .prepare('SELECT id, content, type, importance, tags, created_at FROM memories WHERE id = ?')
+      .prepare(
+        `SELECT id, content, type, importance, tags, created_at
+         FROM memories
+         WHERE id = ?
+           AND ${notSupersededClause('memories.id')}`
+      )
       .get(memoryId) as BrainSearchResult | undefined
     return row ?? null
   } finally {
@@ -166,11 +248,29 @@ export interface MarkShareableResult {
   changed: boolean
 }
 
+export interface MarkShareableOptions {
+  /**
+   * When set, the memory must live in this namespace or a child layer of it
+   * (path descendant or synthetic `<ns>//<scope>`). This keeps an agent's
+   * shareable-marking authority inside the project it is actually connected
+   * to, instead of letting a prompt-injected call flag any memory in the store.
+   */
+  allowedNamespace?: string
+}
+
+function isNamespaceWithin(namespace: string, allowed: string): boolean {
+  // `${allowed}/` covers both path descendants (/repo/sub) and synthetic
+  // scope layers (/repo//payments), while rejecting sibling prefixes such as
+  // /repo2 for an allowed namespace of /repo.
+  return namespace === allowed || namespace.startsWith(`${allowed}/`)
+}
+
 export function markShareable(
   sourceDb: Database.Database,
   memoryId: string,
   shareable: boolean,
-  actor: string = 'mcp'
+  actor: string = 'mcp',
+  options: MarkShareableOptions = {}
 ): MarkShareableResult {
   const row = sourceDb
     .prepare(
@@ -179,6 +279,11 @@ export function markShareable(
     .get(memoryId) as { id: string; namespace: string | null; shareable: number } | undefined
   if (!row) {
     throw new Error(`Memory ${memoryId} not found`)
+  }
+  if (options.allowedNamespace && (!row.namespace || !isNamespaceWithin(row.namespace, options.allowedNamespace))) {
+    throw new Error(
+      `Refusing to mark memory ${memoryId} shareable: it belongs to "${row.namespace ?? 'unknown'}", outside the caller's namespace "${options.allowedNamespace}". Shareable-marking is scoped to the current project; connect with ?project=<that namespace> to share it deliberately.`
+    )
   }
   const newVal = shareable ? 1 : 0
   if (row.shareable === newVal) {

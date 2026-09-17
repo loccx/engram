@@ -1,4 +1,3 @@
-import { AUDIT_LOG_FILE } from '../brains/paths.js'
 
 export const MEMORY_TYPES = ['note', 'decision', 'bug', 'pattern', 'gotcha', 'todo', 'procedure'] as const
 
@@ -442,13 +441,13 @@ export const tools = [
   {
     name: 'search_brain',
     description:
-      'Full-text search within a specific followed/owned brain. Caller must name the brain explicitly; cross-brain access is never implicit.',
+      'Search within a specific followed/owned brain using natural language or keywords. Multi-word queries match precisely when possible and fall back to ranked partial matches. Caller must name the brain explicitly; cross-brain access is never implicit.',
     inputSchema: {
       type: 'object',
       properties: {
         brain: { type: 'string', description: 'Brain name (as shown by list_brains)' },
-        query: { type: 'string', description: 'FTS5 query string' },
-        limit: { type: 'number', default: 10, description: 'Max results (default 10)' },
+        query: { type: 'string', description: 'Natural-language question or keywords; FTS5 operators are treated as plain terms' },
+        limit: { type: 'number', default: 10, maximum: 50, description: 'Max results (default 10, max 50)' },
       },
       required: ['brain', 'query'],
     },
@@ -482,7 +481,7 @@ export const tools = [
   {
     name: 'mark_shareable',
     description:
-      `Mark a local memory as shareable (or unshareable) so it will be included in the next brain snapshot. Default for every memory is NOT shareable. Writes to ${AUDIT_LOG_FILE} for prompt-injection defense.`,
+      'Mark a local memory as shareable (or unshareable) so it will be included in the next brain snapshot. Default for every memory is NOT shareable. Scoped to the current project namespace and recorded in the local audit log for prompt-injection defense.',
     inputSchema: {
       type: 'object',
       properties: {

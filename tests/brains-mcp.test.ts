@@ -1,5 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { mkdtempSync, rmSync, mkdirSync } from 'fs'
+import Database from 'better-sqlite3'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { DatabaseManager } from '../src/db/init.js'
@@ -38,6 +39,36 @@ describe('brains/mcp', () => {
     const brainDir = join(brainsDir, name)
     mkdirSync(join(brainDir, '.cache'), { recursive: true })
     exportBrain(sourceMgr.db, { namespace: 'work', outputPath: join(brainDir, '.cache', 'brain.db') })
+  }
+
+  interface ExtraMemory {
+    id: string
+    content: string
+    type?: string
+    importance?: number
+    namespace?: string
+    shareable?: number
+    created_at?: number
+  }
+
+  function addMemory(row: ExtraMemory): void {
+    sourceMgr.db
+      .prepare(
+        'INSERT INTO memories(id, session_id, project_path, content, type, importance, tags, created_at, access_count, namespace, shareable) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+      )
+      .run(
+        row.id,
+        's1',
+        '/p',
+        row.content,
+        row.type ?? 'note',
+        row.importance ?? 0.5,
+        '[]',
+        row.created_at ?? Date.now(),
+        0,
+        row.namespace ?? 'work',
+        row.shareable ?? 1
+      )
   }
 
   it('listLocalBrains returns empty array when dir missing', () => {
@@ -121,5 +152,142 @@ describe('brains/mcp', () => {
 
   it('markShareable throws for unknown memory id', () => {
     expect(() => markShareable(sourceMgr.db, 'no-such-id', true, 'test')).toThrow(/not found/i)
+  })
+
+  // --- natural-language retrieval + FTS safety -----------------------------
+
+  it('searchBrain matches a multi-word query precisely when every term is present', () => {
+    addMemory({
+      id: 'mem-pg',
+      content: 'We picked postgres over mysql for the billing service because of transactional DDL',
+      type: 'decision',
+      importance: 0.9,
+    })
+    addMemory({
+      id: 'mem-pg-note',
+      content: 'A note that mentions postgres once while discussing dashboards',
+      type: 'note',
+      importance: 0.2,
+    })
+    buildBrainDb('work')
+    const ids = searchBrain('work', 'postgres billing', 10, brainsDir).map((r) => r.id)
+    expect(ids).toEqual(['mem-pg'])
+  })
+
+  it('searchBrain answers a natural-language question via the OR fallback', () => {
+    addMemory({
+      id: 'mem-pg',
+      content: 'We picked postgres over mysql for the billing service because of transactional DDL',
+      type: 'decision',
+      importance: 0.9,
+    })
+    buildBrainDb('work')
+    const ids = searchBrain('work', 'why did we pick postgres over mysql for the billing service', 10, brainsDir).map(
+      (r) => r.id
+    )
+    expect(ids).toContain('mem-pg')
+  })
+
+  it('searchBrain falls back to OR when no single memory contains every term', () => {
+    addMemory({ id: 'mem-pg', content: 'We picked postgres over mysql for the billing service', type: 'decision', importance: 0.9 })
+    buildBrainDb('work')
+    const ids = searchBrain('work', 'kubernetes postgres', 10, brainsDir).map((r) => r.id)
+    expect(ids).toContain('mem-shared')
+    expect(ids).toContain('mem-pg')
+  })
+
+  it('searchBrain treats FTS5 operators, quotes and parens as plain terms', () => {
+    addMemory({ id: 'mem-pg', content: 'We picked postgres over mysql for billing', type: 'decision' })
+    buildBrainDb('work')
+    const hostile = [
+      'NEAR("a" OR "b")',
+      '"postgres" OR (mysql)',
+      'content:kubernetes',
+      'postgres NOT kubernetes',
+      '*',
+      '()',
+      'a"b',
+      '^postgres$',
+    ]
+    for (const query of hostile) {
+      expect(() => searchBrain('work', query, 10, brainsDir)).not.toThrow()
+      expect(Array.isArray(searchBrain('work', query, 10, brainsDir))).toBe(true)
+    }
+  })
+
+  it('searchBrain returns nothing for empty or stopword-only queries', () => {
+    buildBrainDb('work')
+    expect(searchBrain('work', '', 10, brainsDir)).toEqual([])
+    expect(searchBrain('work', 'why did we the of', 10, brainsDir)).toEqual([])
+  })
+
+  it('searchBrain ranks a prominent decision above a passing note for the same term', () => {
+    addMemory({ id: 'mem-pg', content: 'postgres was chosen for billing because of transactional DDL', type: 'decision', importance: 0.9 })
+    addMemory({ id: 'mem-pg-note', content: 'postgres appeared in a dashboard note', type: 'note', importance: 0.1 })
+    buildBrainDb('work')
+    expect(searchBrain('work', 'postgres', 10, brainsDir)[0]?.id).toBe('mem-pg')
+  })
+
+  it('searchBrain respects the limit', () => {
+    addMemory({ id: 'mem-p1', content: 'postgres alpha', created_at: 1 })
+    addMemory({ id: 'mem-p2', content: 'postgres beta', created_at: 2 })
+    addMemory({ id: 'mem-p3', content: 'postgres gamma', created_at: 3 })
+    buildBrainDb('work')
+    expect(searchBrain('work', 'postgres', 2, brainsDir)).toHaveLength(2)
+  })
+
+  // --- supersession + manifest gating -------------------------------------
+
+  it('searchBrain and getBrainMemory hide memories the owner has superseded', () => {
+    addMemory({ id: 'mem-old', content: 'Billing uses mysql for the ledger', type: 'decision', importance: 0.8 })
+    addMemory({ id: 'mem-new', content: 'Billing uses postgres for the ledger', type: 'decision', importance: 0.8 })
+    sourceMgr.db
+      .prepare(
+        'INSERT INTO memory_links(source_id, target_id, similarity, link_type, confidence, created_at) VALUES (?, ?, ?, ?, ?, ?)'
+      )
+      .run('mem-new', 'mem-old', 1, 'supersedes', 0.95, Date.now())
+    buildBrainDb('work')
+    const ids = searchBrain('work', 'billing', 10, brainsDir).map((r) => r.id)
+    expect(ids).toContain('mem-new')
+    expect(ids).not.toContain('mem-old')
+    expect(getBrainMemory('work', 'mem-old', brainsDir)).toBeNull()
+    expect(getBrainMemory('work', 'mem-new', brainsDir)?.id).toBe('mem-new')
+  })
+
+  it('searchBrain and getBrainMemory refuse a brain published with a newer schema', () => {
+    buildBrainDb('work')
+    const cachePath = join(brainsDir, 'work', '.cache', 'brain.db')
+    const db = new Database(cachePath)
+    db.prepare("UPDATE brain_manifest SET value = '999' WHERE key = 'schema_version'").run()
+    db.close()
+    expect(() => searchBrain('work', 'kubernetes', 10, brainsDir)).toThrow(/cannot be read/i)
+    expect(() => getBrainMemory('work', 'mem-shared', brainsDir)).toThrow(/cannot be read/i)
+  })
+
+  // --- scoped shareable marking -------------------------------------------
+
+  it('markShareable refuses memories outside the caller namespace', () => {
+    expect(() => markShareable(sourceMgr.db, 'mem-private', true, 'test', { allowedNamespace: '/other' })).toThrow(
+      /outside the caller/i
+    )
+  })
+
+  it('markShareable allows the namespace itself and its child layers', () => {
+    addMemory({ id: 'mem-scope', content: 'payments scope retries webhooks', namespace: 'work//payments', shareable: 0 })
+    addMemory({ id: 'mem-sub', content: 'subdirectory memory', namespace: 'work/sub', shareable: 0 })
+    expect(markShareable(sourceMgr.db, 'mem-shared', true, 'test', { allowedNamespace: 'work' }).id).toBe('mem-shared')
+    expect(markShareable(sourceMgr.db, 'mem-scope', true, 'test', { allowedNamespace: 'work' }).changed).toBe(true)
+    expect(markShareable(sourceMgr.db, 'mem-sub', true, 'test', { allowedNamespace: 'work' }).changed).toBe(true)
+  })
+
+  it('markShareable rejects a sibling namespace with the same prefix', () => {
+    addMemory({ id: 'mem-sibling', content: 'other project memory', namespace: 'work2', shareable: 0 })
+    expect(() => markShareable(sourceMgr.db, 'mem-sibling', true, 'test', { allowedNamespace: 'work' })).toThrow(
+      /outside the caller/i
+    )
+  })
+
+  it('markShareable without an allowed namespace keeps working for internal callers', () => {
+    expect(markShareable(sourceMgr.db, 'mem-private', true, 'test').changed).toBe(true)
   })
 })

@@ -204,7 +204,7 @@ export const ListBrainsSchema = z.object({})
 export const SearchBrainSchema = z.object({
   brain: z.string().min(1),
   query: z.string().min(1),
-  limit: z.number().int().positive().optional().default(10),
+  limit: z.number().int().positive().max(50).optional().default(10),
 })
 
 export const GetBrainMemorySchema = z.object({

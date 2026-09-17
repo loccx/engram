@@ -38,7 +38,7 @@ import { SCHEMAS } from './schemas.js'
 import { listLocalBrains, searchBrain, getBrainMemory, markShareable } from '../brains/mcp.js'
 import type { Memory } from '../memory/types.js'
 
-type ToolResult = { content: Array<{ type: 'text'; text: string }> }
+type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 
 interface Services {
   db: import('better-sqlite3').Database
@@ -58,7 +58,9 @@ function ok(data: unknown): ToolResult {
 }
 
 function err(message: string): ToolResult {
-  return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }] }
+  // MCP clients distinguish tool failures from successful payloads by isError;
+  // without it a JSON body like {"error": ...} reads as a normal result.
+  return { content: [{ type: 'text', text: JSON.stringify({ error: message }) }], isError: true }
 }
 
 /**
@@ -791,7 +793,22 @@ export async function handleTool(
       case 'mark_shareable': {
         const id = args.id as string
         const shareable = args.shareable !== false
-        const result = markShareable(db, id, shareable, 'mcp')
+        // Scope the write to the namespace this session is connected to, and
+        // attribute it to the session, so a prompt-injected call cannot flag
+        // memories from unrelated projects and the audit trail is traceable.
+        // Enforcement applies whenever the request declares a namespace (URL
+        // ?project=/?namespace= or explicit args); a caller that declares no
+        // project has no scope to enforce and keeps the legacy behavior.
+        const declaredNamespace =
+          (typeof args.namespace === 'string' && args.namespace.trim()) ||
+          (typeof args.project_path === 'string' && args.project_path.trim()) ||
+          ctx.urlNamespace ||
+          ctx.urlProject
+        const project_path = await resolveProjectPath(args, ctx)
+        const current = sessions.getCurrentSession(project_path)
+        const result = markShareable(db, id, shareable, current ? `mcp:${current.id}` : 'mcp',
+          declaredNamespace ? { allowedNamespace: project_path } : {}
+        )
         return ok(result)
       }
 
