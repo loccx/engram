@@ -105,6 +105,15 @@ async function runStartupWorkers(): Promise<void> {
   }
 }
 
+/**
+ * The daemon serves every memory and all MCP tools with NO authentication, so
+ * it binds loopback by default. Set ENGRAM_ALLOW_NONLOCAL=1 only when you
+ * deliberately want other hosts on the network to reach it.
+ */
+export function resolveBindHost(env: NodeJS.ProcessEnv = process.env): string {
+  return env.ENGRAM_ALLOW_NONLOCAL === '1' ? '0.0.0.0' : '127.0.0.1'
+}
+
 export async function startDaemon(port: number = 8888): Promise<void> {
   try {
     getDatabase()
@@ -117,7 +126,13 @@ export async function startDaemon(port: number = 8888): Promise<void> {
   const app = createServer()
   writePid(process.pid)
 
-  serve({ fetch: app.fetch, port }, (info) => {
+  const hostname = resolveBindHost()
+  if (hostname !== '127.0.0.1') {
+    console.log(
+      `WARNING: engram is listening on ${hostname} — any host that can reach port ${port} can read and write every memory.`
+    )
+  }
+  serve({ fetch: app.fetch, port, hostname }, (info) => {
     logger.info({ port: info.port }, 'Engram daemon started')
     console.log(`Engram daemon running on http://localhost:${info.port}`)
     console.log(`Health: http://localhost:${info.port}/health`)

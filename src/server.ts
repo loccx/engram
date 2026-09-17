@@ -14,10 +14,26 @@ const startTime = Date.now()
 // without going through the validated `tools/call` path.
 const TOOL_NAMES = new Set(tools.map((t) => t.name))
 
+/**
+ * Cross-origin policy for an unauthenticated daemon: only localhost origins are
+ * reflected. Every other origin gets no CORS headers, so a browser cannot read
+ * responses even if it can reach the port. Non-browser MCP clients send no
+ * Origin and are unaffected.
+ */
+export function resolveCorsOrigin(origin: string | undefined): string | undefined {
+  if (!origin) return undefined
+  try {
+    const host = new URL(origin).hostname
+    return host === 'localhost' || host === '127.0.0.1' || host === '::1' ? origin : undefined
+  } catch {
+    return undefined
+  }
+}
+
 export function createServer(): Hono {
   const app = new Hono()
 
-  app.use('*', cors())
+  app.use('*', cors({ origin: (origin) => resolveCorsOrigin(origin) }))
 
   // Health check
   app.get('/health', (c) => {
