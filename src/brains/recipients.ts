@@ -14,10 +14,17 @@ export function readRecipients(path: string): RecipientEntry[] {
   for (const raw of lines) {
     const line = raw.trim()
     if (!line || line.startsWith('#')) continue
-    const [pub, ...rest] = line.split(/\s+#\s*/)
-    const pubkey = pub.trim()
-    if (!isEngramPub(pubkey)) continue
-    out.push({ pubkey, label: rest.length > 0 ? rest.join(' # ').trim() : null })
+    // Accept both documented forms: a bare `<engram_pub_...>` line and the
+    // spec's `<name> <engram_pub_...>` pair, each optionally with ` # comment`.
+    // A line with no valid key is skipped, but never silently truncated: the
+    // caller can surface the count difference.
+    const [bodyRaw, ...commentParts] = line.split(/\s+#\s*/)
+    const comment = commentParts.length > 0 ? commentParts.join(' # ').trim() : null
+    const tokens = (bodyRaw ?? '').trim().split(/\s+/).filter(Boolean)
+    const pubkey = tokens.find((t) => isEngramPub(t))
+    if (!pubkey) continue
+    const name = tokens.filter((t) => t !== pubkey).join(' ').trim()
+    out.push({ pubkey, label: name || comment })
   }
   return out
 }
