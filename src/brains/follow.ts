@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, unlinkSync } from 'fs'
+import { existsSync, mkdirSync, renameSync, unlinkSync } from 'fs'
 import { join } from 'path'
 import Database from 'better-sqlite3'
 import { gitClone, gitPull, gitHeadSha } from './git.js'
@@ -63,23 +63,30 @@ async function decryptAndValidate(brainDir: string): Promise<{ memoryCount: numb
   const cacheDir = join(brainDir, '.cache')
   mkdirSync(cacheDir, { recursive: true })
   const cachedDb = join(cacheDir, 'brain.db')
-  if (existsSync(cachedDb)) unlinkSync(cachedDb)
+  // Decrypt to a temp file and only swap it in once validation passes. The
+  // previous good cache must survive any failure (revoked identity, corrupt
+  // remote, failed pull): a follower who already had this brain keeps it.
+  const tmpDb = join(cacheDir, `brain.db.tmp-${process.pid}`)
+  if (existsSync(tmpDb)) unlinkSync(tmpDb)
 
   const identity = await loadIdentity()
   try {
-    await decryptFileWithIdentity(encPath, cachedDb, identity)
+    await decryptFileWithIdentity(encPath, tmpDb, identity)
   } catch (err) {
+    if (existsSync(tmpDb)) unlinkSync(tmpDb)
     throw new Error(
       `Decryption failed: ${(err as Error).message}. You may not be a recipient of this brain.`
     )
   }
 
-  const manifest = readManifestFromFile(cachedDb)
+  const manifest = readManifestFromFile(tmpDb)
   const validationErr = validateForImport(manifest)
   if (validationErr) {
-    unlinkSync(cachedDb)
+    unlinkSync(tmpDb)
     throw new Error(`Brain validation failed (${validationErr.kind}): ${validationErr.message}`)
   }
+
+  renameSync(tmpDb, cachedDb)
 
   return {
     memoryCount: manifest.memory_count,
