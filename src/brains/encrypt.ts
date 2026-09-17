@@ -20,7 +20,22 @@ async function writeWebStreamToFile(web: ReadableStream<Uint8Array>, destPath: s
   if (existsSync(tmpPath)) unlinkSync(tmpPath)
   try {
     await pipeline(Readable.fromWeb(web as unknown as import('stream/web').ReadableStream), createWriteStream(tmpPath, { mode: 0o600 }))
-    renameSync(tmpPath, destPath)
+    try {
+      renameSync(tmpPath, destPath)
+    } catch (renameErr) {
+      // Windows cannot rename over an existing file; POSIX can. Fall back to a
+      // remove+rename so re-publishing an existing snapshot works there too.
+      try {
+        unlinkSync(destPath)
+      } catch {
+        /* destination may not exist */
+      }
+      try {
+        renameSync(tmpPath, destPath)
+      } catch {
+        throw renameErr
+      }
+    }
   } catch (err) {
     if (existsSync(tmpPath)) {
       try {
