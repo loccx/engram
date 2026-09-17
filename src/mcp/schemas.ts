@@ -13,6 +13,13 @@ export const StoreMemorySchema = z.object({
   type: MemoryType.optional().default('note'),
   tags: z.array(z.string()).optional().default([]),
   importance: z.number().min(0).max(1).optional().default(0.5),
+  /**
+   * Persist as permanent (tier 'pinned') in the same call. A standing rule that
+   * says "concept memories are written with importance 1.0 AND pinned" could not
+   * be satisfied through this tool while the flag was missing, which is how
+   * concept memories silently drifted unpinned.
+   */
+  pinned: z.boolean().optional().default(false),
   session_id: z.string().optional(),
   project_path: z.string().optional(),
   namespace: z.string().optional(),
