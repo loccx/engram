@@ -20,6 +20,8 @@ export interface PublishOptions {
   brainDir: string
   sourceDbPath: string
   namespace: string
+  /** Include descendant layers of `namespace` (synthetic //scopes and deeper). */
+  includeScopes?: boolean
   description?: string
   ownerName?: string | null
   ownerPubkey?: string | null
@@ -55,6 +57,7 @@ export async function publishBrain(opts: PublishOptions): Promise<PublishResult>
   try {
     const result = exportBrain(source, {
       namespace: opts.namespace,
+      includeScopes: opts.includeScopes,
       outputPath: exportTarget,
       description: opts.description,
       ownerName: opts.ownerName ?? undefined,
@@ -104,6 +107,11 @@ export async function publishBrain(opts: PublishOptions): Promise<PublishResult>
         'brain.db-journal',
         'brain.db-wal',
         'brain.db-shm',
+        // The migration runner writes a plaintext <db>.bak.<ts> sidecar before
+        // applying migrations. Without these patterns `git add -A` can commit
+        // an unencrypted copy of the brain to the shared remote.
+        'brain.db.bak.*',
+        '*.bak.*',
         '.cache/',
       ].join('\n') + '\n',
       'utf8'

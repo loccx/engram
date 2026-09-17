@@ -9,6 +9,15 @@ export interface ExportOptions {
   description?: string
   ownerName?: string
   ownerPubkey?: string
+  /**
+   * Include descendant layers of `namespace`: synthetic `<ns>//<scope>`
+   * children and deeper path descendants. Default false preserves the
+   * historical exact-match behavior, so an existing publish never silently
+   * ships more memory than it did before.
+   */
+  includeScopes?: boolean
+  /** Additional exact namespaces to export alongside `namespace`. */
+  layers?: string[]
 }
 
 export interface ExportResult {
@@ -26,6 +35,10 @@ export interface BrainManifest {
   description: string | null
   exported_at: number
   memory_count: number
+  /** The namespace this brain was exported from (as requested). */
+  source_namespace: string
+  /** Namespaces actually present in the snapshot (JSON array), or null. */
+  included_layers: string | null
 }
 
 /**
@@ -33,7 +46,7 @@ export interface BrainManifest {
  * refuses newer brains (see validateForImport) while newer engram keeps
  * accepting older brains. Bump BOTH write sites when the format changes.
  */
-const BRAIN_SCHEMA_VERSION = 6
+const BRAIN_SCHEMA_VERSION = 7
 
 function sourceColumnExists(db: Database.Database, table: string, column: string): boolean {
   const rows = db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>
@@ -62,10 +75,31 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
   const nsExpr = namespaceCol ? 'COALESCE(namespace, project_path)' : 'project_path'
   const shareableExpr = shareableCol ? 'shareable = 1' : '0 = 1'
 
+  // Layer selection: the requested namespace always, plus any explicit layers.
+  // With includeScopes, synthetic `<ns>//<scope>` children and deeper path
+  // descendants match too (mirrors the search-side subtree predicate in
+  // src/memory/search/hybrid.ts). LIKE wildcards in the namespace are escaped
+  // so a namespace containing % or _ cannot match a sibling prefix.
+  const escapeLike = (ns: string) => ns.replace(/[\\%_]/g, '\\$&')
+  const layerPredicates: string[] = []
+  const layerParams: unknown[] = []
+  for (const layer of [opts.namespace, ...(opts.layers ?? [])]) {
+    layerPredicates.push(`${nsExpr} = ?`)
+    layerParams.push(layer)
+    if (opts.includeScopes) {
+      layerPredicates.push(`${nsExpr} LIKE ? ESCAPE '\\'`)
+      layerParams.push(`${escapeLike(layer)}//%`)
+      layerPredicates.push(`${nsExpr} LIKE ? ESCAPE '\\'`)
+      layerParams.push(`${escapeLike(layer)}/%`)
+    }
+  }
+
   const tx = target.transaction(() => {
     const shareableIds = sourceDb
-      .prepare(`SELECT id FROM memories WHERE ${nsExpr} = ? AND ${shareableExpr}`)
-      .all(opts.namespace) as Array<{ id: string }>
+      .prepare(
+        `SELECT id FROM memories WHERE (${layerPredicates.join(' OR ')}) AND ${shareableExpr}`
+      )
+      .all(...layerParams) as Array<{ id: string }>
 
     if (shareableIds.length === 0) {
       writeManifest(target, {
@@ -78,6 +112,8 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
         description: opts.description ?? null,
         exported_at: Date.now(),
         memory_count: 0,
+        source_namespace: opts.namespace,
+        included_layers: null,
       })
       return { count: 0 }
     }
@@ -107,6 +143,19 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
           insertSess.run(...sessionCols.map((c) => s[c]))
         }
       }
+      // A shareable memory whose session row is gone (pruned, imported, or
+      // written by an older schema) must not abort the whole export: the
+      // memories.session_id FK is NOT NULL, so materialize a minimal row.
+      const foundSessions = new Set(sessions.map((s) => String(s.id)))
+      const missingSessions = sessionIds
+        .map((s) => s.session_id)
+        .filter((id) => !foundSessions.has(id))
+      if (missingSessions.length > 0) {
+        const insertMissing = target.prepare(
+          `INSERT OR IGNORE INTO sessions (id, project_path, started_at) VALUES (?, ?, ?)`
+        )
+        for (const id of missingSessions) insertMissing.run(id, opts.namespace, Date.now())
+      }
     }
 
     const memories = sourceDb
@@ -124,7 +173,19 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
       }
     }
 
-    if (vectorsAvailable) {
+    // The source connection is opened by callers as a plain better-sqlite3
+    // handle (publish.ts, cli/brain.ts) and may not have sqlite-vec loaded
+    // even though the target does. Probe it first so export degrades to
+    // FTS-only instead of throwing "no such module: vec0".
+    let sourceVectorsAvailable = vectorsAvailable
+    if (sourceVectorsAvailable) {
+      try {
+        sourceDb.prepare('SELECT rowid FROM memory_vectors LIMIT 1').get()
+      } catch {
+        sourceVectorsAvailable = false
+      }
+    }
+    if (sourceVectorsAvailable) {
       const vecRowids = memories
         .map((m) => m.vec_rowid as number | null)
         .filter((v): v is number => v !== null && v !== undefined)
@@ -184,6 +245,15 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
       }
     }
 
+    const includedLayers = (
+      sourceDb
+        .prepare(`SELECT DISTINCT ${nsExpr} AS ns FROM memories WHERE id IN (${placeholders})`)
+        .all(...idList) as Array<{ ns: string }>
+    )
+      .map((r) => r.ns)
+      .filter((ns): ns is string => typeof ns === 'string' && ns.length > 0)
+      .sort()
+
     writeManifest(target, {
       schema_version: BRAIN_SCHEMA_VERSION,
       engram_version: ENGRAM_VERSION,
@@ -194,6 +264,8 @@ export function exportBrain(sourceDb: Database.Database, opts: ExportOptions): E
       description: opts.description ?? null,
       exported_at: Date.now(),
       memory_count: idList.length,
+      source_namespace: opts.namespace,
+      included_layers: JSON.stringify(includedLayers),
     })
 
     return { count: idList.length }
@@ -227,6 +299,8 @@ export function readManifest(db: Database.Database): BrainManifest {
     description: m.description || null,
     exported_at: parseInt(m.exported_at ?? '0', 10),
     memory_count: parseInt(m.memory_count ?? '0', 10),
+    source_namespace: m.source_namespace || '',
+    included_layers: m.included_layers || null,
   }
 }
 
