@@ -93,7 +93,12 @@ describe('brains/encryption streaming', { timeout: 60_000 }, () => {
     // Buffering the plaintext alone would add ~SIZE. The bound is loose so the
     // assertion stays robust on a busy machine while still failing loudly if the
     // implementation regresses to reading the whole file.
-    expect(growth).toBeLessThan(SIZE * 0.6)
+    // Streaming measured ~0.63*SIZE under load (15.8MB on a 25MB input) and ~0.07*SIZE
+    // on the large case; buffering is >= 1.0*SIZE because the whole file plus the
+    // encoder's copy is resident. 0.8*SIZE keeps a wide margin over the measured
+    // streaming cost while still failing if the implementation buffers, and unlike
+    // 0.6 does not trip on allocator retention on a busy machine.
+    expect(growth).toBeLessThan(SIZE * 0.8)
   })
 
   it('leaves no output and no temp file when the ciphertext is truncated', async () => {
