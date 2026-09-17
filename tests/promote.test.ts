@@ -187,7 +187,7 @@ describe('promotion + recursive consolidation', () => {
 
     // No LLM and no opt-in: promotion must SKIP. Minting a concatenation of the
     // top memories is not a distillation, and that blob reaches every agent via
-    // the parent nav digest - the mechanism that put a garbled policy in cevin.
+    // the parent nav digest, where a garbled policy then reaches every agent.
     expect(report.promoted).toEqual([])
     expect(report.reasons.payments).toBe('no_llm')
     expect(fetchSpy).toHaveBeenCalled()
