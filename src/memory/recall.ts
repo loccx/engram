@@ -138,7 +138,6 @@ export async function recallContext(
   }
   if (asOf !== undefined) searchOptions.as_of = asOf
 
-  // ---- retrieval branches -------------------------------------------------
   const breakdown = new Map<string, Record<RecallSignal, number>>()
   let candidates: Array<{ memory: SearchResult; source: RecallSource }> = []
 
@@ -163,14 +162,12 @@ export async function recallContext(
     candidates = results.map((m) => ({ memory: m, source: 'hybrid' as RecallSource }))
   }
 
-  // ---- deterministic dedupe + diversity ----------------------------------
   const byId = new Map<string, { memory: SearchResult; source: RecallSource }>()
   for (const c of candidates) {
     if (!byId.has(c.memory.id)) byId.set(c.memory.id, c)
   }
   const deduped = [...byId.values()]
 
-  // ---- trust filter + enrichment -----------------------------------------
   // Trust is applied BEFORE near-duplicate suppression so that when the
   // higher-ranked representative of a duplicate pair fails min_trust, the
   // passing sibling is not discarded with it.
@@ -224,11 +221,9 @@ export async function recallContext(
   }
   merged.sort((a, b) => (keepOrder.get(a.id) ?? 0) - (keepOrder.get(b.id) ?? 0))
 
-  // ---- retrieval-extrinsic topic pass ------------------------------------
   const clusters = search.getClusters(options.project_path)
   const topics = buildTopics(db, clusters, asOf, merged)
 
-  // ---- budget packing -----------------------------------------------------
   // Historical reads must not be fed present state: the cached digest is
   // omitted for as_of recalls (explicitly flagged in the payload).
   const digest = asOf === undefined ? getDigest(db, options.project_path) : null

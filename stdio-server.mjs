@@ -10,8 +10,8 @@
 //
 // Configure in your tool's MCP settings (e.g. ~/.claude/settings.json):
 //   { "mcpServers": { "engram": {
-//       "command": "/Users/locc/.nvm/versions/node/v24.19.0/bin/node",
-//       "args": ["/Users/locc/git/research/engram/stdio-server.mjs"] } } }
+//       "command": "node",
+//       "args": ["/path/to/engram/stdio-server.mjs"] } } }
 
 import { createInterface } from 'node:readline';
 import { existsSync, statSync } from 'node:fs';
