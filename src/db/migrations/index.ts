@@ -1,0 +1,22 @@
+import type { Migration } from './types.js'
+import { migration001 } from './001_namespace_supersession_metadata.js'
+import { migration002 } from './002_importance_provenance.js'
+import { migration003 } from './003_bitemporal.js'
+import { migration004 } from './004_clusters.js'
+import { migration005 } from './005_adjudication_state.js'
+import { migration006 } from './006_brain_support.js'
+import { migration007 } from './007_project_digests.js'
+import { migration008 } from './008_provenance_revisions.js'
+import { migration009 } from './009_maintenance_jobs.js'
+import { migration010 } from './010_namespace_nodes.js'
+import { migration011 } from './011_promote_jobs.js'
+import { migration012 } from './012_identifier_lexical_index.js'
+import { migration013 } from './013_lifecycle_archive_tier.js'
+import { migration014 } from './014_retrieval_events.js'
+import { migration015 } from './015_ident_text_columns.js'
+
+export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012, migration013, migration014, migration015]
+
+export { runMigrations } from './runner.js'
+export type { MigrationRunResult } from './runner.js'
+export type { Migration } from './types.js'

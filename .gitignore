@@ -1,0 +1,45 @@
+node_modules/
+dist/
+*.log
+.DS_Store
+
+# Local SQLite databases and backups
+engram.db
+engram.db-*
+engram.db.bak.*
+*.sqlite
+*.sqlite-*
+
+# Test artifacts
+coverage/
+.vitest/
+
+# Editor / OS
+.vscode/
+.idea/
+*.swp
+
+# Local environment
+.env
+.env.*
+# Eval gateway credentials live outside the repo (~/.engram-eval.env); this is a
+# belt-and-braces guard in case someone copies one in.
+.engram-eval.env
+
+# Eval datasets (fetched on demand; only eval/datasets/manifest.json conventions
+# live in the repo — the data itself is never committed)
+eval/datasets/
+
+# Eval scratch output: per-run reports are regenerated; BASELINE.md / BASELINE.json
+# are the committed reference artifacts.
+eval/reports/*
+!eval/reports/BASELINE.md
+!eval/reports/BASELINE.json
+!eval/reports/BASELINE-vectors.md
+!eval/reports/BASELINE-vectors.json
+!eval/reports/README.md
+eval/.tsbuild/
+
+# Generated measurement reports stay local; the harness regenerates them.
+eval/reports/
+eval/datasets/

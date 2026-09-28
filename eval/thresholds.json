@@ -1,0 +1,53 @@
+{
+  "note": "Generated from a baseline run: each value is (measured - margin), floored at 0. Lower-is-better metrics (leakRate, staleRate) are recorded as measured + margin instead, and gate from above. Regenerate with `npx tsx eval/run.ts --suite all --write-thresholds`; see eval/README.md.",
+  "margin": 0.1,
+  "generated_at_sha": "adc0da577f1c22d865af9db42c56aafa5d6eb212",
+  "suites": {
+    "retrieval": {
+      "baseline": {
+        "recall@1": 0.319,
+        "recall@5": 0.628,
+        "recall@10": 0.703,
+        "ndcg@10": 0.529,
+        "mrr": 0.473,
+        "precision@10": 0.09,
+        "leakRate": 0,
+        "staleRate": 0.138
+      }
+    },
+    "contradiction": {
+      "baseline": {
+        "candidateRecall": 0.9
+      }
+    },
+    "budget": {
+      "baseline": {
+        "fidelity": 0.9
+      }
+    },
+    "ab": {
+      "baseline": {
+        "recall@1": 0.372,
+        "recall@5": 0.705,
+        "recall@10": 0.783,
+        "ndcg@10": 0.56,
+        "mrr": 0.49,
+        "precision@10": 0.078,
+        "leakRate": 0,
+        "staleRate": 0.152
+      }
+    },
+    "longmemeval": {
+      "baseline": {
+        "recall@1": 0.555,
+        "recall@5": 0.871,
+        "recall@10": 0.871,
+        "ndcg@10": 0.878,
+        "mrr": 0.9,
+        "precision@10": 0.169,
+        "leakRate": 0,
+        "staleRate": 0.1
+      }
+    }
+  }
+}
