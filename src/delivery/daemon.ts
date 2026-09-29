@@ -9,6 +9,7 @@ export interface DaemonCallOptions {
   baseUrl?: string
   timeoutMs?: number
   fetchImpl?: typeof fetch
+  headers?: Record<string, string>
 }
 
 export function daemonBaseUrl(env: NodeJS.ProcessEnv = process.env): string {
@@ -25,7 +26,7 @@ export async function daemonPost<T>(
   try {
     const res = await doFetch(`${base}${path}`, {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: { 'content-type': 'application/json', ...(options.headers ?? {}) },
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(options.timeoutMs ?? 1200),
     })

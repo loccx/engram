@@ -19,7 +19,14 @@ export interface SuiteContext {
   envFile?: string
   /** longmemeval: explicit dataset file, bypassing the manifest lookup. */
   datasetPath?: string
-  /** longmemeval --qa: reader names; default: every registered reader. */
+  /** dataset manifest override: tests pin one so a check never depends on what this machine fetched */
+  datasetManifestPath?: string
+  /**
+   * systems to compare: a builtin name, or `mcp:<adapter-config-path>` for any mcp
+   * memory server. empty means every builtin, which is the longmemeval --qa default.
+   */
+  systems?: string[]
+  /** alias of `systems`, kept for callers and flags that still say reader. */
   readers?: string[]
   /** longmemeval --qa: questions in flight (default 2). */
   concurrency?: number
@@ -41,6 +48,11 @@ export interface SuiteContext {
   verdictsPath?: string
   /** longmemeval only: dataset split name. */
   dataset?: string
+  /**
+   * longmemeval only: keep records whose question_type is one of these, so a run can
+   * target one slice (multi-session, temporal-reasoning) of a mixed split.
+   */
+  questionTypes?: string[]
   outDir: string
   /** bound to the git state captured at process start */
   buildHeader: (input: HeaderInput) => RunHeader

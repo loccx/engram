@@ -7,7 +7,8 @@
 import Database from 'better-sqlite3'
 import { mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { getDatabase, resetDatabase } from '../../src/db/init.js'
 import { normalizeIdentifiers } from '../../src/db/lexical-index.js'
 import { handleTool, resetServicesForTests } from '../../src/mcp/handlers.js'
@@ -19,8 +20,15 @@ import { MemorySearch } from '../../src/memory/search.js'
 import type { SearchOptions } from '../../src/memory/search.js'
 import type { SearchResult } from '../../src/memory/types.js'
 import { recallContext, type RecallOptions, type RecallResult } from '../../src/memory/recall.js'
-import { modelRequiredPaths, resolveModelCacheDir } from '../../src/embeddings/pipeline.js'
+import { deleteEpisodes } from '../../src/memory/episodes.js'
+import {
+  getEmbedding,
+  modelRequiredPaths,
+  resolveModelCacheDir,
+  MODEL_ID,
+} from '../../src/embeddings/pipeline.js'
 import { refreshDigest } from '../../src/memory/digest.js'
+import { namespaceFilter } from '../../src/memory/search/scope.js'
 import { latencyMsAsync } from './metrics.js'
 import type { Corpus, CorpusMemory, SeedMap, VectorMode } from './types.js'
 
@@ -32,6 +40,8 @@ const OWNED_ENV = [
   'ENGRAM_DB_PATH',
   'ENGRAM_DATA_DIR',
   'ENGRAM_MODEL_CACHE_DIR',
+  'ENGRAM_EMBED_CACHE_DIR',
+  'ENGRAM_EMBED_CACHE',
   'ENGRAM_SCOPE_INFERENCE',
   'ENGRAM_IMPORTANCE_DISABLED',
   'ENGRAM_MAINTENANCE_DISABLED',
@@ -58,11 +68,21 @@ export interface HarnessOptions {
   tmpDir?: string
   /** keep the temp dir on dispose, for debugging */
   keep?: boolean
+  /**
+   * the embedder a raw seed uses when `SeedMode.embed` is set; defaults to the local
+   * model. tests inject one so a vector-carrying seed needs no model load
+   */
+  embedder?: (text: string) => Promise<Float32Array | null>
 }
 
 export interface SeedMode {
   /** 'auto' takes the raw path only for a large fts-only corpus */
   mode?: 'auto' | 'tool' | 'raw'
+  /**
+   * raw path only: store a vector per row, one single-call embedding each. a system
+   * whose rows must carry the vectors it reads sets this; a lexical-only one does not.
+   */
+  embed?: boolean
 }
 
 export interface SeedStats {
@@ -105,7 +125,9 @@ export class EvalHarness {
     /** true when a complete model was cached before the run started */
     readonly modelCacheReady: boolean,
     readonly now: number,
-    private readonly keepDir: boolean
+    private readonly keepDir: boolean,
+    /** one call per text, the vector a stored row must carry */
+    readonly embedder: (text: string) => Promise<Float32Array | null>
   ) {}
 
   static async create(options: HarnessOptions): Promise<EvalHarness> {
@@ -122,11 +144,24 @@ export class EvalHarness {
     }
 
     const { modelCacheDir, vectorsAvailable, modelCacheReady } = resolveVectorSetup(dir, mode)
+    // read before the env is cleared below: an explicit off is the one way to run a
+    // vectors run with no embedding cache at all
+    const cacheRequested = process.env.ENGRAM_EMBED_CACHE?.trim()
+    const embedCacheDir = process.env.ENGRAM_EMBED_CACHE_DIR?.trim()
 
     for (const key of OWNED_ENV) setEnv(key, undefined)
     setEnv('ENGRAM_DB_PATH', join(dir, 'engram.db'))
     setEnv('ENGRAM_DATA_DIR', dir)
     setEnv('ENGRAM_MODEL_CACHE_DIR', modelCacheDir)
+    // a vectors run reuses vectors between processes: the embedding cache points at a
+    // dir beside the harness, not inside the per-run temp dir, so a second run of the
+    // same corpus skips the model. an explicit ENGRAM_EMBED_CACHE_DIR still wins, and an
+    // env value of off turns the cache off for the run.
+    if (mode !== 'fts' && cacheRequested === 'off') {
+      setEnv('ENGRAM_EMBED_CACHE', 'off')
+    } else if (mode !== 'fts') {
+      setEnv('ENGRAM_EMBED_CACHE_DIR', embedCacheDir && embedCacheDir !== '' ? embedCacheDir : evalEmbedCacheDir())
+    }
     // deterministic seeding: no llm scope inference, no background importance
     // scoring, no maintenance jobs racing the run.
     setEnv('ENGRAM_SCOPE_INFERENCE', '0')
@@ -152,7 +187,8 @@ export class EvalHarness {
       mode,
       modelCacheReady,
       now,
-      options.keep === true
+      options.keep === true,
+      options.embedder ?? ((text: string) => getEmbedding(text, 'document'))
     )
     // the overrides stay applied for the harness lifetime and are
     // restored on dispose, so a caller can make one harness after another.
@@ -197,7 +233,7 @@ export class EvalHarness {
     const seedMap: SeedMap = new Map()
 
     if (useRaw) {
-      this.insertRawMemories(corpus.memories, seedMap)
+      await this.insertRawMemories(corpus.memories, seedMap, options.embed === true)
     } else {
       await this.seedViaTool(corpus.memories, seedMap)
     }
@@ -243,6 +279,7 @@ export class EvalHarness {
           importance: memory.importance ?? 0.5,
           tags: memory.tags ?? [],
           pinned: memory.pinned === true,
+          ...(memory.state_key ? { state_key: memory.state_key } : {}),
         })
         const payload = parseToolResult<{ error?: string; id?: string }>(result)
         if (payload.error || !payload.id) {
@@ -267,18 +304,36 @@ export class EvalHarness {
    * since migration 015 the trigger only copies that column, so omitting it costs no
    * error — just a row missing from the identifier channel.
    */
-  private insertRawMemories(memories: CorpusMemory[], seedMap: SeedMap): void {
+  private async insertRawMemories(
+    memories: CorpusMemory[],
+    seedMap: SeedMap,
+    embed: boolean
+  ): Promise<void> {
     const insertSession = this.db.prepare(
       'INSERT OR IGNORE INTO sessions (id, project_path, started_at) VALUES (?, ?, ?)'
     )
     const insertMemory = this.db.prepare(
       `INSERT INTO memories
          (id, session_id, project_path, namespace, content, type, importance, tags,
-          created_at, valid_from, valid_until, pinned, importance_source, origin, ident_text)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user', 'eval-corpus', ?)`
+          created_at, valid_from, valid_until, pinned, importance_source, origin, ident_text,
+          state_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'user', 'eval-corpus', ?, ?)`
+    )
+    // computed before the transaction opens, one call per row: a model call inside a
+    // write transaction blocks every other writer, and single calls keep the vectors
+    // byte-identical to what the read path would compute
+    const vectors = new Map<number, Float32Array | null>()
+    if (embed && this.vectorsAvailable) {
+      for (const [index, memory] of memories.entries()) {
+        vectors.set(index, await this.embedder(memory.content))
+      }
+    }
+    const insertVector = this.db.prepare('INSERT INTO memory_vectors (embedding) VALUES (?)')
+    const recordVector = this.db.prepare(
+      "UPDATE memories SET vec_rowid = ?, embedding_model = ?, embedding_dim = ?, embed_state = 'fresh' WHERE id = ?"
     )
     const tx = this.db.transaction((rows: CorpusMemory[]) => {
-      for (const memory of rows) {
+      for (const [index, memory] of rows.entries()) {
         const id = deterministicUuid(this.now, memory.id)
         const namespace = intendedNamespace(memory)
         const sessionId = `eval-session-${slug(namespace)}`
@@ -297,8 +352,14 @@ export class EvalHarness {
           memory.valid_from ?? memory.created_at,
           memory.valid_until ?? null,
           memory.pinned === true ? 1 : 0,
-          normalizeIdentifiers(`${memory.content} ${tags}`)
+          normalizeIdentifiers(`${memory.content} ${tags}`),
+          memory.state_key ?? null
         )
+        const vector = vectors.get(index)
+        if (vector) {
+          const vecRowid = insertVector.run(Buffer.from(vector.buffer)).lastInsertRowid as number
+          recordVector.run(vecRowid, MODEL_ID, vector.length, id)
+        }
         seedMap.set(memory.id, id)
       }
     })
@@ -339,16 +400,33 @@ export class EvalHarness {
           decider_model, prompt_version, judged_at)
        VALUES (?, ?, ?, 'supersedes', ?, ?, ?, 'eval-corpus', 'corpus-v1', ?)`
     )
+    // a link the write path made carries the wall clock, and a link judged in the
+    // future if a corpus window says otherwise. the corpus clock wins: the new value
+    // replaced the old one when it became valid.
+    const restamp = this.db.prepare(
+      `UPDATE memory_links SET created_at = ?, judged_at = ?
+       WHERE source_id = ? AND target_id = ? AND link_type = 'supersedes'`
+    )
     const byId = new Map(memories.map((m) => [m.id, m]))
     const tx = this.db.transaction(() => {
       for (const memory of memories) {
-        if (!memory.superseded_by) continue
-        const newer = byId.get(memory.superseded_by)
-        const newId = seedMap.get(memory.superseded_by)
+        const newId = memory.superseded_by ? seedMap.get(memory.superseded_by) : undefined
         const oldId = seedMap.get(memory.id)
-        if (!newId || !oldId) continue
-        const at = newer?.created_at ?? memory.created_at
-        stmt.run(newId, oldId, 1.0, at, 1.0, 'corpus label: revised fact', at)
+        if (!oldId) continue
+        if (newId) {
+          const newer = byId.get(memory.superseded_by!)
+          const at = newer?.valid_from ?? newer?.created_at ?? memory.created_at
+          stmt.run(newId, oldId, 1.0, at, 1.0, 'corpus label: revised fact', at)
+        }
+        // restamp whatever supersedes link now points at this row, whether the corpus
+        // declared it or a state key wrote it
+        const sources = this.db
+          .prepare(
+            "SELECT source_id FROM memory_links WHERE target_id = ? AND link_type = 'supersedes'"
+          )
+          .all(oldId) as Array<{ source_id: string }>
+        const at = memory.valid_until ?? memory.created_at
+        for (const source of sources) restamp.run(at, at, source.source_id, oldId)
       }
     })
     tx()
@@ -452,13 +530,62 @@ export class EvalHarness {
   }
 
   /**
-   * drop every row in a question's namespace, so the streamed longmemeval run holds
-   * one haystack at a time and each question starts from the same state. the fts table
-   * is handled by its delete trigger and links cascade; the session row goes by hand.
+   * drop a question's namespace and every namespace below it, so the streamed run holds
+   * one haystack at a time. a system that ingests below it (`ns//scope`) leaves rows an
+   * exact match keeps, and every row in the db feeds the fts statistics behind bm25.
    */
   dropNamespace(namespace: string): void {
-    this.db.prepare('DELETE FROM memories WHERE COALESCE(namespace, project_path) = ?').run(namespace)
-    this.db.prepare('DELETE FROM sessions WHERE project_path = ?').run(namespace)
+    this.dropNamespaceRows(namespace, false)
+  }
+
+  /**
+   * drop only the namespaces below one, keeping the question's own rows: every system
+   * answers over the same haystack, so the previous system's rows go before the next one
+   * ingests and the next system's go once it has answered
+   */
+  dropChildNamespaces(namespace: string): void {
+    this.dropNamespaceRows(namespace, true)
+  }
+
+  /** `ns`, or only what sits under `ns/` and `ns//`, across every namespace-keyed table */
+  private dropNamespaceRows(namespace: string, childrenOnly: boolean): void {
+    // the engine's own subtree clause and escaping, so a teardown covers exactly what a
+    // scoped read would have returned: `= ns OR LIKE ns/% OR LIKE ns//%`
+    const subtree = namespaceFilter('memories', { namespace_subtree: namespace })
+    const below = subtree.params.slice(1) as string[]
+    const memoriesSql = childrenOnly
+      ? `${subtree.sql} AND COALESCE(memories.namespace, memories.project_path) <> ?`
+      : subtree.sql
+    const memoriesParams = childrenOnly
+      ? [...subtree.params, namespace]
+      : subtree.params
+    this.db.prepare(`DELETE FROM memories WHERE ${memoriesSql}`).run(...memoriesParams)
+
+    // the evidence layer carries its own fts rows and vec0 vectors, so it goes
+    // through deleteEpisodes rather than a bare table delete
+    deleteEpisodes(
+      this.db,
+      childrenOnly
+        ? { namespace_subtree: namespace, exclude_namespace: namespace }
+        : { namespace_subtree: namespace }
+    )
+
+    const keyed: Array<[table: string, column: string]> = [
+      ['sessions', 'project_path'],
+      ['memory_clusters', 'project_path'],
+      ['project_digests', 'namespace'],
+      ['namespace_nodes', 'path'],
+    ]
+    for (const [table, column] of keyed) {
+      const selfClause = childrenOnly ? '' : `${column} = ? OR `
+      const params = childrenOnly ? below : [namespace, ...below]
+      this.db
+        .prepare(
+          `DELETE FROM ${table} WHERE ${selfClause}${column} LIKE ? ESCAPE '\\'` +
+            ` OR ${column} LIKE ? ESCAPE '\\'`
+        )
+        .run(...params)
+    }
   }
 
   /** the mcp read surface, smoke checks only (it uses Date.now) */
@@ -507,6 +634,11 @@ export class EvalHarness {
       }
     }
   }
+}
+
+/** the cross-run vector cache of a vectors run: one dir beside the harness */
+export function evalEmbedCacheDir(): string {
+  return join(dirname(fileURLToPath(import.meta.url)), '..', '.embed-cache')
 }
 
 /** where a corpus record lands: `ns` or `ns//scope` */

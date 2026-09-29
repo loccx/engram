@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { Command } from 'commander'
 import { readPid, isRunning, removePid } from './utils/pid.js'
+import { registerAuthCommands } from './cli/auth.js'
 import { registerBrainCommands } from './cli/brain.js'
 import { registerHookCommands } from './cli/hook.js'
+import { authHeaders } from './mcp/auth.js'
 import { registerLifecycleCommands } from './cli/lifecycle.js'
 import { registerSetupCommands } from './cli/setup.js'
 import { ENGRAM_VERSION } from './version.js'
@@ -30,7 +32,7 @@ async function callTool(
 ): Promise<Record<string, unknown>> {
   const res = await fetch(`http://localhost:${port}/mcp`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
     body: JSON.stringify({
       jsonrpc: '2.0',
       method: 'tools/call',
@@ -73,7 +75,7 @@ program
     const existingPid = readPid()
     if (existingPid && isRunning(existingPid)) {
       try {
-        const res = await fetch(`http://localhost:${opts.port}/health`)
+        const res = await fetch(`http://localhost:${opts.port}/health`, { headers: authHeaders() })
         if (res.ok) {
           console.log(`Engram is already running (PID ${existingPid}) on port ${opts.port}`)
           process.exit(0)
@@ -124,7 +126,7 @@ program
     }
 
     try {
-      const res = await fetch(`http://localhost:${opts.port}/health`)
+      const res = await fetch(`http://localhost:${opts.port}/health`, { headers: authHeaders() })
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const data = await res.json() as Record<string, unknown>
       const uptimeSec = Math.floor((data.uptime as number) / 1000)
@@ -207,7 +209,10 @@ program
       const params: Record<string, unknown> = {}
       if (opts.namespace) params.namespace = opts.namespace
 
-      const res = await fetch(`http://localhost:${opts.port}/metrics${opts.namespace ? `?namespace=${encodeURIComponent(opts.namespace)}` : ''}`)
+      const res = await fetch(
+        `http://localhost:${opts.port}/metrics${opts.namespace ? `?namespace=${encodeURIComponent(opts.namespace)}` : ''}`,
+        { headers: authHeaders() }
+      )
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       const stats = await res.json() as Record<string, unknown>
 
@@ -350,6 +355,7 @@ program
     dbm.close()
   })
 
+registerAuthCommands(program)
 registerBrainCommands(program)
 registerLifecycleCommands(program)
 registerSetupCommands(program)

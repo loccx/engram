@@ -45,6 +45,10 @@ export interface QueryDetail {
   servedChars: number
   servedTokens: number
   latencyMs: number
+  /** the target a knowledge-update question has to end on */
+  latestTarget?: string
+  /** its rank in the served list, null when it was not served at all */
+  latestTargetRank: number | null
 }
 
 export interface MetricBlock {
@@ -135,6 +139,14 @@ export async function scoreQueries(input: ScoreInput): Promise<ScoreResult> {
       servedChars: cost.chars,
       servedTokens: cost.tokens,
       latencyMs: round3(ms),
+      ...(query.latest_target ? { latestTarget: query.latest_target } : {}),
+      latestTargetRank:
+        query.latest_target === undefined
+          ? null
+          : (() => {
+              const at = ranked.slice(0, limit).findIndex((r) => r.id === query.latest_target)
+              return at < 0 ? null : at + 1
+            })(),
     }
     details.push(detail)
     input.onQuery?.(detail)

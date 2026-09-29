@@ -42,18 +42,28 @@ const EDIT_TOOLS = 'Read|Edit|Write|MultiEdit|NotebookEdit'
 export const AGENTS: AgentEntry[] = [
   {
     name: 'claude-code',
-    summary: 'Claude Code — MCP server, SessionStart + PreToolUse hooks, CLAUDE.md rules',
+    summary:
+      'Claude Code — MCP server, CLAUDE.md rules, and the full lifecycle hook set (session, compaction, subagent, session end)',
     mcp: { path: '.claude.json', format: 'json-mcpServers' },
     instructions: { path: '.claude/CLAUDE.md' },
     hooks: {
       path: '.claude/settings.json',
       style: 'claude-settings',
       host: 'claude-code',
-      bindings: [{ event: 'session-start' }, { event: 'pre-tool-use', matcher: EDIT_TOOLS }],
+      bindings: [
+        { event: 'session-start' },
+        { event: 'pre-tool-use', matcher: EDIT_TOOLS },
+        { event: 'pre-compact', matcher: 'manual|auto' },
+        { event: 'post-compact' },
+        { event: 'subagent-start' },
+        { event: 'subagent-stop' },
+        { event: 'session-end' },
+      ],
     },
     notes: [
       'user scope: mcpServers lives at the top level of ~/.claude.json, hooks in ~/.claude/settings.json',
       '`claude mcp list` lists the registered server; hooks can be disabled with "disableAllHooks": true',
+      'pre-compact and session-end exit 0 without printing: compaction is the host\'s decision, and both run inside a shared 1.5 s budget',
     ],
   },
   {
@@ -62,7 +72,10 @@ export const AGENTS: AgentEntry[] = [
     mcp: { path: '.codex/config.toml', format: 'toml-mcp-servers' },
     instructions: { path: '.codex/AGENTS.md' },
     hooks: null,
-    notes: ['global instructions are ~/.codex/AGENTS.md (or AGENTS.override.md, which wins if present)'],
+    notes: [
+      'global instructions are ~/.codex/AGENTS.md (or AGENTS.override.md, which wins if present)',
+      'codex documents no lifecycle hook surface, so the task tools are the whole working tier here',
+    ],
   },
   {
     name: 'cursor',
@@ -73,6 +86,7 @@ export const AGENTS: AgentEntry[] = [
     notes: [
       'cursor rules are edited in the app (Settings → Rules) or as .cursor/rules/*.mdc, so there is no file to own',
       'global config is ~/.cursor/mcp.json; a project can use .cursor/mcp.json instead',
+      'cursor gets mcp tools only: its lifecycle hooks are not a verified surface, so nothing is registered',
     ],
   },
 ]

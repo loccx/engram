@@ -1,15 +1,23 @@
 import { describe, it, expect } from 'vitest'
 import { resolveCorsOrigin } from '../src/server.js'
 import { resolveBindHost } from '../src/daemon.js'
+import { requiresAuth } from '../src/mcp/auth.js'
 
-// no authentication at all, so the network surface is pinned here: loopback by
-// default and no wildcard cors
+// the network surface is pinned here: loopback by default, no wildcard cors, and the
+// opt-in bind is exactly the one that turns bearer auth on
 describe('daemon exposure defaults', () => {
   it('binds loopback unless explicitly opted in', () => {
     expect(resolveBindHost({} as NodeJS.ProcessEnv)).toBe('127.0.0.1')
     expect(resolveBindHost({ ENGRAM_ALLOW_NONLOCAL: '1' } as NodeJS.ProcessEnv)).toBe('0.0.0.0')
     expect(resolveBindHost({ ENGRAM_ALLOW_NONLOCAL: '0' } as NodeJS.ProcessEnv)).toBe('127.0.0.1')
     expect(resolveBindHost({ ENGRAM_ALLOW_NONLOCAL: 'true' } as NodeJS.ProcessEnv)).toBe('127.0.0.1')
+  })
+
+  it('turns auth on for every bind that is not loopback', () => {
+    expect(requiresAuth(resolveBindHost({} as NodeJS.ProcessEnv))).toBe(false)
+    expect(requiresAuth(resolveBindHost({ ENGRAM_ALLOW_NONLOCAL: '1' } as NodeJS.ProcessEnv))).toBe(
+      true
+    )
   })
 
   it('reflects only localhost origins, never a wildcard', () => {

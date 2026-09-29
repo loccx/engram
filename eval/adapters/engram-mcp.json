@@ -1,0 +1,44 @@
+{
+  "name": "engram-mcp",
+  "describe": "engram through its own mcp tool surface over stdio, in an isolated data dir",
+  "transport": {
+    "kind": "stdio",
+    "command": "node",
+    "args": ["--import", "tsx", "eval/adapters/engram-stdio.ts"],
+    "env": {
+      "ENGRAM_DB_PATH": "${tmp}/engram.db",
+      "ENGRAM_DATA_DIR": "${tmp}",
+      "ENGRAM_EMBEDDINGS": "off",
+      "ENGRAM_SCOPE_INFERENCE": "0",
+      "ENGRAM_IMPORTANCE_DISABLED": "1",
+      "ENGRAM_MAINTENANCE_DISABLED": "1",
+      "ENGRAM_RERANKER_ENABLED": "0",
+      "LOG_LEVEL": "error"
+    }
+  },
+  "write": {
+    "tool": "store_memory",
+    "args": {
+      "content": "${session.text}",
+      "project_path": "${namespace}",
+      "type": "note",
+      "tags": "${session.tags}"
+    },
+    "idPath": "id"
+  },
+  "search": {
+    "tool": "recall_context",
+    "args": {
+      "query": "${query}",
+      "project_path": "${namespace}",
+      "budget_chars": "${budgetChars}",
+      "limit": "${topK}",
+      "mode": "fused"
+    }
+  },
+  "context": {
+    "sections": ["digest", "memories[].content", "topics[].summary"],
+    "items": { "path": "memories[]", "text": "content", "id": "id" }
+  },
+  "timeoutMs": 30000
+}

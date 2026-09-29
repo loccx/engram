@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import type Database from 'better-sqlite3'
 import { MemoryStore } from '../src/memory/store.js'
-import { MemorySearch, classifyQuery } from '../src/memory/search.js'
+import { MemorySearch, classifyQuery, WEIGHT_PROFILES } from '../src/memory/search.js'
 import { createTestDb } from './helpers.js'
 
 const TEST_SESSION_ID = 'search-session-001'
@@ -145,5 +145,22 @@ describe('classifyQuery', () => {
   it('temporal takes priority over other patterns', () => {
     expect(classifyQuery('recent handleAuth changes')).toBe('temporal')
     expect(classifyQuery('common patterns from last week')).toBe('temporal')
+  })
+
+  it('classifies an aggregation cue: a count, a sum or a list over several sessions', () => {
+    expect(classifyQuery('how many places did I visit in total?')).toBe('aggregation')
+    expect(classifyQuery('how much did the three trips cost altogether?')).toBe('aggregation')
+    expect(classifyQuery('what is the combined cost of the two trips')).toBe('aggregation')
+    expect(classifyQuery('list all the boards I have joined')).toBe('aggregation')
+    expect(classifyQuery('what is the total number of items I bought')).toBe('aggregation')
+  })
+
+  it('leaves the ordering cues in front of the aggregation cue', () => {
+    expect(classifyQuery('handleUserAuth totals')).toBe('lookup')
+    expect(classifyQuery('how often do we usually redeploy')).toBe('frequentist')
+  })
+
+  it('routes assembly, not ranking: the aggregation weights are the semantic ones', () => {
+    expect(WEIGHT_PROFILES.aggregation).toEqual(WEIGHT_PROFILES.semantic)
   })
 })

@@ -56,6 +56,13 @@ const GATED_METRICS = [
   'fidelity',
   'candidateRecall',
   'qaAccuracy',
+  // state suite: slot reads and the newest-evidence rank
+  'currentAccuracy',
+  'priorAccuracy',
+  'asOfAccuracy',
+  'slotCoverage',
+  'latestAt1',
+  'asOfLeakRate',
 ]
 
 /**
@@ -66,7 +73,7 @@ const GATED_METRICS = [
 const INVARIANT_METRICS = new Set(['leakRate'])
 
 /** smaller is better here, so they gate from above */
-const LOWER_IS_BETTER = new Set(['leakRate', 'staleRate', 'budgetViolations'])
+const LOWER_IS_BETTER = new Set(['leakRate', 'staleRate', 'asOfLeakRate', 'budgetViolations'])
 
 export function loadThresholds(path: string = THRESHOLDS_PATH): ThresholdFile | null {
   try {

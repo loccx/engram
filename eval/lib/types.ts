@@ -4,6 +4,12 @@
 import type { MemoryType } from '../../src/memory/types.js'
 import type { SearchOptions } from '../../src/memory/search.js'
 
+/** one corpus turn: a message of a session, without any label a retriever must not see */
+export interface CorpusTurn {
+  role: string
+  text: string
+}
+
 /** one memory the harness seeds */
 export interface CorpusMemory {
   /** corpus-local id; the db id is a fresh uuid, see SeedMap */
@@ -26,6 +32,13 @@ export interface CorpusMemory {
    * memory_links row in the shape `notSupersededClause` filters on.
    */
   superseded_by?: string
+  /**
+   * state slot this row is a value of. seeded through store_memory, so the write
+   * path retires the previous value the way any caller's write would.
+   */
+  state_key?: string
+  /** per-turn structure of a session row, for systems that retrieve below a session */
+  turns?: CorpusTurn[]
   /** extra query text this row should also be reachable by */
 }
 
@@ -44,6 +57,11 @@ export interface CorpusQuery {
   limit?: number
   /** probe family, for the per-kind breakdown */
   kind?: string
+  /**
+   * the evidence a knowledge-update question has to end on: the newest session
+   * among the targets. scored as latestTargetRank by scoreQueries.
+   */
+  latest_target?: string
   /** per-query overrides; the config patch merges on top */
   search?: Partial<SearchOptions>
 }
@@ -124,6 +142,74 @@ export interface RunHeader {
 }
 
 export type VectorMode = 'fts' | 'cached' | 'on'
+
+/** one system's retrieval for one question, in the corpus-local id space */
+export interface SystemQueryScore {
+  system: string
+  query_id: string
+  kind: string
+  targets: string[]
+  /** ranked refs as served; `ref` is '' when the system cannot name the session */
+  served: Array<{ rank: number; ref: string; turn?: number }>
+  /** distinct sessions the served items name */
+  sessions_represented: number
+  /** a served snippet landed on an evidence turn; null for a session-granularity system */
+  evidence_turn_hit: boolean | null
+  /** share of targets present anywhere in the served context, no k-cut */
+  coverage: number
+  /** recall over the served list cut at k; a system serving more than k is ranked on it */
+  recall: Record<string, number>
+  mrr: number
+  contextChars: number
+  contextTokens: number
+  /** wall-clock; copied into `timings`, never into an aggregate */
+  retrievalMs: number
+}
+
+/** what a system served and what it cost, over all questions or one question_type */
+export interface SystemTypeAggregate {
+  /** questions with a resolvable target, the ones in the recall numbers */
+  scored: number
+  coverage: number
+  recall: Record<string, number>
+  mrr: number
+  avg_served: number
+  /** mean distinct sessions the served items name, over the scored questions */
+  sessions_per_q: number
+  /** mean share of questions whose served snippets reached an evidence turn; null when
+   * no scored question could be attributed to a turn (a session-granularity system)
+   */
+  evidence_turn_coverage: number | null
+  /** scored questions the evidence-turn number is computed over */
+  evidence_turn_scored: number
+  avg_context_tokens: number
+}
+
+/**
+ * the per-system block of a suite report: recall over the served context and what that
+ * context cost, so two systems can be read side by side under the same budget and top-k
+ */
+/** what a system's write path left in the shared db, and how much of it carries a vector */
+export interface StoredVectors {
+  memories: { rows: number; vectors: number }
+  episodes: { rows: number; vectors: number }
+}
+
+export interface SystemAggregate extends SystemTypeAggregate {
+  describe: string
+  adapter_kind: string
+  adapter_config_hash: string
+  /** questions the system was asked */
+  questions: number
+  /** the same numbers per question_type, so a multi-session gain is not averaged away */
+  by_question_type: Record<string, SystemTypeAggregate>
+  write_calls: number
+  write_tokens: number | null
+  /** stored rows and how many carry a vector, captured after the system's last ingest */
+  stored_vectors: StoredVectors | null
+  /** true when the system has no vector channel at all, so 0 stored vectors is by design */
+  lexical_only: boolean
+}
 
 export interface TimingSummary {
   count: number

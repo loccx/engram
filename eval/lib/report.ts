@@ -8,6 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { redactSecrets } from './llm.js'
 import type { TokenizerInfo } from './metrics.js'
+import type { ComparisonReport, LatencyPercentiles, PairStats } from './stats.js'
 import type { RunHeader, SuiteResult, TimingSummary, VectorMode } from './types.js'
 
 /** the checkout that contains eval/ */
@@ -205,3 +206,205 @@ export const DETERMINISM_NOTE =
   'Determinism: metrics are a pure function of (corpus, seed, config, git sha); ' +
   'two runs with the same header produce identical metric values. Wall-clock timings ' +
   'are reported separately and are not covered by that guarantee.'
+
+export interface ComparisonRenderOptions {
+  /** wall clock per system; never part of the json metrics block */
+  latencies?: Record<string, LatencyPercentiles>
+}
+
+/**
+ * the paired-comparison block: does a difference survive its own noise, and what did
+ * each system cost to get there. prose first, because "+3.2 pts, ci crossing zero" is
+ * the sentence a reader needs before any table.
+ */
+export function renderComparisonReport(
+  report: ComparisonReport,
+  options: ComparisonRenderOptions = {}
+): string {
+  if (report.systems.length < 2) return ''
+  if (!report.comparable) return renderWithheld(report)
+
+  const sections: string[] = [
+    `### paired comparison\n\n${comparisonHeader(report)}\n\n${guardLine(report)}`,
+  ]
+  const pairs = report.pairs.map((pair) => pairProse(pair, report.alpha))
+  const unpaired = unpairedLines(report)
+  sections.push([...pairs, ...unpaired].filter(Boolean).join('\n\n'))
+
+  const typeRows = report.by_question_type.map((row) => [
+    `${row.left} vs ${row.right}`,
+    row.question_type,
+    row.n,
+    row.accuracy_left,
+    row.accuracy_right,
+    points(row.delta),
+    `${points(row.delta_ci_low)} to ${points(row.delta_ci_high)}`,
+    pValue(row.p),
+    row.low_n ? `low n (${row.n} < 30)` : '',
+  ])
+  if (typeRows.length > 0) {
+    sections.push(
+      `### paired comparison by question_type\n\n${markdownTable({
+        columns: [
+          'pair',
+          'question_type',
+          'n',
+          'accuracy left',
+          'accuracy right',
+          'delta pts',
+          '95% ci',
+          'mcnemar p',
+          'flag',
+        ],
+        rows: typeRows,
+      })}\n\nPer-type p-values are unadjusted: this is a breakdown, not another family of tests. ` +
+        'A bucket under 30 paired questions is flagged; treat its delta as a direction, not a number.'
+    )
+  }
+
+  const continuousRows = report.pairs.flatMap((pair) =>
+    pair.continuous.map((stats) => [
+      `${pair.left} vs ${pair.right}`,
+      stats.metric,
+      stats.n,
+      stats.left_mean,
+      stats.right_mean,
+      stats.delta,
+      `${stats.ci_low} to ${stats.ci_high}`,
+    ])
+  )
+  if (continuousRows.length > 0) {
+    sections.push(
+      `### paired continuous metrics\n\n${markdownTable({
+        columns: ['pair', 'metric', 'n', 'left mean', 'right mean', 'delta', '95% ci'],
+        rows: continuousRows,
+      })}\n\nPercentile 95% ci of the paired delta, seed ${report.seed}, ${report.resamples} resamples. ` +
+        'Left and right follow the pair name; a metric a row does not carry is skipped for that metric only.'
+    )
+  }
+
+  sections.push(renderPareto(report, options))
+  return sections.filter((section) => section !== '').join('\n\n')
+}
+
+function renderWithheld(report: ComparisonReport): string {
+  return [
+    '### paired comparison',
+    '',
+    'comparison withheld: the rows are not comparable, so no delta is printed.',
+    '',
+    ...report.differences.map((difference) => `- ${difference}`),
+    '',
+    'Two accuracy numbers that disagree on a field above are not a measurement of either ' +
+      'system; re-run both sides under the same dataset sha, models, prompt versions and budget.',
+  ].join('\n')
+}
+
+function comparisonHeader(report: ComparisonReport): string {
+  const first = report.systems[0]
+  return (
+    `bootstrap: seed ${report.seed}, ${report.resamples} resamples, percentile 95% ci. ` +
+    `mcnemar: exact two-sided binomial on the discordant pairs, b = ${first} correct and the other wrong, ` +
+    `c = the reverse. every number below stands on the ${report.n_paired} question(s) every system graded.`
+  )
+}
+
+function guardLine(report: ComparisonReport): string {
+  const fields = ['dataset sha', 'reader model', 'judge model', 'reader prompt', 'judge prompt', 'budget']
+  const checked = fields.filter((field) => !report.unverified.includes(field))
+  const line = `comparability: matched on ${checked.join(', ')}`
+  return report.unverified.length === 0
+    ? `${line}.`
+    : `${line} — unchecked: ${report.unverified.join(', ')} (no field declared on both sides).`
+}
+
+function pairProse(pair: PairStats, alpha: number): string {
+  const label = `${pair.left} vs ${pair.right}`
+  if (pair.n === 0) return `${label}: no question graded by both systems, nothing to compare`
+  const verdict = pair.significant
+    ? `significant at ${alpha}`
+    : `not significant at ${alpha}`
+  const holm = pair.family > 1 ? `, holm over ${pair.family} pairs ${formatP(pair.holm_p)}` : ''
+  return (
+    `${label}: ${points(pair.delta)} pts (95% ci ${points(pair.delta_ci_low)} to ` +
+    `${points(pair.delta_ci_high)}), mcnemar ${formatP(pair.p)} ` +
+    `(b=${pair.mcnemar_b}, c=${pair.mcnemar_c})${holm} — ${verdict}`
+  )
+}
+
+function unpairedLines(report: ComparisonReport): string[] {
+  const lines: string[] = []
+  for (const pair of report.pairs) {
+    const label = `${pair.left} vs ${pair.right}`
+    if (pair.only_right.length > 0) {
+      lines.push(
+        `${label}: ${pair.only_right.length} question(s) graded on ${pair.right} only ` +
+          `(${listIds(pair.only_right)}) — unpaired, excluded from the stats above`
+      )
+    }
+    if (pair.only_left.length > 0) {
+      lines.push(
+        `${label}: ${pair.only_left.length} question(s) graded on ${pair.left} only ` +
+          `(${listIds(pair.only_left)}) — unpaired, excluded from the stats above`
+      )
+    }
+  }
+  for (const [system, count] of Object.entries(report.ungraded).sort()) {
+    if (count > 0) lines.push(`${system}: ${count} row(s) without a verdict, excluded`)
+  }
+  return lines
+}
+
+function listIds(ids: string[]): string {
+  return ids.length <= 5 ? ids.join(', ') : `${ids.slice(0, 5).join(', ')}, +${ids.length - 5} more`
+}
+
+function renderPareto(report: ComparisonReport, options: ComparisonRenderOptions): string {
+  const latencies = options.latencies ?? {}
+  const withLatency = report.pareto.some((point) => latencies[point.system] !== undefined)
+  const withWriteCost = report.pareto.some((point) => point.write_llm_calls !== null)
+  const columns = ['system', 'n', 'accuracy', 'mean ctx tokens', 'mean reader tokens']
+  // model calls a system makes while writing, not store operations: engram makes none
+  if (withWriteCost) columns.push('write llm calls', 'write llm tokens')
+  if (withLatency) columns.push('p50 ms', 'p95 ms')
+  columns.push('frontier')
+  const rows = report.pareto.map((point) => {
+    const latency = latencies[point.system]
+    const row: Array<string | number> = [
+      point.system,
+      point.n,
+      point.accuracy,
+      point.mean_context_tokens,
+      point.mean_reader_input_tokens,
+    ]
+    if (withWriteCost) {
+      row.push(point.write_llm_calls ?? '-', point.write_llm_tokens ?? '-')
+    }
+    if (withLatency) row.push(latency?.p50Ms ?? '-', latency?.p95Ms ?? '-')
+    row.push(point.frontier ? 'yes' : '-')
+    return row
+  })
+  return (
+    `### pareto: accuracy vs cost\n\n${markdownTable({ columns, rows })}\n\n` +
+    `Frontier = nothing else matches or beats its accuracy at a lower cost axis ` +
+    `(\`${report.cost_axis}\`), so a frontier row is the reason to pick a system at all. ` +
+    'Costs are means over the same paired subset as the accuracy column; p50/p95 are wall clock ' +
+    'for retrieval plus the reader call (the judge is the measuring instrument, so it is excluded) ' +
+    'and vary per run.'
+  )
+}
+
+/** points, one decimal: +3.2, -0.4, so a delta is never read as a fraction */
+function points(value: number): string {
+  const rounded = Math.round(value * 1000) / 10
+  const magnitude = Math.abs(rounded) < 0.05 ? 0 : rounded
+  return `${magnitude < 0 ? '-' : '+'}${Math.abs(magnitude).toFixed(1)}`
+}
+
+function formatP(p: number): string {
+  return p < 0.001 ? 'p<0.001' : `p=${pValue(p)}`
+}
+
+function pValue(p: number): string {
+  return p < 0.001 ? '<0.001' : String(Math.round(p * 1000) / 1000)
+}

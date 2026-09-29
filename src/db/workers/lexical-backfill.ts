@@ -6,6 +6,7 @@ import {
   normalizeIdentifiers,
 } from '../lexical-index.js'
 import { columnExists } from '../migrations/types.js'
+import { clearScopeStatsCache } from '../../memory/search/scoped-stats.js'
 
 export interface LexicalBackfillStats {
   memoryRows: number
@@ -184,6 +185,11 @@ export async function backfillLexicalIndex(
   await runBatches(dropEntityBatch, 'entityRows', 'entity', 'repaired')
   await runBatches(memoryBatch, 'memoryRows', 'memory', 'indexed')
   await runBatches(entityBatch, 'entityRows', 'entity', 'indexed')
+
+  // the four batches above write the fts tables directly: no epoch trigger can sit on a
+  // virtual table, and the daemon serves while this runs, so any count warmed meanwhile is
+  // now behind the index it described
+  clearScopeStatsCache()
 
   stats.durationMs = Date.now() - t0
   if (stats.batches > 1 || stats.memoryRows + stats.entityRows > 0) {

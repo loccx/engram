@@ -1,6 +1,7 @@
 import { serve } from '@hono/node-server'
 import { createServer } from './server.js'
 import { writePid, removePid } from './utils/pid.js'
+import { resolveAuthRequirement, TOKEN_ENV } from './mcp/auth.js'
 import { logger } from './utils/logger.js'
 import { getDatabase } from './db/init.js'
 import { backfillNamespaces } from './db/workers/backfill.js'
@@ -11,6 +12,7 @@ import { drainAdjudicationQueue, getAdjudicationQueue } from './contradictions/r
 import { drainImportanceQueue, getImportanceQueue, isImportanceScoringEnabled } from './importance/runtime.js'
 import { runClusterWorker } from './memory/cluster-worker.js'
 import {
+  enqueueEpisodeReembed,
   enqueueNamespaceMaintenance,
   isMaintenanceEnabled,
   releaseOwnedLeases,
@@ -95,6 +97,20 @@ async function runStartupWorkers(): Promise<void> {
     } catch (err) {
       logger.warn({ err }, 're-embed worker failed (stale memories will retry on next startup)')
     }
+
+    // the evidence backlog of a deferred ingest: queued, not embedded here, so the job
+    // queue's lease and attempts own it like every other maintenance turn
+    try {
+      const staleEpisodes = (
+        dbm.db.prepare("SELECT COUNT(*) as n FROM episodes WHERE embed_state = 'stale'").get() as { n: number }
+      ).n
+      if (staleEpisodes > 0) {
+        logger.info({ staleEpisodes }, 'queueing the vectors of episodes written without one')
+        enqueueEpisodeReembed(dbm.db, { source: 'startup' })
+      }
+    } catch (err) {
+      logger.warn({ err }, 'episode re-embed enqueue failed (stale episodes retry on next startup)')
+    }
   }
 
   // enqueue per-namespace jobs, then drain a bounded number: this also reclaims
@@ -135,7 +151,7 @@ async function runStartupWorkers(): Promise<void> {
   }
 }
 
-/** every memory and tool, with no authentication at all: loopback only unless ENGRAM_ALLOW_NONLOCAL=1 */
+/** loopback unless ENGRAM_ALLOW_NONLOCAL=1, which binds every interface and turns auth on */
 export function resolveBindHost(env: NodeJS.ProcessEnv = process.env): string {
   return env.ENGRAM_ALLOW_NONLOCAL === '1' ? '0.0.0.0' : '127.0.0.1'
 }
@@ -149,14 +165,19 @@ export async function startDaemon(port: number = 8888): Promise<void> {
     process.exit(1)
   }
 
-  const app = createServer()
+  const hostname = resolveBindHost()
+  const auth = resolveAuthRequirement(hostname)
+  if (auth.error) {
+    console.error(`engram: refusing to start. ${auth.error}`)
+    process.exit(1)
+  }
+
+  const app = createServer({ requireAuth: auth.required })
   writePid(process.pid)
 
-  const hostname = resolveBindHost()
-  if (hostname !== '127.0.0.1') {
-    console.log(
-      `WARNING: engram is listening on ${hostname} — any host that can reach port ${port} can read and write every memory.`
-    )
+  if (auth.required) {
+    const where = auth.source === 'env' ? TOKEN_ENV : auth.path
+    console.log(`Auth:   every request on ${hostname} needs a bearer token (${where})`)
   }
   serve({ fetch: app.fetch, port, hostname }, (info) => {
     logger.info({ port: info.port }, 'Engram daemon started')

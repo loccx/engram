@@ -5,6 +5,11 @@ import { pipeline, env, type FeatureExtractionPipeline } from '@huggingface/tran
 import { join } from 'path'
 import { mkdirSync, statSync } from 'fs'
 import envPaths from 'env-paths'
+import {
+  activeEmbeddingCache,
+  embeddingCacheKey,
+  type EmbeddingCacheEntry,
+} from './cache.js'
 
 const paths = envPaths('engram')
 
@@ -39,6 +44,9 @@ if (!ensureModelCacheDir(initialCacheDir)) {
 env.cacheDir = initialCacheDir
 
 export const MODEL_ID = 'nomic-ai/nomic-embed-text-v1.5'
+
+/** the quantization the model loads at; part of the cache key, so a dtype change misses */
+export const MODEL_DTYPE = 'q8'
 
 export const EMBEDDING_DIM = 768
 
@@ -142,7 +150,7 @@ async function getPipeline(): Promise<FeatureExtractionPipeline | null> {
       }
       process.stderr.write('Engram: loading embedding model (first run only)...\n')
       const p = await pipeline('feature-extraction', MODEL_ID, {
-        dtype: 'q8',
+        dtype: MODEL_DTYPE,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       } as any)
       process.stderr.write('Engram: embedding model ready.\n')
@@ -157,37 +165,114 @@ async function getPipeline(): Promise<FeatureExtractionPipeline | null> {
   return _pipeline
 }
 
-/** normalized 768-dim vector, or null when the model is unavailable */
+/**
+ * one normalized row per input text out of a pooled output: layer_norm, the matryoshka
+ * slice and the L2 pass, shared by the single and the batch path. a padded row moves a
+ * little under the q8 kernels, so getEmbedding stays the reference for one text.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+async function pooledRows(output: any): Promise<Float32Array[]> {
+  // layer_norm then matryoshka slice then L2 normalize — the model card's order
+  const ln = await loadLayerNorm()
+  if (ln) {
+    const normalized = ln(output, [output.dims[1]])
+      .slice(null, [0, EMBEDDING_DIM])
+      .normalize(2, -1)
+    return (normalized.tolist() as number[][]).map((row) => new Float32Array(row))
+  }
+
+  // no layer_norm: raw pooled output, L2 only
+  const raw = output.normalize(2, -1)
+  return (raw.tolist() as number[][]).map((row) => new Float32Array(row))
+}
+
+/**
+ * normalized 768-dim vector, or null when the model is unavailable. a cache hit is
+ * byte-identical to the call that wrote it, so this stays the reference for one text.
+ */
 export async function getEmbedding(
   text: string,
   mode: EmbeddingMode = 'document'
 ): Promise<Float32Array | null> {
   const p = await getPipeline()
   if (!p) return null
+  // 8k is the model's context limit, and it applies before the cache: the key covers
+  // exactly the string below, so two texts differing past the cut share one entry
+  const prefixed = TASK_PREFIX[mode] + text.slice(0, 8192)
+  const cache = activeEmbeddingCache()
+  const entry = cache ? cacheEntryFor(prefixed, mode) : null
+  if (cache && entry) {
+    const hit = cache.get(entry.key)
+    if (hit) return hit
+  }
   try {
-    // 8k is the model's context limit
-    const prefixed = TASK_PREFIX[mode] + text.slice(0, 8192)
     const output = await p(prefixed, { pooling: 'mean' })
-
-    // layer_norm then matryoshka slice then L2 normalize — the model card's order
-    const ln = await loadLayerNorm()
-    if (ln) {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const normalized = ln(output, [(output as any).dims[1]])
-        .slice(null, [0, EMBEDDING_DIM])
-        .normalize(2, -1)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      return new Float32Array((normalized as any).tolist()[0] as number[])
-    }
-
-    // no layer_norm: raw pooled output, L2 only
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (output as any).normalize(2, -1)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    return new Float32Array((raw as any).tolist()[0] as number[])
+    const [first] = await pooledRows(output)
+    if (!first) return null
+    if (cache && entry) cache.put({ ...entry, vector: first })
+    return first
   } catch {
     return null
   }
+}
+
+/** the cache identity of one model input: model, dtype, dim and mode come from here */
+function cacheEntryFor(prefixed: string, mode: EmbeddingMode): Omit<EmbeddingCacheEntry, 'vector'> {
+  return {
+    key: embeddingCacheKey({
+      model: MODEL_ID,
+      dtype: MODEL_DTYPE,
+      dim: EMBEDDING_DIM,
+      mode,
+      text: prefixed,
+    }),
+    model: MODEL_ID,
+    dtype: MODEL_DTYPE,
+    mode,
+  }
+}
+
+/**
+ * texts per forward pass. the padded last_hidden_state of one pass is
+ * batch x longest text x 768 floats, so this ceiling is what keeps an 8192-char
+ * batch from holding hundreds of MB
+ */
+export const EMBED_BATCH_MAX = 8
+
+/**
+ * the same vectors as one getEmbedding call per text, chunks in input order and a null
+ * row where a chunk threw. not vector-neutral: a row padded to the longest in its chunk
+ * sits ~0.97-0.99 cosine from its one-call vector (equal-length rows stay identical).
+ */
+// no cache here: a row padded to its chunk is not the single-call vector, so writing one
+// would hand a later single call a vector the reference path never returns
+export async function getEmbeddings(
+  texts: string[],
+  mode: EmbeddingMode = 'document'
+): Promise<Array<Float32Array | null>> {
+  if (texts.length === 0) return []
+  const p = await getPipeline()
+  if (!p) return texts.map(() => null)
+  const out: Array<Float32Array | null> = new Array(texts.length).fill(null)
+  // the tokenizer pads every row of a batch to the longest row in it, so a chunk of one
+  // long turn and seven short ones runs the long turn's length eight times over. sort
+  // first: neighbouring lengths make the padding near-free
+  const order = texts.map((_, index) => index).sort((a, b) => texts[a].length - texts[b].length)
+  for (let i = 0; i < order.length; i += EMBED_BATCH_MAX) {
+    const chunk = order.slice(i, i + EMBED_BATCH_MAX)
+    try {
+      // 8k is the model's context limit, and it is per text
+      const prefixed = chunk.map((index) => TASK_PREFIX[mode] + texts[index].slice(0, 8192))
+      const output = await p(prefixed, { pooling: 'mean' })
+      const rows = await pooledRows(output)
+      chunk.forEach((index, position) => {
+        out[index] = rows[position] ?? null
+      })
+    } catch {
+      // this chunk's rows stay null, the soft failure getEmbedding reports for one text
+    }
+  }
+  return out
 }
 
 export async function warmEmbeddings(): Promise<boolean> {

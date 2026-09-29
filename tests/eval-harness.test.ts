@@ -23,6 +23,7 @@ import {
 } from '../eval/lib/metrics.js'
 import { buildCorpus, corpusNames, lexicalOverlapViolations, sharedRareTokens } from '../eval/lib/corpus.js'
 import { EvalHarness } from '../eval/lib/harness.js'
+import { MODEL_ID } from '../src/embeddings/pipeline.js'
 import { resolveConfigs, loadConfigs, BASELINE_CONFIG, featureEnvKey, applyFeatureFlags } from '../eval/lib/registry.js'
 import { buildHeader, renderSuiteSection, writeReport } from '../eval/lib/report.js'
 import { buildQueryOptions } from '../eval/lib/score.js'
@@ -260,6 +261,58 @@ describe('query options', () => {
     const query = buildCorpus('temporal-update', SEED).queries.find((q) => q.kind === 'historical')!
     const options = buildQueryOptions(query, {}, 10)
     expect(options.as_of).toBe(query.as_of)
+  })
+})
+
+describe('harness vector reality', () => {
+  it('stores a vector per raw-inserted row when the seed asks for one', async () => {
+    const vector = new Float32Array(768)
+    vector[0] = 1
+    let calls = 0
+    const harness = await EvalHarness.create({
+      seed: SEED,
+      vectors: 'cached',
+      embedder: async () => {
+        calls++
+        return vector
+      },
+    })
+    try {
+      // no cached model on this machine: vectors are off entirely, nothing to assert
+      if (!harness.vectorsAvailable) return
+      const corpus = buildCorpus('cross-namespace', SEED)
+      await harness.seedCorpus(corpus, { mode: 'raw', embed: true })
+      const stored = harness.db
+        .prepare('SELECT COUNT(*) AS n FROM memories WHERE vec_rowid IS NOT NULL AND embed_state = ?')
+        .get('fresh') as { n: number }
+      expect(stored.n).toBe(corpus.memories.length)
+      // one single-call embedding per row, in order
+      expect(calls).toBe(corpus.memories.length)
+      const model = harness.db
+        .prepare('SELECT COUNT(*) AS n FROM memories WHERE embedding_model = ?')
+        .get(MODEL_ID) as { n: number }
+      expect(model.n).toBe(corpus.memories.length)
+    } finally {
+      harness.dispose()
+    }
+  })
+
+  it('leaves a raw seed vectorless unless the caller opts in', async () => {
+    const harness = await EvalHarness.create({
+      seed: SEED,
+      vectors: 'cached',
+      embedder: async () => new Float32Array(768),
+    })
+    try {
+      const corpus = buildCorpus('cross-namespace', SEED)
+      await harness.seedCorpus(corpus, { mode: 'raw' })
+      const stored = harness.db
+        .prepare('SELECT COUNT(*) AS n FROM memories WHERE vec_rowid IS NOT NULL')
+        .get() as { n: number }
+      expect(stored.n).toBe(0)
+    } finally {
+      harness.dispose()
+    }
   })
 })
 

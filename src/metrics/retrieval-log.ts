@@ -5,7 +5,12 @@ import { logger } from '../utils/logger.js'
 // counters, so which query missed was not recoverable. ENGRAM_LOG_QUERIES=0
 // stores the query length only and leaves the text NULL (see the readme).
 
-export type RetrievalTool = 'search_memories' | 'get_context' | 'recall_context'
+export type RetrievalTool =
+  | 'search_memories'
+  | 'get_context'
+  | 'recall_context'
+  | 'assemble_context'
+  | 'get_state'
 
 export interface RetrievalBudgetAccounting {
   budget_chars?: number

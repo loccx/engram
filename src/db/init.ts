@@ -4,6 +4,11 @@ import { dirname, join } from 'path'
 import envPaths from 'env-paths'
 import * as sqliteVec from 'sqlite-vec'
 import { EMBEDDING_DIM } from '../embeddings/pipeline.js'
+import {
+  createDbEmbeddingCache,
+  registerEmbeddingCache,
+  resolveEmbedCacheMaxRows,
+} from '../embeddings/cache.js'
 import { migrations, runMigrations, type MigrationRunResult } from './migrations/index.js'
 
 const paths = envPaths('engram')
@@ -145,15 +150,23 @@ export class DatabaseManager {
         if (existingDim !== EMBEDDING_DIM) {
           process.stderr.write(
             `Engram: embedding dimension changed ${existingDim}→${EMBEDDING_DIM}, ` +
-              `marking ${this.countMemoriesWithVectors()} memory vectors as stale for background re-embed.\n`
+              `marking ${this.countVectors()} vectors as stale for background re-embed.\n`
           )
           this.db.exec('DROP TABLE memory_vectors')
           this.db.exec("UPDATE memories SET vec_rowid = NULL, embed_state = 'stale' WHERE vec_rowid IS NOT NULL")
+          this.db.exec('DROP TABLE IF EXISTS episode_vectors')
+          this.db.exec(
+            "UPDATE episodes SET vec_rowid = NULL, embed_state = 'stale' WHERE vec_rowid IS NOT NULL"
+          )
         }
       }
 
       this.db.exec(
         `CREATE VIRTUAL TABLE IF NOT EXISTS memory_vectors USING vec0(embedding float[${EMBEDDING_DIM}])`
+      )
+      // the episodes channel is lexical-only until something writes these rows
+      this.db.exec(
+        `CREATE VIRTUAL TABLE IF NOT EXISTS episode_vectors USING vec0(embedding float[${EMBEDDING_DIM}])`
       )
       this.vectorsAvailable = true
     } catch {
@@ -161,9 +174,14 @@ export class DatabaseManager {
     }
   }
 
-  private countMemoriesWithVectors(): number {
-    const row = this.db.prepare('SELECT COUNT(*) as n FROM memories WHERE vec_rowid IS NOT NULL').get() as { n: number }
-    return row.n
+  private countVectors(): number {
+    const memories = this.db
+      .prepare('SELECT COUNT(*) as n FROM memories WHERE vec_rowid IS NOT NULL')
+      .get() as { n: number }
+    const episodes = this.db
+      .prepare('SELECT COUNT(*) as n FROM episodes WHERE vec_rowid IS NOT NULL')
+      .get() as { n: number }
+    return memories.n + episodes.n
   }
 
   close(): void {
@@ -176,6 +194,14 @@ let instance: DatabaseManager | null = null
 export function getDatabase(dbPath?: string): DatabaseManager {
   if (!instance) {
     instance = new DatabaseManager(dbPath)
+    // the content-addressed cache lives in the db being served: content already
+    // embedded for any row or namespace is served from the table instead of the model
+    registerEmbeddingCache(
+      createDbEmbeddingCache(instance.db, {
+        dim: EMBEDDING_DIM,
+        maxRows: resolveEmbedCacheMaxRows(),
+      })
+    )
   }
   return instance
 }
@@ -185,4 +211,5 @@ export function resetDatabase(): void {
     instance.close()
     instance = null
   }
+  registerEmbeddingCache(null)
 }

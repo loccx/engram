@@ -12,6 +12,8 @@ import { consolidateTree } from './consolidate.js'
 import { runDuplicatePrune } from './prune.js'
 import { runRetention } from './retention.js'
 import { requestMaintenanceDrain } from './scheduler.js'
+import { reembedStaleEpisodes } from '../db/workers/reembed.js'
+import { MODEL_ID } from '../embeddings/pipeline.js'
 
 export type MaintenanceJobType =
   | 'digest'
@@ -21,7 +23,28 @@ export type MaintenanceJobType =
   | 'promote'
   | 'prune'
   | 'retention'
+  | 'reembed_episodes'
 export type MaintenanceStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead'
+
+/** one job turn embeds at most this many episodes, one call each, so a lease is safe */
+export const EPISODE_REEMBED_JOB_LIMIT = 512
+/** episodes claimed per iteration inside that turn */
+const EPISODE_REEMBED_JOB_BATCH = 64
+
+/** the coalescing key of the first page, and of every continuation after it */
+export const EPISODE_REEMBED_TARGET = 'episodes:pending'
+
+/** page N > 0 drains what page N-1 left; a bounded run never loses the backlog */
+export function episodeReembedTargetKey(page: number): string {
+  return page <= 0 ? EPISODE_REEMBED_TARGET : `${EPISODE_REEMBED_TARGET}:${page}`
+}
+
+/** next page for a target key, or 1 when the first page runs */
+export function nextEpisodeReembedPage(targetKey: string): number {
+  const suffix = targetKey.slice(EPISODE_REEMBED_TARGET.length)
+  const page = suffix.startsWith(':') ? Number.parseInt(suffix.slice(1), 10) : 0
+  return Number.isFinite(page) && page > 0 ? page + 1 : 1
+}
 
 export interface MaintenanceJobRow {
   id: number
@@ -37,6 +60,30 @@ export interface MaintenanceJobRow {
   last_error: string | null
   result_json: string | null
   source: string | null
+}
+
+/**
+ * queue the episode-embed backlog for a deferred ingest. coalesced while a job is
+ * active, so a stream of deferred batches keeps one turn's worth of work queued
+ */
+export function enqueueEpisodeReembed(
+  db: Database.Database,
+  opts: { source?: string; now?: number } = {}
+): number {
+  if (!isMaintenanceEnabled()) return 0
+  try {
+    const res = enqueueMaintenanceJob(db, {
+      jobType: 'reembed_episodes',
+      targetKey: EPISODE_REEMBED_TARGET,
+      source: opts.source ?? 'deferred_ingest',
+      now: opts.now,
+    })
+    if (!res.coalesced) requestMaintenanceDrain(db)
+    return res.coalesced ? 0 : 1
+  } catch (err) {
+    logger.debug({ err }, 'maintenance: episode re-embed enqueue failed (ignored)')
+    return 0
+  }
 }
 
 export interface EnqueueOptions {
@@ -323,6 +370,36 @@ async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise
         note: 'malformed promote target_key (missing promote: prefix); no write',
       }
     }
+    case 'reembed_episodes': {
+      // a sanctioned writer (see the header): the vectors of evidence a deferred ingest
+      // wrote lexically. off the write path, one episode per call, bounded so one job
+      // turn stays short; a continuation page is enqueued when the bound is hit
+      const stats = await reembedStaleEpisodes(db, MODEL_ID, {
+        limit: EPISODE_REEMBED_JOB_LIMIT,
+        batchSize: EPISODE_REEMBED_JOB_BATCH,
+        pauseMs: 0,
+      })
+      if ((stats.remaining ?? 0) > 0) {
+        enqueueMaintenanceJob(db, {
+          jobType: 'reembed_episodes',
+          targetKey: episodeReembedTargetKey(nextEpisodeReembedPage(job.target_key)),
+          source: 'reembed_episodes',
+        })
+      }
+      logger.debug(
+        { target: job.target_key, embedded: stats.totalReembedded, remaining: stats.remaining ?? 0 },
+        'maintenance: episode re-embed page done'
+      )
+      return {
+        shadow: false,
+        reembed_episodes: true,
+        target: job.target_key,
+        embedded: stats.totalReembedded,
+        failed: stats.failed,
+        remaining: stats.remaining ?? 0,
+        duration_ms: stats.durationMs,
+      }
+    }
     case 'prune': {
       // idempotent: an archived row leaves the scan, so a retry finishes the work
       const target = job.target_key.startsWith('prune:')
@@ -459,10 +536,16 @@ export function getMaintenanceStatus(
     ['queued', 'running', 'done', 'failed', 'dead'].map((s) => [s, 0])
   ) as Record<MaintenanceStatus, number>
   const byType = Object.fromEntries(
-    ['digest', 'cluster', 'importance', 'adjudication', 'promote', 'prune', 'retention'].map((t) => [
-      t,
-      0,
-    ])
+    [
+      'digest',
+      'cluster',
+      'importance',
+      'adjudication',
+      'promote',
+      'prune',
+      'retention',
+      'reembed_episodes',
+    ].map((t) => [t, 0])
   ) as Record<MaintenanceJobType, number>
   for (const row of db
     .prepare('SELECT status, job_type, COUNT(*) AS n FROM maintenance_jobs GROUP BY status, job_type')

@@ -15,9 +15,13 @@ export interface ChatMessage {
   content: string
 }
 
+export const REASONING_EFFORTS = ['none', 'minimal', 'low', 'medium', 'high', 'xhigh'] as const
+export type ReasoningEffort = (typeof REASONING_EFFORTS)[number]
+
 export interface ChatOptions {
   temperature?: number
   maxTokens?: number
+  reasoningEffort?: ReasoningEffort
   responseFormat?: 'text' | 'json_object'
   timeoutMs?: number
 }
@@ -98,6 +102,53 @@ function warnUnconfiguredOnce(): void {
   )
 }
 
+// wire quirks per model family, first match wins; a new family is one entry
+interface ModelProfile {
+  match: RegExp
+  reasoning: boolean
+}
+
+const MODEL_PROFILES: ModelProfile[] = [
+  // openai reasoning families reject max_tokens and any non-default temperature
+  { match: /(^|\/)(gpt-5|gpt-6|o[1-9])/i, reasoning: true },
+]
+
+// a reasoning model bills its thinking against the output cap, so a cap sized for the
+// visible answer comes back empty without room on top; unused budget costs nothing
+export const REASONING_HEADROOM_TOKENS = 8192
+
+/** `<model>:high` pins the effort in the model name, so it travels wherever the name is recorded */
+export function parseModelSpec(spec: string): { model: string; reasoningEffort?: ReasoningEffort } {
+  const at = spec.lastIndexOf(':')
+  const suffix = at > 0 ? spec.slice(at + 1) : ''
+  if ((REASONING_EFFORTS as readonly string[]).includes(suffix)) {
+    return { model: spec.slice(0, at), reasoningEffort: suffix as ReasoningEffort }
+  }
+  return { model: spec }
+}
+
+export function buildChatBody(
+  modelSpec: string,
+  messages: ChatMessage[],
+  options: ChatOptions
+): Record<string, unknown> {
+  const { model, reasoningEffort } = parseModelSpec(modelSpec)
+  const body: Record<string, unknown> = { model, messages }
+  const reasoning = MODEL_PROFILES.find((profile) => profile.match.test(model))?.reasoning ?? false
+  if (reasoning) {
+    if (options.maxTokens !== undefined) body.max_completion_tokens = options.maxTokens + REASONING_HEADROOM_TOKENS
+    const effort = options.reasoningEffort ?? reasoningEffort
+    if (effort !== undefined) body.reasoning_effort = effort
+  } else {
+    if (options.temperature !== undefined) body.temperature = options.temperature
+    if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
+  }
+  if (options.responseFormat === 'json_object') {
+    body.response_format = { type: 'json_object' }
+  }
+  return body
+}
+
 export async function chat(
   messages: ChatMessage[],
   options: ChatOptions = {},
@@ -111,15 +162,7 @@ export async function chat(
 
   const timeoutMs = options.timeoutMs ?? config.timeoutMs
   const url = `${config.baseUrl}/chat/completions`
-  const body: Record<string, unknown> = {
-    model: config.model,
-    messages,
-  }
-  if (options.temperature !== undefined) body.temperature = options.temperature
-  if (options.maxTokens !== undefined) body.max_tokens = options.maxTokens
-  if (options.responseFormat === 'json_object') {
-    body.response_format = { type: 'json_object' }
-  }
+  const body = buildChatBody(config.model, messages, options)
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',

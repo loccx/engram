@@ -14,7 +14,7 @@ export function ebbinghaus(memory: Memory, now: number): number {
 
 // attnres-inspired adaptive scoring (arxiv 2603.15031): the query archetype picks
 // the signal weights instead of one fixed multiplication
-export type QueryArchetype = 'temporal' | 'lookup' | 'semantic' | 'frequentist'
+export type QueryArchetype = 'temporal' | 'lookup' | 'semantic' | 'frequentist' | 'aggregation'
 
 export interface WeightProfile {
   fts: number
@@ -24,27 +24,50 @@ export interface WeightProfile {
   importance: number
 }
 
-// temporal > lookup > frequentist > semantic (default)
+// temporal > lookup > frequentist > aggregation > semantic (the fallback)
 const TEMPORAL_RE =
   /\b(yesterday|today|recent(?:ly)?|last\s+(?:week|session|time|month|day)|ago|earlier|previous(?:ly)?|this\s+(?:morning|week|month))\b/i
 const LOOKUP_RE =
   /\b[a-z]+[A-Z][a-zA-Z]*\b|\b[a-z]+_[a-z]+\b|\b[A-Z][A-Z0-9]+_[A-Z][A-Z0-9]+\b|`[^`]+`|0x[0-9a-fA-F]+/
 const FREQUENTIST_RE =
   /\b(common(?:ly)?|frequent(?:ly)?|often|always|usually|pattern|convention|standard|best\s+practice|typical(?:ly)?)\b/i
+// a question that totals or lists what several sessions said, so the answer needs one
+// turn from each session it touched rather than the deepest turns of the best few
+// (arxiv 2609.25913: budgeted evidence completion)
+const AGGREGATION_RE =
+  /\b(how many|how much|how often|how long|in total|total|altogether|combined|sum|number of|all the|list)\b/i
 
-// the weights sum to 1.0, and the vec weight is shared out when vectors are off
+/**
+ * the cue lists, in precedence order: the first pattern that fires names the archetype,
+ * and a query that matches none is `semantic`. one place to add a cue class.
+ */
+export const QUERY_ARCHETYPES: ReadonlyArray<{ name: QueryArchetype; pattern: RegExp }> = [
+  { name: 'temporal', pattern: TEMPORAL_RE },
+  { name: 'lookup', pattern: LOOKUP_RE },
+  { name: 'frequentist', pattern: FREQUENTIST_RE },
+  { name: 'aggregation', pattern: AGGREGATION_RE },
+]
+
+const SEMANTIC_WEIGHTS: WeightProfile = {
+  fts: 0.20, vec: 0.35, recency: 0.15, access: 0.10, importance: 0.20,
+}
+
+// the weights sum to 1.0, and the vec weight is shared out when vectors are off.
+// aggregation shares semantic's weights: it routes assembly (see memory/allocation.ts),
+// so joining the archetype list cannot move a ranking
 export const WEIGHT_PROFILES: Record<QueryArchetype, WeightProfile> = {
   temporal:    { fts: 0.10, vec: 0.15, recency: 0.50, access: 0.10, importance: 0.15 },
   lookup:      { fts: 0.45, vec: 0.15, recency: 0.10, access: 0.15, importance: 0.15 },
-  semantic:    { fts: 0.20, vec: 0.35, recency: 0.15, access: 0.10, importance: 0.20 },
+  semantic:    SEMANTIC_WEIGHTS,
   frequentist: { fts: 0.10, vec: 0.15, recency: 0.10, access: 0.45, importance: 0.20 },
+  aggregation: SEMANTIC_WEIGHTS,
 }
 
-/** query archetype picks the signal weights: temporal > lookup > frequentist > semantic */
+/** the archetype's data-driven cue list decides: temporal > lookup > frequentist > aggregation > semantic */
 export function classifyQuery(query: string): QueryArchetype {
-  if (TEMPORAL_RE.test(query)) return 'temporal'
-  if (LOOKUP_RE.test(query)) return 'lookup'
-  if (FREQUENTIST_RE.test(query)) return 'frequentist'
+  for (const rule of QUERY_ARCHETYPES) {
+    if (rule.pattern.test(query)) return rule.name
+  }
   return 'semantic'
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@loccx/engram",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local MCP memory daemon for AI coding tools",
   "license": "MIT",
   "keywords": [

@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import { AGENTS, findAgent, type AgentEntry } from '../src/delivery/registry.js'
 import { PROTOCOL_RULES } from '../src/delivery/protocol.js'
 import { engramCli, applyPlan, planSetup, type SetupContext, type SetupPlan } from '../src/delivery/setup.js'
+import { HOOK_EVENTS } from '../src/delivery/hook.js'
 import { renderAgents, renderPlan, renderSnippets } from '../src/cli/setup.js'
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -54,9 +55,10 @@ afterEach(() => {
 describe('setup registry', () => {
   it('names every agent once and only references hooks it can configure', () => {
     expect(new Set(AGENTS.map((agent) => agent.name)).size).toBe(AGENTS.length)
+    // a binding may only name an event the hook cli implements, never one the host does not have
     for (const agent of AGENTS) {
       for (const binding of agent.hooks?.bindings ?? []) {
-        expect(['session-start', 'pre-tool-use']).toContain(binding.event)
+        expect([...HOOK_EVENTS]).toContain(binding.event)
       }
     }
   })

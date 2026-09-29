@@ -14,8 +14,15 @@ import { migration012 } from './012_identifier_lexical_index.js'
 import { migration013 } from './013_lifecycle_archive_tier.js'
 import { migration014 } from './014_retrieval_events.js'
 import { migration015 } from './015_ident_text_columns.js'
+import { migration016 } from './016_working_state.js'
+import { migration017 } from './017_state_slots.js'
+import { migration018 } from './018_scope_stats_epoch.js'
+import { migration019 } from './019_episodes.js'
+import { migration020 } from './020_scope_stats_write_coverage.js'
+import { migration021 } from './021_episode_embed_jobs.js'
+import { migration022 } from './022_embedding_cache.js'
 
-export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012, migration013, migration014, migration015]
+export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012, migration013, migration014, migration015, migration016, migration017, migration018, migration019, migration020, migration021, migration022]
 
 export { runMigrations } from './runner.js'
 export type { MigrationRunResult } from './runner.js'

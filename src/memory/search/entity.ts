@@ -4,6 +4,14 @@ import { MEMORY_ENTITY_FTS, lexicalIndexTablePresent } from '../../db/lexical-in
 import { rowToMemory, type MemoryRow } from '../row.js'
 import type { ScoredLexicalHit, SearchDiagnostics, SearchOptions } from './hybrid.js'
 import { namespaceFilter, temporalFilter } from './scope.js'
+import {
+  combineFilters,
+  docLengthSql,
+  SCOPED_WINDOW_CEILING,
+  scopeNarrowing,
+  scoreRowsInScope,
+  type ChannelSpec,
+} from './scoped-stats.js'
 
 /** dropped only when another token survives, so an all-stopword query still searches */
 const STOPWORDS = new Set([
@@ -100,6 +108,25 @@ function entitySearchHits(
   )
 }
 
+// one indexed column and the memory it belongs to, so the scope filter reaches the rows
+const ENTITY_SCOPE_CHANNEL: ChannelSpec = {
+  table: MEMORY_ENTITY_FTS,
+  from: `${MEMORY_ENTITY_FTS} f JOIN memories m ON m.id = f.memory_id`,
+  dfExpr: 'COUNT(DISTINCT f.memory_id)',
+  weights: [1],
+  prefix: true,
+}
+
+/** the scored terms of an entity query: its bare prefix tokens, minus the operator */
+export function entityScoredTerms(ftsQuery: string): string[] {
+  const terms = ftsQuery
+    .trim()
+    .split(/\s+/)
+    .filter((token) => token !== 'OR')
+    .map((token) => token.replace(/\*$/, '').toLowerCase())
+  return [...new Set(terms.filter(Boolean))]
+}
+
 function entityExec(
   db: Database.Database,
   ftsQuery: string,
@@ -108,58 +135,76 @@ function entityExec(
   diagnostics?: SearchDiagnostics
 ): ScoredEntityHit[] {
   // bm25() is only usable in a query over the FTS table itself (inside a CTE it
-  // fails), so entities are ranked first and joined to memories after
-  const overFetch = Math.max(limit * 5, 50)
-  let hitRows: Array<{ memory_id: string; score: number }>
+  // fails), so entities are ranked first and joined to memories after. the scope filter
+  // rides in that join, or the window would be the whole index's top k, and a busy
+  // namespace could crowd this one's entities out of it before the filter ran.
+  const scoped = Boolean(options.namespace_subtree || options.project_path)
+  const overFetch = scoped ? SCOPED_WINDOW_CEILING : Math.max(limit * 5, 50)
+  const rankingFilters: Array<{ sql: string; params: unknown[] }> = []
+  const scope = namespaceFilter('m', options)
+  if (scope.sql) rankingFilters.push(scope)
+  if (options.type) rankingFilters.push({ sql: 'm.type = ?', params: [options.type] })
+  const temporal = temporalFilter('m', options)
+  if (temporal.sql) rankingFilters.push(temporal)
+  const joined = combineFilters(rankingFilters)
+
+  // fts5 MATCH needs the table name; an alias is not accepted
+  let hitRows: Array<{ memory_id: string; ident: string | null; score: number }>
   try {
     hitRows = db
       .prepare(
-        // fts5 MATCH needs the table name; an alias is not accepted
-        `SELECT f.memory_id AS memory_id, bm25(${MEMORY_ENTITY_FTS}) AS score
-         FROM ${MEMORY_ENTITY_FTS} f
-         WHERE ${MEMORY_ENTITY_FTS} MATCH ?
-         ORDER BY bm25(${MEMORY_ENTITY_FTS}) ASC, f.rowid ASC
+        `SELECT f.memory_id AS memory_id, f.ident AS ident, bm25(${MEMORY_ENTITY_FTS}) AS score
+         FROM ${ENTITY_SCOPE_CHANNEL.from}
+         WHERE ${[`${MEMORY_ENTITY_FTS} MATCH ?`, joined.sql].filter(Boolean).join(' AND ')}
+         ORDER BY ${scoped ? `length(COALESCE(f.ident, '')) ASC, f.rowid ASC` : `bm25(${MEMORY_ENTITY_FTS}) ASC, f.rowid ASC`}
          LIMIT ?`
       )
-      .all(ftsQuery, overFetch) as Array<{ memory_id: string; score: number }>
+      .all(ftsQuery, ...joined.params, overFetch) as typeof hitRows
   } catch {
     // a missing index is not a failure, just no evidence yet
     if (lexicalIndexTablePresent(db, MEMORY_ENTITY_FTS)) diagnostics?.degraded.push('entity')
     return []
   }
 
-  const scoreById = new Map<string, number>()
+  const best = new Map<string, { score: number; ident: string }>()
   for (const row of hitRows) {
-    const prev = scoreById.get(row.memory_id)
-    if (prev === undefined || row.score < prev) scoreById.set(row.memory_id, row.score)
+    const prev = best.get(row.memory_id)
+    if (prev === undefined || row.score < prev.score) {
+      best.set(row.memory_id, { score: row.score, ident: row.ident ?? '' })
+    }
   }
-  if (scoreById.size === 0) return []
+  if (best.size === 0) return []
 
-  const ids = [...scoreById.keys()]
+  const ids = [...best.keys()]
   const conditions: string[] = [`m.id IN (${ids.map(() => '?').join(',')})`]
   const values: unknown[] = [...ids]
-  const scope = namespaceFilter('m', options)
-  if (scope.sql) {
-    conditions.push(scope.sql)
-    values.push(...scope.params)
-  }
-  if (options.type) {
-    conditions.push('m.type = ?')
-    values.push(options.type)
-  }
-  const temporal = temporalFilter('m', options)
-  if (temporal.sql) {
-    conditions.push(temporal.sql)
-    values.push(...temporal.params)
+  if (joined.sql) {
+    conditions.push(joined.sql)
+    values.push(...joined.params)
   }
 
   const rows = db
-    .prepare(`SELECT m.*, m.rowid AS memory_rowid FROM memories m WHERE ${conditions.join(' AND ')}`)
-    .all(...values) as Array<MemoryRow & { memory_rowid: number }>
+    .prepare(
+      `SELECT m.*, m.rowid AS memory_rowid, ${docLengthSql('m')} AS scope_dl FROM memories m WHERE ${conditions.join(' AND ')}`
+    )
+    .all(...values) as Array<MemoryRow & { memory_rowid: number; scope_dl: number }>
 
-  return rows.map((row) => ({
+  const hits = rows.map((row) => ({
     memory: rowToMemory(row),
-    bm25: scoreById.get(row.id) ?? 0,
+    bm25: best.get(row.id)?.score ?? 0,
     rowid: row.memory_rowid,
   }))
+
+  if (scope.sql) {
+    scoreRowsInScope(
+      db,
+      options,
+      { predicates: joined, narrowing: scopeNarrowing(options) },
+      ENTITY_SCOPE_CHANNEL,
+      entityScoredTerms(ftsQuery),
+      hits,
+      rows.map((row) => ({ columns: [best.get(row.id)?.ident ?? ''], dl: row.scope_dl }))
+    )
+  }
+  return hits
 }

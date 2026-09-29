@@ -27,6 +27,7 @@ export interface MemoryRow {
   origin?: string | null
   shareable?: number | null
   archived_at?: number | null
+  state_key?: string | null
 }
 
 export function rowToMemory(row: MemoryRow): Memory {
@@ -90,6 +91,9 @@ export function rowToMemory(row: MemoryRow): Memory {
   }
   if (row.archived_at != null) {
     memory.archived_at = row.archived_at
+  }
+  if (row.state_key != null) {
+    memory.state_key = row.state_key
   }
 
   return memory

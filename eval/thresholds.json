@@ -48,6 +48,56 @@
         "leakRate": 0,
         "staleRate": 0.1
       }
+    },
+    "state": {
+      "baseline/keyed": {
+        "recall@1": 0.761,
+        "recall@5": 0.9,
+        "recall@10": 0.9,
+        "ndcg@10": 0.892,
+        "mrr": 0.9,
+        "precision@10": 0.131,
+        "leakRate": 0,
+        "staleRate": 0.1,
+        "latestAt1": 0.9,
+        "currentAccuracy": 0.9,
+        "priorAccuracy": 0.9,
+        "asOfAccuracy": 0.9,
+        "asOfLeakRate": 0.1,
+        "slotCoverage": 0.9
+      },
+      "baseline/chained": {
+        "recall@1": 0.761,
+        "recall@5": 0.9,
+        "recall@10": 0.9,
+        "ndcg@10": 0.892,
+        "mrr": 0.9,
+        "precision@10": 0.131,
+        "leakRate": 0,
+        "staleRate": 0.1,
+        "latestAt1": 0.9,
+        "currentAccuracy": 0.9,
+        "priorAccuracy": 0.9,
+        "asOfAccuracy": 0.9,
+        "asOfLeakRate": 0.1,
+        "slotCoverage": 0.9
+      },
+      "baseline/unlinked": {
+        "recall@1": 0.761,
+        "recall@5": 0.9,
+        "recall@10": 0.9,
+        "ndcg@10": 0.892,
+        "mrr": 0.9,
+        "precision@10": 0.131,
+        "leakRate": 0,
+        "staleRate": 0.208,
+        "latestAt1": 0.9,
+        "currentAccuracy": 0,
+        "priorAccuracy": 0,
+        "asOfAccuracy": 0.075,
+        "asOfLeakRate": 0.1,
+        "slotCoverage": 0
+      }
     }
   }
 }

@@ -35,6 +35,22 @@ export interface RecallOptions {
   as_of?: number
   /** fixed clock, for deterministic scores in tests */
   now?: number
+  /**
+   * extra channel knobs for a retrieval recipe: only the fields a recipe may set, so a
+   * caller cannot turn access stamping back on or retarget the scope
+   */
+  search?: Partial<
+    Pick<
+      SearchOptions,
+      | 'ident_channel'
+      | 'entity_channel'
+      | 'expand'
+      | 'use_reranker'
+      | 'rerank_top_n'
+      | 'rerank_blend_alpha'
+      | 'min_score'
+    >
+  >
 }
 
 export interface RecallMemory extends EnrichedMemory {
@@ -119,12 +135,35 @@ export function digestReserve(budgetChars: number, digestLen: number): number {
   return Math.min(digestLen, cap)
 }
 
-export async function recallContext(
+export interface RecallChannelResult {
+  namespace: string
+  mode: RecallMode
+  as_of?: number
+  /** null in an as_of read: the cached digest is present state */
+  digest: string | null
+  memories: RecallMemory[]
+  topics: RecallTopic[]
+  /** candidates the by-id dedupe dropped before enrichment */
+  duplicate_ids: number
+  /** removed by min_trust, before dedupe and packing */
+  trust_filtered: number
+  /** dropped as a near-duplicate of a kept sibling */
+  near_duplicates: number
+  /** failed retrieval branches: an empty `memories` alone cannot show an outage */
+  degraded: string[]
+}
+
+/**
+ * the retrieval channel without the budget: ranked, enriched, deduped candidates plus
+ * the summary layer. read-only and repeatable, so a caller that assembles its own
+ * sections can pack the same candidates into its own shares.
+ */
+export async function recallChannel(
   db: Database.Database,
   store: MemoryStore,
   search: MemorySearch,
   options: RecallOptions
-): Promise<RecallResult> {
+): Promise<RecallChannelResult> {
   const now = options.now ?? Date.now()
   const mode: RecallMode = options.mode ?? 'fused'
   const limit = Math.min(Math.max(options.limit ?? 10, 1), 100)
@@ -136,6 +175,7 @@ export async function recallContext(
     include_superseded: false,
     touch: false, // recall is read-only and repeatable
     now,
+    ...options.search,
   }
   if (asOf !== undefined) searchOptions.as_of = asOf
 
@@ -224,17 +264,66 @@ export async function recallContext(
   }
   merged.sort((a, b) => (keepOrder.get(a.id) ?? 0) - (keepOrder.get(b.id) ?? 0))
 
-  const clusters = search.getClusters(options.project_path)
-  const topics = buildTopics(db, clusters, asOf, merged)
-
-  // an as_of read must not be fed present state; the payload flags the omission
-  const digest = asOf === undefined ? getDigest(db, options.project_path) : null
-  const packed = packBudget(options, merged, topics, digest)
+  const summaries = recallSummaries(db, options.project_path, search.getClusters(options.project_path), {
+    ...(asOf !== undefined ? { asOf } : {}),
+    memberIds: new Set(merged.map((memory) => memory.id)),
+  })
   return {
-    ...packed,
-    dropped: { ...packed.dropped, trust_filtered: trustFiltered, near_duplicates: nearDuplicates },
-    ...(diagnostics.degraded.length > 0 ? { degraded: diagnostics.degraded } : {}),
+    namespace: options.project_path,
+    mode,
+    ...(asOf !== undefined ? { as_of: asOf } : {}),
+    digest: summaries.digest,
+    memories: merged,
+    topics: summaries.topics,
+    duplicate_ids: candidates.length - deduped.length,
+    trust_filtered: trustFiltered,
+    near_duplicates: nearDuplicates,
+    degraded: diagnostics.degraded,
   }
+}
+
+/**
+ * the recall_context payload: pack a channel into the strict character budget. nothing
+ * here reads the clock or the store, so the same channel gives the same bytes.
+ */
+export function packRecall(channel: RecallChannelResult, options: RecallOptions): RecallResult {
+  const asOf = channel.as_of
+  const packed = packWithinBudget({
+    budget_chars: options.budget_chars,
+    digest: channel.digest,
+    memories: channel.memories,
+    topics: channel.topics,
+  })
+  return {
+    namespace: channel.namespace,
+    mode: channel.mode,
+    ...(asOf !== undefined
+      ? {
+          as_of: asOf,
+          as_of_limitations: {
+            digest_omitted: packed.digest === null,
+            topic_summaries_omitted: true,
+          },
+        }
+      : {}),
+    ...packed,
+    dropped: {
+      ...packed.dropped,
+      trust_filtered: channel.trust_filtered,
+      near_duplicates: channel.near_duplicates,
+    },
+    ...(channel.degraded.length > 0 ? { degraded: channel.degraded } : {}),
+  }
+}
+
+/** recall_context: one recipe's worth of the read path, packed to its character budget */
+export async function recallContext(
+  db: Database.Database,
+  store: MemoryStore,
+  search: MemorySearch,
+  options: RecallOptions
+): Promise<RecallResult> {
+  return packRecall(await recallChannel(db, store, search, options), options)
 }
 
 /**
@@ -277,6 +366,29 @@ function suppressNearDuplicates(db: Database.Database, ids: string[]): string[] 
   return kept
 }
 
+export interface RecallSummaries {
+  /** null in an as_of read: the cached digest is present state */
+  digest: string | null
+  topics: RecallTopic[]
+}
+
+/**
+ * the present-state summary layer: the namespace digest plus its cluster summaries.
+ * pass `memberIds` to keep only recalled members in a topic's sample.
+ */
+export function recallSummaries(
+  db: Database.Database,
+  namespace: string,
+  clusters: MemoryCluster[],
+  options: { asOf?: number; memberIds?: Set<string> } = {}
+): RecallSummaries {
+  const asOf = options.asOf
+  return {
+    digest: asOf === undefined ? getDigest(db, namespace) : null,
+    topics: buildTopics(db, clusters, asOf, options.memberIds),
+  }
+}
+
 /**
  * as_of recalls keep only members valid then, and drop the summary — cluster
  * text is present state, not something that held at as_of
@@ -285,9 +397,8 @@ function buildTopics(
   db: Database.Database,
   clusters: MemoryCluster[],
   asOf: number | undefined,
-  recallMemories: RecallMemory[]
+  recallIds: Set<string> | undefined
 ): RecallTopic[] {
-  const recallIds = new Set(recallMemories.map((m) => m.id))
   const out: RecallTopic[] = []
   for (const c of clusters) {
     let memberIds = c.member_ids
@@ -304,7 +415,9 @@ function buildTopics(
     out.push({
       id: c.id,
       summary: asOf === undefined ? c.summary : null,
-      member_ids: memberIds.filter((id) => recallIds.has(id)).slice(0, TOPIC_MEMBER_SAMPLE),
+      member_ids: memberIds
+        .filter((id) => recallIds === undefined || recallIds.has(id))
+        .slice(0, TOPIC_MEMBER_SAMPLE),
       member_count: memberIds.length,
     })
   }
@@ -454,37 +567,4 @@ export function packWithinBudget<TMem, TTopic>(
   }
 }
 
-function packBudget(
-  options: RecallOptions,
-  memories: RecallMemory[],
-  topics: RecallTopic[],
-  digestFull: string | null
-): RecallResult {
-  const asOf = options.as_of
-  const packed = packWithinBudget({
-    budget_chars: options.budget_chars,
-    digest: digestFull,
-    memories,
-    topics,
-  })
-  return {
-    namespace: options.project_path,
-    mode: options.mode ?? 'fused',
-    ...(asOf !== undefined
-      ? {
-          as_of: asOf,
-          as_of_limitations: {
-            digest_omitted: packed.digest === null,
-            topic_summaries_omitted: asOf !== undefined,
-          },
-        }
-      : {}),
-    ...packed,
-    dropped: {
-      ...packed.dropped,
-      // recallContext overwrites these with the real counts
-      trust_filtered: 0,
-      near_duplicates: 0,
-    },
-  }
-}
+

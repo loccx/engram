@@ -33,6 +33,7 @@ import {
 } from '../contradictions/supersession.js'
 import type { BackgroundJobQueue } from '../queue/background-queue.js'
 import { extractEntities } from './entities.js'
+import { advanceStateHead, normalizeStateKey } from './state.js'
 import { normalizeIdentifiers } from '../db/lexical-index.js'
 import { logger } from '../utils/logger.js'
 
@@ -175,8 +176,8 @@ export class MemoryStore {
     // after-insert trigger used a per-character recursive cte and cost far more of
     // an ordinary write. the trigger now only copies the column into memories_ident_fts.
     this.stmtInsertMemory = this.db.prepare(
-      `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, valid_from, procedure_meta, importance_source, origin, ident_text)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, valid_from, procedure_meta, importance_source, origin, ident_text, state_key)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     this.stmtInsertEntity = this.db.prepare(
       'INSERT OR IGNORE INTO memory_entities (memory_id, entity_text, entity_type, created_at, ident_text) VALUES (?, ?, ?, ?, ?)'
@@ -242,6 +243,7 @@ export class MemoryStore {
   async store(input: StoreMemoryInput): Promise<StoreResult> {
     const id = randomUUID()
     const now = Date.now()
+    const stateKey = normalizeStateKey(input.state_key)
     const tags = JSON.stringify(input.tags ?? [])
     const type = input.type ?? 'note'
     const importance = input.importance ?? 0.5
@@ -330,7 +332,8 @@ export class MemoryStore {
       importanceSource,
       input.origin ?? 'mcp',
       // exactly the expression the 012 trigger used, so the indexed text is unchanged
-      normalizeIdentifiers(`${input.content} ${tags}`)
+      normalizeIdentifiers(`${input.content} ${tags}`),
+      stateKey
     )
 
     this.recordEvent({
@@ -366,6 +369,36 @@ export class MemoryStore {
         )
       }
     } catch {
+    }
+
+    // the slot head moves once the row exists: the value it retires keeps its row,
+    // and a failure here is reported, because a stale head is a wrong answer
+    let stateWarning: AdmissionWarning | null = null
+    if (stateKey) {
+      try {
+        const advanced = advanceStateHead(this.db, {
+          namespace: input.project_path,
+          key: stateKey,
+          memoryId: id,
+          now,
+        })
+        if (advanced.superseded_id) {
+          this.recordEvent({
+            memoryId: advanced.superseded_id,
+            eventType: 'superseded',
+            origin: input.origin ?? 'mcp',
+            sessionId: input.session_id,
+            payload: { superseded_by: id, state_key: stateKey },
+          })
+        }
+      } catch (err) {
+        logger.warn({ err, memoryId: id, stateKey }, 'state head advance failed for a keyed write')
+        stateWarning = {
+          rule: 'state_key',
+          reason: 'the previous value of this slot is still the current one',
+          hint: 'retry the write with the same state_key, or call get_state to see what the slot reports',
+        }
+      }
     }
 
     if (embedding) {
@@ -414,7 +447,8 @@ export class MemoryStore {
 
     const stored = this.getById(id)!
     const result: StoreWriteResult = { ...stored, status: 'stored' }
-    if (admission.warnings.length > 0) result.warnings = admission.warnings
+    const warnings = stateWarning ? [...admission.warnings, stateWarning] : admission.warnings
+    if (warnings.length > 0) result.warnings = warnings
     if (possibleDuplicates.length > 0) result.possible_duplicates = possibleDuplicates
     const conflicts = this._conflictCandidates({
       id,
@@ -546,12 +580,14 @@ export class MemoryStore {
     const before = rowToMemory(existing)
     const mergedTags = Array.from(new Set([...before.tags, ...(input.tags ?? [])]))
     const mergedImportance = Math.max(before.importance, importance)
+    // a key never moves: an existing one wins, a missing one is adopted from the call
+    const adoptedKey = existing.state_key ?? normalizeStateKey(input.state_key)
     try {
       const tx = this.db.transaction(() => {
         const mergedTagsJson = JSON.stringify(mergedTags)
         this.db
           .prepare(
-            'UPDATE memories SET tags = ?, ident_text = ?, importance = ?, importance_source = ? WHERE id = ?'
+            'UPDATE memories SET tags = ?, ident_text = ?, importance = ?, importance_source = ?, state_key = ? WHERE id = ?'
           )
           .run(
             mergedTagsJson,
@@ -560,6 +596,7 @@ export class MemoryStore {
             normalizeIdentifiers(`${existing.content} ${mergedTagsJson}`),
             mergedImportance,
             mergedImportance > before.importance ? 'user' : before.importance_source ?? 'default',
+            adoptedKey,
             existing.id
           )
         if (input.pinned === true && !before.pinned) {
@@ -577,6 +614,22 @@ export class MemoryStore {
       { memoryId: existing.id, namespace: input.project_path, now },
       'write gate: exact duplicate merged instead of inserting a second row'
     )
+    // the merged row is the value just written, so it takes the slot head
+    if (adoptedKey) {
+      try {
+        advanceStateHead(this.db, {
+          namespace: input.project_path,
+          key: adoptedKey,
+          memoryId: existing.id,
+          now,
+        })
+      } catch (err) {
+        logger.warn(
+          { err, memoryId: existing.id, stateKey: adoptedKey },
+          'state head advance failed for a merged duplicate'
+        )
+      }
+    }
     const merged = this.getById(existing.id) ?? before
     return { ...merged, status: 'deduplicated', deduplicated: true }
   }
@@ -1072,14 +1125,18 @@ export class MemoryStore {
       const sessionId = input.session_id ?? prevRow.session_id
       const wasPinned = prevRow.pinned === 1
       const origin = input.origin ?? 'revision'
+      const stateKey =
+        input.state_key !== undefined
+          ? normalizeStateKey(input.state_key)
+          : prevRow.state_key ?? null
 
       this.db
         .prepare(
           `INSERT INTO memories
              (id, session_id, project_path, namespace, content, type, importance, tags,
               created_at, valid_from, procedure_meta, importance_source, pinned, shareable, origin,
-              ident_text)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              ident_text, state_key)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           newId,
@@ -1097,7 +1154,8 @@ export class MemoryStore {
           wasPinned ? 1 : 0,
           input.shareable === true ? 1 : 0,
           origin,
-          normalizeIdentifiers(`${input.content} ${JSON.stringify(tags)}`)
+          normalizeIdentifiers(`${input.content} ${JSON.stringify(tags)}`),
+          stateKey
         )
 
       // the predecessor keeps its own rows; this is append-only
@@ -1152,13 +1210,39 @@ export class MemoryStore {
         payload: { superseded_by: newId, revision: successorVersion },
       })
 
-      return { newId, prevRowId: prevRow.id, successorVersion, importanceSource }
+      return { newId, prevRowId: prevRow.id, successorVersion, importanceSource, stateKey, namespace }
     })
     const committed = tx.immediate() as
-      | { newId: string; prevRowId: string; successorVersion: number; importanceSource: ImportanceSource }
+      | {
+          newId: string
+          prevRowId: string
+          successorVersion: number
+          importanceSource: ImportanceSource
+          stateKey: string | null
+          namespace: string
+        }
       | null
     if (!committed) return null
-    const { newId, prevRowId, successorVersion, importanceSource } = committed
+    const { newId, prevRowId, successorVersion, importanceSource, stateKey, namespace } = committed
+
+    // the predecessor is already closed above, so this only matters when the successor
+    // names a different slot or shares the old key with another live value
+    if (stateKey) {
+      try {
+        advanceStateHead(this.db, {
+          namespace,
+          key: stateKey,
+          memoryId: newId,
+          now: Date.now(),
+          reason: 'state key revision',
+        })
+      } catch (err) {
+        logger.warn(
+          { err, memoryId: newId, stateKey },
+          'state head advance failed for a revision'
+        )
+      }
+    }
 
     // best effort, as in store()
     if (this.vectorsAvailable) {

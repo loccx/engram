@@ -28,6 +28,10 @@ export interface QaContextPlan {
   tokens: number
   retrievalMs: number
   note: string
+  /** the system behind this reader; defaults to the reader name */
+  system?: string
+  adapter_kind?: string
+  adapter_config_hash?: string
 }
 
 export interface QaQuestion {
@@ -44,6 +48,10 @@ export interface QaRow {
   question_id: string
   question_type: string
   reader: string
+  /** the memory system that produced the context, and how to reproduce it */
+  system: string
+  adapter_kind: string
+  adapter_config_hash: string
   judge_prompt: string
   reader_model: string
   judge_model: string
@@ -110,11 +118,14 @@ export interface QaRunOutput {
   resumedQuestions: number
 }
 
-/** identity of a run: any change here makes old rows unusable */
+/**
+ * identity of a run: any change here makes old rows unusable. a system enters as
+ * `name@adapter-hash`, so editing an adapter config invalidates the rows it produced.
+ */
 export function qaKey(input: {
   split: string
   datasetSha: string
-  readers: string[]
+  systems: string[]
   readerModel: string
   judgeModel: string
   budgetChars: number
@@ -123,7 +134,7 @@ export function qaKey(input: {
   return [
     input.split,
     input.datasetSha.slice(0, 16),
-    input.readers.join('+'),
+    input.systems.join('+'),
     input.readerModel,
     input.judgeModel,
     READER_PROMPT_VERSION,
@@ -248,6 +259,9 @@ async function answerOne(
     question_id: question.question_id,
     question_type: question.question_type,
     reader: plan.reader,
+    system: plan.system ?? plan.reader,
+    adapter_kind: plan.adapter_kind ?? 'builtin',
+    adapter_config_hash: plan.adapter_config_hash ?? '',
     judge_prompt: answered.judgePrompt,
     reader_model: input.readerModel,
     judge_model: input.judgeModel,

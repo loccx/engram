@@ -1,6 +1,15 @@
 import { z } from 'zod'
+import { STATE_KEY_MAX_CHARS, STATE_SLOT_LIMIT_MAX } from '../memory/state.js'
+import { EPISODE_BATCH_MAX } from '../memory/episodes.js'
 
 const MemoryType = z.enum(['note', 'decision', 'bug', 'pattern', 'gotcha', 'todo', 'procedure'])
+
+const stateKey = z
+  .string()
+  .trim()
+  .min(1)
+  .max(STATE_KEY_MAX_CHARS, `state_key must be at most ${STATE_KEY_MAX_CHARS} characters`)
+  .optional()
 
 const ProcedureMetaSchema = z.object({
   preconditions: z.array(z.string()),
@@ -33,6 +42,17 @@ export const StoreMemorySchema = z.object({
     .optional(),
   adjudicate_sync: z.boolean().optional().default(false),
   procedure_meta: ProcedureMetaSchema,
+  /** the slot this value belongs to; a later write to the same key retires this one */
+  state_key: stateKey,
+})
+
+export const GetStateSchema = z.object({
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+  key: stateKey,
+  as_of: z.number().int().optional(),
+  include_superseded: z.boolean().optional().default(false),
+  limit: z.number().int().positive().max(STATE_SLOT_LIMIT_MAX).optional().default(20),
 })
 
 export const SearchMemoriesSchema = z.object({
@@ -168,6 +188,8 @@ export const ReviseMemorySchema = z.object({
   session_id: z.string().optional(),
   /** explicit opt-in only; shareable is never inherited from the predecessor */
   shareable: z.boolean().optional(),
+  /** defaults to the predecessor's key, so a revision stays in its slot */
+  state_key: stateKey,
 })
 
 export const GetMemoryHistorySchema = z.object({
@@ -190,6 +212,16 @@ export const RecallContextSchema = z.object({
   as_of: z.number().int().optional(),
 })
 
+export const AssembleContextSchema = z.object({
+  query: z.string().optional(),
+  budget_chars: z.number().int().min(50).optional(),
+  /** a named recipe from the assembly registry; the default reproduces recall_context */
+  recipe: z.string().optional(),
+  as_of: z.number().int().optional(),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
 export const GetMaintenanceStatusSchema = z.object({
   limit: z.number().int().positive().max(200).optional().default(20),
 })
@@ -206,6 +238,122 @@ export const SetPinSchema = z.object({
 export const GetStatsSchema = z.object({
   namespace: z.string().optional(),
   since: z.number().int().optional(),
+})
+
+const TaskStatus = z.enum(['open', 'blocked', 'done', 'abandoned'])
+const PlanItemStatus = z.enum(['pending', 'active', 'done', 'blocked'])
+
+const PlanItemDelta = z.object({
+  /** an existing item, from task_get; omit the id to append a new one */
+  id: z.string().optional(),
+  text: z.string().optional(),
+  status: PlanItemStatus.optional(),
+})
+
+export const TaskStartSchema = z.object({
+  title: z.string().min(1),
+  goal: z.string().min(1),
+  plan: z.array(z.union([z.string(), PlanItemDelta])).optional(),
+  artifacts: z.array(z.string()).optional(),
+  open_questions: z.array(z.string()).optional(),
+  session_id: z.string().optional(),
+  /** free-text attribution for the event log, e.g. a subagent name */
+  author: z.string().optional(),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+export const TaskUpdateSchema = z.object({
+  id: z.string().min(1),
+  status: TaskStatus.optional(),
+  title: z.string().optional(),
+  goal: z.string().optional(),
+  plan: z.array(PlanItemDelta).optional(),
+  /** appended as progress notes, each one dated */
+  progress: z.array(z.string()).optional(),
+  artifacts: z.array(z.string()).optional(),
+  open_questions: z.array(z.string()).optional(),
+  resolved_questions: z.array(z.string()).optional(),
+  author: z.string().optional(),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+export const TaskGetSchema = z.object({
+  id: z.string().min(1).optional(),
+  status: TaskStatus.optional(),
+  limit: z.number().int().positive().max(50).optional().default(5),
+  include_events: z.boolean().optional().default(false),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+export const TaskCloseSchema = z.object({
+  id: z.string().min(1),
+  status: z.enum(['done', 'abandoned']).optional().default('done'),
+  /** extra line appended to the summary memory */
+  summary: z.string().optional(),
+  author: z.string().optional(),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+export const TaskHandoffSchema = z.object({
+  id: z.string().min(1),
+  for: z.enum(['subagent', 'new-session']).optional().default('subagent'),
+  budget_chars: z.number().int().min(80).optional(),
+  author: z.string().optional(),
+})
+
+export const SessionStartSchema = z.object({
+  session_id: z.string().optional(),
+  budget_chars: z.number().int().min(200).optional(),
+  project_path: z.string().optional(),
+  namespace: z.string().optional(),
+})
+
+const EpisodeSourceSchema = z.object({
+  system: z.string().min(1),
+  instance: z.string().optional(),
+  version: z.string().optional(),
+})
+
+const EpisodePermissionsSchema = z.object({
+  visibility: z.enum(['personal', 'project', 'team', 'org']).optional(),
+  retention: z.enum(['durable', 'session', 'ephemeral']).optional(),
+  ttl_ms: z.number().int().positive().optional(),
+})
+
+const EpisodeItemSchema = z.object({
+  external_id: z.string().min(1),
+  content: z.string().min(1),
+  session_id: z.string().optional(),
+  task_id: z.string().optional(),
+  author: z.string().optional(),
+  role: z.string().optional(),
+  occurred_at: z.number().int().optional(),
+  content_type: z.string().optional(),
+  uri: z.string().optional(),
+  turn_index: z.number().int().optional(),
+  parent_external_id: z.string().optional(),
+  provenance: z.record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()])).optional(),
+  chunk: z
+    .object({
+      index: z.number().int().optional(),
+      of: z.number().int().optional(),
+      parent_external_id: z.string().optional(),
+    })
+    .optional(),
+})
+
+export const IngestEpisodesSchema = z.object({
+  source: EpisodeSourceSchema,
+  episodes: z.array(EpisodeItemSchema).min(1).max(EPISODE_BATCH_MAX),
+  namespace: z.string().optional(),
+  project_path: z.string().optional(),
+  permissions: EpisodePermissionsSchema.optional(),
+  defer_vectors: z.boolean().optional().default(false),
+  batch_embeddings: z.boolean().optional().default(false),
 })
 
 export const ListBrainsSchema = z.object({})
@@ -230,6 +378,7 @@ export const SCHEMAS: Record<string, z.ZodType> = {
   store_memory: StoreMemorySchema,
   search_memories: SearchMemoriesSchema,
   get_context: GetContextSchema,
+  get_state: GetStateSchema,
   get_related: GetRelatedSchema,
   search_by_entity: SearchByEntitySchema,
   consolidate_memories: ConsolidateSchema,
@@ -242,10 +391,18 @@ export const SCHEMAS: Record<string, z.ZodType> = {
   revise_memory: ReviseMemorySchema,
   get_memory_history: GetMemoryHistorySchema,
   recall_context: RecallContextSchema,
+  assemble_context: AssembleContextSchema,
   get_maintenance_status: GetMaintenanceStatusSchema,
   run_pending_maintenance: RunPendingMaintenanceSchema,
   set_pin: SetPinSchema,
   get_stats: GetStatsSchema,
+  task_start: TaskStartSchema,
+  task_update: TaskUpdateSchema,
+  task_get: TaskGetSchema,
+  task_close: TaskCloseSchema,
+  task_handoff: TaskHandoffSchema,
+  session_start: SessionStartSchema,
+  ingest_episodes: IngestEpisodesSchema,
   list_brains: ListBrainsSchema,
   search_brain: SearchBrainSchema,
   get_brain_memory: GetBrainMemorySchema,

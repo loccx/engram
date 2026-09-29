@@ -7,7 +7,7 @@
 // so `npm run eval` is reproducible on any checkout.
 import { Command } from 'commander'
 import { mkdirSync } from 'node:fs'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { configLoadErrors, configNames, resolveConfigs } from './lib/registry.js'
 import {
   buildHeader,
@@ -27,18 +27,14 @@ import {
   writeThresholds,
 } from './lib/thresholds.js'
 import { redactSecrets } from './lib/llm.js'
-import { runRetrievalSuite } from './suites/retrieval.js'
-import { runContradictionSuite } from './suites/contradiction.js'
-import { runBudgetSuite } from './suites/budget.js'
-import { runAbSuite } from './suites/ab.js'
-import { DEFAULT_SPLIT, runLongMemEvalSuite } from './suites/longmemeval.js'
-import { EvalSetupError } from './lib/errors.js'
-import { readerNames } from './lib/readers.js'
+import { DEFAULT_SPLIT } from './suites/longmemeval.js'
+import { SUITES, suiteNames } from './suites/index.js'
+import { defaultSystemNames, systemNames, systemSpecSlug } from './lib/systems.js'
+import { DatasetMissingError, EvalSetupError } from './lib/errors.js'
 import type { SuiteContext, SuiteOutput } from './suites/types.js'
 import type { VectorMode } from './lib/types.js'
 
-const SUITES = ['retrieval', 'contradiction', 'budget', 'ab', 'longmemeval'] as const
-type SuiteName = (typeof SUITES)[number]
+type SuiteName = string
 
 interface CliOptions {
   suite: string
@@ -54,6 +50,8 @@ interface CliOptions {
   verdicts?: string
   dataset?: string
   datasetPath?: string
+  questionType?: string
+  systems?: string
   readers?: string
   concurrency?: string
   checkpoint?: string
@@ -71,7 +69,7 @@ const program = new Command()
 program
   .name('engram-eval')
   .description('Retrieval / contradiction / budget measurement harness for engram')
-  .option('--suite <suite>', `one of ${SUITES.join('|')}|all`, 'all')
+  .option('--suite <suite>', `one of ${suiteNames().join('|')}|all`, 'all')
   .option('--configs <list>', 'comma-separated config names (default: baseline)', 'baseline')
   .option('--seed <n>', 'corpus seed', '1234')
   .option('--limit <n>', 'per-query result limit (longmemeval: question count)')
@@ -84,7 +82,12 @@ program
   .option('--verdicts <path>', 'contradiction: use recorded verdicts instead of the gateway')
   .option('--dataset <split>', `longmemeval split name (default ${DEFAULT_SPLIT})`)
   .option('--dataset-path <path>', 'longmemeval: explicit dataset file (skips the manifest lookup)')
-  .option('--readers <list>', `longmemeval --qa: ${readerNames().join('|')}`)
+  .option('--question-type <list>', 'longmemeval: keep only these question_type values (comma-separated)')
+  .option(
+    '--systems <list>',
+    `longmemeval: ${systemNames().join('|')}, or mcp:<adapter-config-path> (default: every builtin)`
+  )
+  .option('--readers <list>', 'alias of --systems')
   .option('--concurrency <n>', 'longmemeval --qa: questions in flight (default 2)')
   .option('--checkpoint <path>', 'longmemeval --qa: append-only jsonl; completed rows are skipped')
   .option('--yes', 'confirm the pre-run cost estimate when it is above the call ceiling')
@@ -101,8 +104,8 @@ const options = program.opts<CliOptions>()
 
 async function main(): Promise<number> {
   const requestedSuite = options.suite
-  if (requestedSuite !== 'all' && !SUITES.includes(requestedSuite as SuiteName)) {
-    throw new Error(`unknown suite "${requestedSuite}" — expected ${SUITES.join('|')}|all`)
+  if (requestedSuite !== 'all' && !suiteNames().includes(requestedSuite)) {
+    throw new Error(`unknown suite "${requestedSuite}" — expected ${suiteNames().join('|')}|all`)
   }
   const vectorMode = normalizeVectorMode(options.vectors)
   const seed = Number.parseInt(options.seed, 10)
@@ -120,13 +123,19 @@ async function main(): Promise<number> {
     ? options.configs!.split(',').map((c) => c.trim()).filter(Boolean)
     : ['baseline']
   const configs = resolveConfigs(requestedConfigs)
-  const outputDir = join(REPO_ROOT, options.out.startsWith('/') ? options.out : options.out)
+  const outputDir = isAbsolute(options.out) ? options.out : join(REPO_ROOT, options.out)
   mkdirSync(outputDir, { recursive: true })
 
   const git: GitInfo = currentGitInfo(REPO_ROOT)
   const corpora = options.corpus
     ? options.corpus.split(',').map((c) => c.trim()).filter(Boolean)
     : undefined
+  const systemsOption = splitList(options.systems)
+  const readersOption = splitList(options.readers)
+  if (systemsOption && readersOption) {
+    throw new EvalSetupError('pass --systems or its alias --readers, not both')
+  }
+  const systems = systemsOption ?? readersOption
 
   const ctxBase: Omit<SuiteContext, 'log'> = {
     seed,
@@ -138,7 +147,10 @@ async function main(): Promise<number> {
     verdictsPath: options.verdicts,
     dataset: options.dataset,
     datasetPath: options.datasetPath,
-    readers: splitList(options.readers),
+    questionTypes: splitList(options.questionType),
+    systems,
+    // a suite that still reads the reader name gets the same list
+    readers: systems,
     concurrency,
     checkpointPath: options.checkpoint,
     readerModel: options.readerModel,
@@ -152,7 +164,7 @@ async function main(): Promise<number> {
   }
 
   const suitesToRun: SuiteName[] =
-    requestedSuite === 'all' ? [...SUITES] : [requestedSuite as SuiteName]
+    requestedSuite === 'all' ? SUITES.map((suite) => suite.name) : [requestedSuite]
 
   const outputs = new Map<SuiteName, SuiteOutput>()
   const allThresholds: Record<string, Record<string, Record<string, number>>> = {}
@@ -166,7 +178,16 @@ async function main(): Promise<number> {
       },
     }
     const started = performance.now()
-    const output = await runSuite(suite, ctx)
+    let output: SuiteOutput
+    try {
+      output = await runSuite(suite, ctx)
+    } catch (error) {
+      if (requestedSuite !== 'all' || !(error instanceof DatasetMissingError)) throw error
+      if (!options.quiet) {
+        process.stdout.write(`${suite}: skipped, dataset not fetched\n  ${error.message.replace(/\n/g, '\n  ')}\n`)
+      }
+      continue
+    }
     outputs.set(suite, output)
     allThresholds[suite] = output.thresholds
 
@@ -247,18 +268,13 @@ async function main(): Promise<number> {
 }
 
 async function runSuite(suite: SuiteName, ctx: SuiteContext): Promise<SuiteOutput> {
-  switch (suite) {
-    case 'retrieval':
-      return runRetrievalSuite(ctx)
-    case 'contradiction':
-      return runContradictionSuite(ctx)
-    case 'budget':
-      return runBudgetSuite(ctx)
-    case 'ab':
-      return runAbSuite(ctx)
-    case 'longmemeval':
-      return runLongMemEvalSuite(ctx)
+  const entry = SUITES.find((candidate) => candidate.name === suite)
+  if (!entry) {
+    throw new EvalSetupError(
+      `unknown suite "${suite}" — expected ${suiteNames().join('|')}|all`
+    )
   }
+  return entry.run(ctx)
 }
 
 /**
@@ -322,15 +338,17 @@ function splitList(value: string | undefined): string[] | undefined {
 }
 
 /**
- * one artifact per (split, qa) pair, so an offline retrieval run and a paid qa run
- * cannot overwrite each other
+ * one artifact per (split, qa, system set), so an offline retrieval run and a paid qa
+ * run cannot overwrite each other, and neither can two retrieval runs over different
+ * system sets — the numbers only mean something next to the set that produced them
  */
 function suiteFileSuffix(suite: SuiteName, options: CliOptions): string {
   if (suite !== 'longmemeval') return ''
   const split = options.dataset ?? DEFAULT_SPLIT
-  if (options.qa !== true) return `retrieval-${split}`
-  const readers = splitList(options.readers) ?? readerNames()
-  return `qa-${split}-${readers.join('+')}`
+  const systems = splitList(options.systems) ?? splitList(options.readers)
+  const slugs = (systems ?? defaultSystemNames()).map(systemSpecSlug).join('+')
+  if (options.qa !== true) return systems ? `retrieval-${split}-${slugs}` : `retrieval-${split}`
+  return `qa-${split}-${slugs}`
 }
 
 function normalizeVectorMode(value: string): VectorMode {

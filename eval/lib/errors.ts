@@ -7,3 +7,11 @@ export class EvalSetupError extends Error {
     this.name = 'EvalSetupError'
   }
 }
+
+// data that was never fetched: `--suite all` skips the suite with a note, a named run still stops
+export class DatasetMissingError extends EvalSetupError {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DatasetMissingError'
+  }
+}

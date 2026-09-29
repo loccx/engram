@@ -452,6 +452,50 @@ describe('longmemeval qa (stub llm)', () => {
     ).toBe(QUESTIONS.length)
   }, 120_000)
 
+  it('keeps only the requested question_type, and --limit counts matches', async () => {
+    const dir = tempDir()
+    const datasetPath = join(dir, 'longmemeval_s_cleaned.json')
+    buildDataset(datasetPath)
+
+    const only = async (
+      overrides: Partial<SuiteContext>
+    ): Promise<{ questions: number; processed: number; types: string[]; notes: string[] }> => {
+      const output = await runLongMemEvalSuite(
+        suiteContext(dir, { qa: false, dataset: 'longmemeval_s_cleaned', datasetPath, ...overrides })
+      )
+      const baseline = (
+        output.result.metrics as {
+          baseline: { questions: number; processedQuestions: number; byQuestionType: Record<string, unknown> }
+        }
+      ).baseline
+      return {
+        questions: baseline.questions,
+        processed: baseline.processedQuestions,
+        types: Object.keys(baseline.byQuestionType).sort(),
+        notes: output.result.notes ?? [],
+      }
+    }
+
+    const one = await only({ questionTypes: ['multi-session'] })
+    expect(one.questions).toBe(1)
+    expect(one.processed).toBe(1)
+    expect(one.types).toEqual(['multi-session'])
+    expect(one.notes.some((note) => note.includes('question_type filter: kept 1 of 6'))).toBe(true)
+
+    // the file groups types, so a filtered run must scan past the earlier records
+    const pair = await only({ questionTypes: ['single-session-user'] })
+    expect(pair.questions).toBe(2)
+    expect(pair.types).toEqual(['single-session-user'])
+
+    const capped = await only({ questionTypes: ['single-session-user', 'multi-session'], limit: 2 })
+    expect(capped.questions).toBe(2)
+    expect(capped.types).toEqual(['multi-session', 'single-session-user'])
+
+    const unfiltered = await only({})
+    expect(unfiltered.questions).toBe(QUESTIONS.length)
+    expect(unfiltered.types).toHaveLength(5)
+  }, 120_000)
+
   it('is deterministic: same seed and stub produce identical metrics and rows', async () => {
     const dir = tempDir()
     const checkpoint = join(dir, 'run.jsonl')

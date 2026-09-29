@@ -17,7 +17,18 @@ export function namespaceFilter(
   alias: string,
   options: NamespaceFilterOptions
 ): { sql: string; params: unknown[] } {
-  const nsExpr = `COALESCE(${alias}.namespace, ${alias}.project_path)`
+  return namespaceClause(`COALESCE(${alias}.namespace, ${alias}.project_path)`, options)
+}
+
+/**
+ * the same predicate over any namespace expression: a layer that keeps the scope key in one
+ * column of its own (the write epoch, the episodes table) passes that column here, so the
+ * clause a statistic or a change signal reads is the clause the query itself applied.
+ */
+export function namespaceClause(
+  nsExpr: string,
+  options: NamespaceFilterOptions
+): { sql: string; params: unknown[] } {
   if (options.namespace_subtree) {
     const ns = options.namespace_subtree
     // _ and % are LIKE wildcards: escape them or a namespace matches sibling prefixes

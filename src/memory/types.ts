@@ -41,6 +41,56 @@ export interface Memory {
   shareable?: boolean
   /** set by a retention/prune job; hidden from every default read */
   archived_at?: number | null
+  /** the state slot this row is a value of; null for an ordinary memory */
+  state_key?: string | null
+}
+
+/** one value a slot has held, with the window it was true for */
+export interface StateEntry {
+  memory_id: string
+  content: string
+  type: MemoryType
+  valid_from: number
+  valid_until: number | null
+  /** when the supersedes link that retired this value was judged */
+  superseded_at: number | null
+  superseded_by: string | null
+  reason: string | null
+  archived: boolean
+  /** the row carries the queried key; a chain member the walk reached does not */
+  keyed: boolean
+  current: boolean
+}
+
+export interface StateSlot {
+  key: string
+  namespace: string
+  /** the value true now (or at as_of); null when every value has been retired */
+  current: StateEntry | null
+  /** the value the current one replaced, provably older than it */
+  prior: StateEntry | null
+  /** every value valid at the read time, oldest first */
+  versions: number
+  /** present only when the caller asked for the superseded values too */
+  trajectory?: StateEntry[]
+}
+
+export interface StateView {
+  namespace: string
+  /** null on a present-state read */
+  as_of: number | null
+  /** null when the whole namespace was asked for */
+  key: string | null
+  slots: StateSlot[]
+}
+
+export interface GetStateOptions {
+  namespace: string
+  key?: string
+  as_of?: number
+  include_superseded?: boolean
+  limit?: number
+  now?: number
 }
 
 export interface SearchResult extends Memory {
@@ -74,6 +124,8 @@ export interface StoreMemoryInput {
   origin?: string
   /** the write gate needs the pin intent while the row is still being written */
   pinned?: boolean
+  /** names the state slot this value belongs to; a second write to the same key retires the first */
+  state_key?: string
 }
 
 /** a revision inserts a new row plus a confidence=1 supersedes edge; content is never edited in place */
@@ -89,6 +141,8 @@ export interface ReviseMemoryInput {
   /** never inherited from the predecessor: non-shareable unless the caller opts in */
   shareable?: boolean
   origin?: string
+  /** defaults to the predecessor's key, so a revision stays in its slot */
+  state_key?: string
 }
 
 export interface RevisionResult {

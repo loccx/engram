@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach } from 'vitest'
 import type Database from 'better-sqlite3'
 import { backfillNamespaces } from '../src/db/workers/backfill.js'
-import { reembedStaleMemories } from '../src/db/workers/reembed.js'
+import { reembedStaleEpisodes, reembedStaleMemories } from '../src/db/workers/reembed.js'
 import { createTestDb } from './helpers.js'
 
 const SESSION_ID = 'worker-session'
@@ -165,5 +165,100 @@ describe('reembedStaleMemories', () => {
     expect(stats.totalReembedded).toBe(0)
     expect(stats.failed).toBe(0)
     expect(stats.batches).toBe(0)
+  })
+})
+
+describe('reembedStaleEpisodes', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb().db
+  })
+
+  function insertEpisode(id: string, content: string): void {
+    db.prepare(`
+      INSERT INTO episodes (id, namespace, session_id, source, external_id, ingested_at, content)
+      VALUES (?, '/p', 's1', 'codex', ?, ?, ?)
+    `).run(id, id, Date.now(), content)
+  }
+
+  it('embeds a claimed batch in one call and marks every row fresh', async () => {
+    if (!createTestDb().vectorsAvailable) return
+    insertEpisode('e1', 'the deploy window is 09:00-11:30 utc')
+    insertEpisode('e2', 'the pricing table lives in a spreadsheet')
+    insertEpisode('e3', 'a rollback drill follows the deploy')
+
+    const calls: string[][] = []
+    const vector = new Float32Array(768)
+    vector[0] = 1
+    const stats = await reembedStaleEpisodes(db, 'test-model', {
+      pauseMs: 0,
+      batchEmbedder: async (texts) => {
+        calls.push(texts)
+        return texts.map(() => vector)
+      },
+    })
+
+    expect(stats.totalReembedded).toBe(3)
+    expect(stats.failed).toBe(0)
+    expect(stats.batches).toBe(1)
+    expect(calls.length).toBe(1)
+    expect(calls[0].length).toBe(3)
+    const rows = db
+      .prepare('SELECT embed_state, embedding_model, embedding_dim, vec_rowid FROM episodes')
+      .all() as Array<{
+      embed_state: string
+      embedding_model: string | null
+      embedding_dim: number | null
+      vec_rowid: number | null
+    }>
+    expect(rows.length).toBe(3)
+    expect(
+      rows.every(
+        (row) =>
+          row.embed_state === 'fresh' &&
+          row.embedding_model === 'test-model' &&
+          row.embedding_dim === 768 &&
+          row.vec_rowid !== null
+      )
+    ).toBe(true)
+  })
+
+  it('stops at the row limit and reports what is left for the next page', async () => {
+    if (!createTestDb().vectorsAvailable) return
+    for (let i = 0; i < 5; i++) insertEpisode(`lim${i}`, `turn ${i} of a bounded re-embed run`)
+
+    const vector = new Float32Array(768)
+    vector[1] = 1
+    const stats = await reembedStaleEpisodes(db, 'test-model', {
+      batchSize: 10,
+      pauseMs: 0,
+      limit: 2,
+      embedder: async () => vector,
+    })
+
+    expect(stats.totalReembedded).toBe(2)
+    expect(stats.remaining).toBe(3)
+    const fresh = db
+      .prepare("SELECT COUNT(*) AS n FROM episodes WHERE embed_state = 'fresh'")
+      .get() as { n: number }
+    expect(fresh.n).toBe(2)
+  })
+
+  it('is a no-op without the vec0 table, so the rows stay claimable later', async () => {
+    insertEpisode('e1', 'the deploy window is 09:00-11:30 utc')
+    db.exec('DROP TABLE episode_vectors')
+
+    const stats = await reembedStaleEpisodes(db, 'test-model', {
+      pauseMs: 0,
+      batchEmbedder: async () => [new Float32Array(768)],
+    })
+
+    expect(stats.totalReembedded).toBe(0)
+    expect(stats.batches).toBe(0)
+    const row = db.prepare('SELECT embed_state FROM episodes WHERE id = ?').get('e1') as {
+      embed_state: string
+    }
+    expect(row.embed_state).toBe('stale')
   })
 })

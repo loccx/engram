@@ -27,6 +27,14 @@ import {
 import { expandQuery, queryTokens } from './expand.js'
 import { identSearchScored } from './lexical.js'
 import { entitySearchScored, entityQueryTokens } from './entity.js'
+import {
+  docLengthSql,
+  quotedTerms,
+  scopeNarrowing,
+  scopedWindow,
+  scoreRowsInScope,
+  type ChannelSpec,
+} from './scoped-stats.js'
 
 /** branches that failed, so an empty result set is distinguishable from an outage */
 export interface SearchDiagnostics {
@@ -429,6 +437,19 @@ function memoryPredicates(options: SearchOptions): { conditions: string[]; value
   return { conditions, values }
 }
 
+// bm25(table, w_content=10.0, w_tags=5.0): content carries 2x tag weight so short tag
+// matches don't dominate longer, more discriminative content matches. the same weights
+// hold for the scope-local rescore, over the same two columns.
+const FTS_COLUMN_WEIGHTS = [10.0, 5.0]
+
+const FTS_SCOPE_CHANNEL: ChannelSpec = {
+  table: 'memories_fts',
+  from: 'memories_fts f JOIN memories m ON f.rowid = m.rowid',
+  dfExpr: 'COUNT(*)',
+  weights: FTS_COLUMN_WEIGHTS,
+  prefix: false,
+}
+
 function ftsExecScored(
   db: Database.Database,
   ftsQuery: string,
@@ -439,26 +460,61 @@ function ftsExecScored(
   const { conditions: predicates, values: predicateValues } = memoryPredicates(options)
   const conditions: string[] = ['memories_fts MATCH ?', ...predicates]
   const values: unknown[] = [ftsQuery, ...predicateValues]
-  values.push(limit)
+  const window = scopedWindow(options, limit)
+  values.push(window)
 
-  // bm25(table, w_content=10.0, w_tags=5.0): content carries 2x tag weight so
-  // short tag matches don't dominate longer, more discriminative content matches.
+  // unscoped, the whole index is the corpus the query searches, so fts5's own bm25 and
+  // its window are already the right ones and cost nothing extra
+  const order =
+    window === limit
+      ? 'bm25(memories_fts, 10.0, 5.0) ASC, m.rowid ASC'
+      : `${docLengthSql('m')} ASC, m.rowid ASC`
+
   try {
     const rows = db
       .prepare(
-        `SELECT m.*, bm25(memories_fts, 10.0, 5.0) AS relevance_bm25 FROM memories_fts fts
+        `SELECT m.*, ${docLengthSql('m')} AS scope_dl, bm25(memories_fts, 10.0, 5.0) AS relevance_bm25 FROM memories_fts fts
          JOIN memories m ON fts.rowid = m.rowid
          WHERE ${conditions.join(' AND ')}
-         ORDER BY bm25(memories_fts, 10.0, 5.0) ASC, m.rowid ASC
+         ORDER BY ${order}
          LIMIT ?`
       )
-      .all(...values) as Array<MemoryRow & { relevance_bm25: number }>
-    return rows.map((row) => ({ memory: rowToMemory(row), bm25: row.relevance_bm25 }))
+      .all(...values) as Array<MemoryRow & { relevance_bm25: number; scope_dl: number }>
+
+    const hits = rows.map((row) => ({ memory: rowToMemory(row), bm25: row.relevance_bm25 }))
+    scopeRows(db, options, predicates, predicateValues, FTS_SCOPE_CHANNEL, ftsQuery, hits, rows)
+    return hits.sort((a, b) => a.bm25 - b.bm25)
   } catch {
     // a failing branch must not look like an empty corpus
     diagnostics?.degraded.push('fts')
     return []
   }
+}
+
+/** fts5's bm25 counts the whole index; when the query names a scope, the scope's own counts rank it */
+function scopeRows(
+  db: Database.Database,
+  options: SearchOptions,
+  predicates: string[],
+  predicateValues: unknown[],
+  spec: ChannelSpec,
+  ftsQuery: string,
+  hits: ScoredLexicalHit[],
+  rows: Array<MemoryRow & { scope_dl: number }>
+): void {
+  if (!options.namespace_subtree && !options.project_path) return
+  scoreRowsInScope(
+    db,
+    options,
+    {
+      predicates: { sql: predicates.join(' AND '), params: predicateValues },
+      narrowing: scopeNarrowing(options),
+    },
+    spec,
+    quotedTerms(ftsQuery),
+    hits,
+    rows.map((row) => ({ columns: [row.content, row.tags], dl: row.scope_dl }))
+  )
 }
 
 export interface ScoredVectorHit {

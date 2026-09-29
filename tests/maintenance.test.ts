@@ -14,6 +14,8 @@ import {
   enqueueNamespaceMaintenance,
 } from '../src/maintenance/jobs.js'
 import { getNode } from '../src/namespace/tree.js'
+import { enqueueEpisodeReembed, episodeReembedTargetKey } from '../src/maintenance/jobs.js'
+import { setReembedEmbedder } from '../src/db/workers/reembed.js'
 
 const NS = '/home/user/maintenance-project'
 const T0 = 1_700_000_000_000
@@ -34,6 +36,69 @@ function snapshotState(db: Database.Database): Record<string, unknown> {
     links: db.prepare('SELECT source_id, target_id, link_type, confidence, reason FROM memory_links ORDER BY source_id, target_id').all(),
   }
 }
+
+describe('episode re-embed job', () => {
+  let db: Database.Database
+
+  beforeEach(() => {
+    db = createTestDb().db
+  })
+
+  afterEach(() => {
+    setReembedEmbedder(null)
+  })
+
+  function insertEpisode(id: string, ns: string, content: string): void {
+    db.prepare(`
+      INSERT INTO episodes (id, namespace, session_id, source, external_id, ingested_at, content)
+      VALUES (?, ?, 's1', 'codex', ?, ?, ?)
+    `).run(id, ns, id, T0, content)
+  }
+
+  it('embeds a deferred backlog and reports what is left', async () => {
+    if (!createTestDb().vectorsAvailable) return
+    insertEpisode('e1', NS, 'the deploy window is 09:00-11:30 utc')
+    insertEpisode('e2', NS, 'the pricing table lives in a spreadsheet')
+    const vector = new Float32Array(768)
+    vector[0] = 1
+    setReembedEmbedder(async () => vector)
+
+    expect(enqueueEpisodeReembed(db, { source: 'test', now: T0 })).toBe(1)
+    const drained = await runPendingMaintenanceJobs(db, { maxJobs: 5, now: T0 + 1 })
+
+    expect(drained.done).toBe(1)
+    const fresh = db
+      .prepare("SELECT COUNT(*) AS n FROM episodes WHERE embed_state = 'fresh' AND vec_rowid IS NOT NULL")
+      .get() as { n: number }
+    expect(fresh.n).toBe(2)
+    const job = db
+      .prepare("SELECT status, result_json FROM maintenance_jobs WHERE job_type = 'reembed_episodes'")
+      .get() as { status: string; result_json: string }
+    expect(job.status).toBe('done')
+    expect(JSON.parse(job.result_json)).toMatchObject({ embedded: 2, remaining: 0 })
+  })
+
+  it('queues a continuation page when one turn hits the bound', async () => {
+    if (!createTestDb().vectorsAvailable) return
+    for (let i = 0; i < 520; i++) insertEpisode(`p${i}`, NS, `turn ${i} of a long deferred session`)
+    setReembedEmbedder(async () => new Float32Array(768))
+
+    enqueueEpisodeReembed(db, { source: 'test', now: T0 })
+    // one job turn only, or the drain claims the continuation in the same pass
+    await runPendingMaintenanceJobs(db, { maxJobs: 1, now: T0 + 1 })
+
+    const queued = db
+      .prepare(
+        "SELECT target_key FROM maintenance_jobs WHERE job_type = 'reembed_episodes' AND status = 'queued'"
+      )
+      .all() as Array<{ target_key: string }>
+    expect(queued.map((row) => row.target_key)).toEqual([episodeReembedTargetKey(1)])
+    const fresh = db
+      .prepare("SELECT COUNT(*) AS n FROM episodes WHERE embed_state = 'fresh'")
+      .get() as { n: number }
+    expect(fresh.n).toBe(512)
+  })
+})
 
 describe('maintenance jobs', () => {
   let db: Database.Database

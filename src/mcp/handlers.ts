@@ -7,6 +7,19 @@ import { recordsAccessOnExplicitFetch } from '../memory/search/scoring.js'
 import { SessionManager } from '../session/manager.js'
 import { resolveNamespace } from '../namespace/resolver.js'
 import { getAdjudicationQueue } from '../contradictions/runtime.js'
+import {
+  appendTaskEvent,
+  closeTask,
+  createTask,
+  getTask,
+  listTaskEvents,
+  listTasks,
+  taskSummary,
+  updateTask,
+} from '../tasks/store.js'
+import { DEFAULT_HANDOFF_CHARS, handoff } from '../tasks/brief.js'
+import { sessionStartPayload } from '../delivery/tasks.js'
+import { CLOSED_STATUSES, type TaskDelta, type TaskStartInput, type TaskStatus } from '../tasks/types.js'
 import { getImportanceQueue } from '../importance/runtime.js'
 import {
   enrichMemories,
@@ -20,7 +33,20 @@ import { getDigest, refreshDigest } from '../memory/digest.js'
 import { parseNamespacePath, ensureNode, ancestors, children } from '../namespace/tree.js'
 import { childRoster } from '../memory/nav.js'
 import { inferScope } from '../memory/scope-inference.js'
-import { packWithinBudget, recallContext, type RecallMode } from '../memory/recall.js'
+import { packWithinBudget, type RecallMode } from '../memory/recall.js'
+import {
+  assemble,
+  recallViaAssemble,
+  DEFAULT_ASSEMBLE_BUDGET_CHARS,
+  DEFAULT_RECIPE_NAME,
+} from '../memory/assemble.js'
+import { currentState, getState, normalizeStateKey } from '../memory/state.js'
+import {
+  episodeVectorsAvailable,
+  ingestEpisodes,
+  type IngestEpisodeItem,
+  type IngestEpisodesInput,
+} from '../memory/episodes.js'
 import {
   recordRetrievalEvent,
   WEAK_RESULT_THRESHOLD,
@@ -30,6 +56,7 @@ import { buildMemoryHealth, explainMiss } from './health.js'
 import type { Session } from '../session/types.js'
 import {
   enqueueEndSessionMaintenance,
+  enqueueEpisodeReembed,
   getMaintenanceStatus,
   isMaintenanceEnabled,
   runPendingMaintenanceJobs,
@@ -48,6 +75,77 @@ import { listLocalBrains, searchBrain, getBrainMemory, markShareable } from '../
 import type { Memory } from '../memory/types.js'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
+
+/** current-state section: a handful of slots, previews only, fitted to what is left */
+const STATE_SECTION_SLOTS = 5
+const STATE_SECTION_PREVIEW_CHARS = 160
+const STATE_SECTION_CHARS_NO_BUDGET = 2000
+
+interface StateSectionEntry {
+  key: string
+  current: { id: string; value: string; valid_from: number } | null
+  prior: { id: string; value: string; valid_until: number | null } | null
+}
+
+function clipStateValue(text: string): string {
+  return text.length > STATE_SECTION_PREVIEW_CHARS
+    ? `${text.slice(0, STATE_SECTION_PREVIEW_CHARS)}…`
+    : text
+}
+
+function stateEntryChars(entry: StateSectionEntry): number {
+  return (
+    entry.key.length +
+    (entry.current?.value.length ?? 0) +
+    (entry.prior?.value.length ?? 0)
+  )
+}
+
+/** "what is true now" for the namespace, empty when nothing carries a slot key */
+function buildStateSection(
+  db: import('better-sqlite3').Database,
+  namespace: string,
+  options: { asOf?: number; remainingChars: number }
+): { slots: StateSectionEntry[]; dropped: number } {
+  const slots = currentState(db, namespace, {
+    limit: STATE_SECTION_SLOTS,
+    asOf: options.asOf,
+  })
+  const out: StateSectionEntry[] = []
+  let used = 0
+  for (const slot of slots) {
+    const entry: StateSectionEntry = {
+      key: slot.key,
+      current: slot.current
+        ? {
+            id: slot.current.memory_id,
+            value: clipStateValue(slot.current.content),
+            valid_from: slot.current.valid_from,
+          }
+        : null,
+      prior: slot.prior
+        ? {
+            id: slot.prior.memory_id,
+            value: clipStateValue(slot.prior.content),
+            valid_until: slot.prior.valid_until ?? slot.prior.superseded_at,
+          }
+        : null,
+    }
+    const chars = stateEntryChars(entry)
+    if (used + chars > options.remainingChars) continue
+    out.push(entry)
+    used += chars
+  }
+  return { slots: out, dropped: slots.length - out.length }
+}
+
+function stateSectionFields(section: { slots: StateSectionEntry[]; dropped: number }): Record<string, unknown> {
+  if (section.slots.length === 0) return {}
+  return {
+    state: section.slots,
+    ...(section.dropped > 0 ? { state_dropped: section.dropped } : {}),
+  }
+}
 
 interface Services {
   db: import('better-sqlite3').Database
@@ -221,6 +319,39 @@ async function resolveProjectPath(
   return resolved.namespace
 }
 
+function trimNamespace(value: string): string {
+  return value.replace(/\/+$/, '')
+}
+
+/**
+ * a task id is not a scope: when the call declares its own namespace it must be the
+ * task's, or an id copied from another project writes there. an undeclared call is
+ * trusted, since the id itself is unguessable.
+ */
+async function taskNamespaceMismatch(
+  args: Record<string, unknown>,
+  ctx: RequestContext,
+  namespace: string
+): Promise<string | null> {
+  const declared =
+    typeof args.namespace === 'string' && args.namespace.trim()
+      ? args.namespace
+      : typeof args.project_path === 'string' && args.project_path.trim()
+        ? args.project_path
+        : ''
+  if (!declared) return null
+  const resolved = trimNamespace(await resolveProjectPath(args, ctx))
+  if (resolved === trimNamespace(namespace)) return null
+  return `Task belongs to ${namespace}, not ${resolved}; drop the namespace argument or pass the task's own`
+}
+
+/** the session a task event and its close summary are attributed to */
+async function sessionFor(sessions: SessionManager, namespace: string): Promise<string> {
+  const current = sessions.getCurrentSession(namespace)
+  if (current) return current.id
+  return (await sessions.start({ project_path: namespace })).id
+}
+
 function asOfFromArgs(args: Record<string, unknown>): number | undefined {
   if (typeof args.as_of === 'number') return args.as_of
   return undefined
@@ -353,6 +484,7 @@ export async function handleTool(
           importanceProvided,
           procedure_meta: args.procedure_meta as StoreMemoryInput['procedure_meta'],
           origin: 'mcp',
+          state_key: typeof args.state_key === 'string' ? args.state_key : undefined,
         }
         const result = await store.store(input)
         // a refusal is an answer, not a broken tool: isError would hide the reason
@@ -395,6 +527,61 @@ export async function handleTool(
           response.auto_ended_sessions = sweptSessions.map((s) => s.id)
         }
         return ok(response)
+      }
+
+      case 'ingest_episodes': {
+        const namespace = await resolveProjectPath(args, ctx)
+        const source = args.source as { system: string; instance?: string; version?: string }
+        const permissions = (args.permissions ?? {}) as {
+          visibility?: IngestEpisodesInput['visibility']
+          retention?: IngestEpisodesInput['retention']
+          ttl_ms?: number
+        }
+        const rawItems = args.episodes as Array<Record<string, unknown>>
+        const items: IngestEpisodeItem[] = rawItems.map((item) => {
+          const chunk = (item.chunk ?? {}) as {
+            index?: number
+            of?: number
+            parent_external_id?: string
+          }
+          return {
+            external_id: item.external_id as string,
+            content: item.content as string,
+            session_id: item.session_id as string | undefined,
+            task_id: item.task_id as string | undefined,
+            author: item.author as string | undefined,
+            role: item.role as string | undefined,
+            occurred_at: item.occurred_at as number | undefined,
+            content_type: item.content_type as string | undefined,
+            uri: item.uri as string | undefined,
+            turn_index: item.turn_index as number | undefined,
+            parent_external_id:
+              (item.parent_external_id as string | undefined) ?? chunk.parent_external_id,
+            chunk_index: chunk.index,
+            chunk_of: chunk.of,
+            provenance: item.provenance as Record<string, unknown> | undefined,
+          }
+        })
+        const result = await ingestEpisodes(db, {
+          namespace,
+          source: source.system,
+          source_instance: source.instance,
+          source_version: source.version,
+          visibility: permissions.visibility,
+          retention: permissions.retention,
+          ttl_ms: permissions.ttl_ms,
+          items,
+          origin: 'mcp',
+          vectorsAvailable: episodeVectorsAvailable(db),
+          deferVectors: args.defer_vectors === true,
+          batchEmbeddings: args.batch_embeddings === true,
+        })
+        // deferred rows are lexically live but vectorless: queue the backlog turn so a
+        // daemon that stays up does not wait for its next boot to embed them
+        if (args.defer_vectors === true && result.ingested > 0) {
+          enqueueEpisodeReembed(db, { source: 'ingest_episodes' })
+        }
+        return ok(result)
       }
 
       case 'search_memories': {
@@ -565,6 +752,7 @@ export async function handleTool(
           let topicsOut: unknown = clusters
           let budgetExtras: Record<string, unknown> = {}
           let budgetAccounting: RetrievalBudgetAccounting | undefined
+          let packedUsedChars = 0
           if (budgetChars !== undefined) {
             const packed = packWithinBudget({
               budget_chars: budgetChars,
@@ -575,6 +763,7 @@ export async function handleTool(
             memoriesOut = packed.memories.map(toLeanContextEntry)
             digestOut = packed.digest
             topicsOut = packed.topics
+            packedUsedChars = packed.budget.used_chars
             budgetExtras = {
               budget: packed.budget,
               dropped: packed.dropped,
@@ -582,6 +771,17 @@ export async function handleTool(
             }
             budgetAccounting = asBudgetAccounting(packed)
           }
+
+          // what is true now, next to what was said: charged against whatever the
+          // packer left, so a budgeted read never exceeds its budget
+          const queryStateBudget =
+            budgetChars === undefined
+              ? STATE_SECTION_CHARS_NO_BUDGET
+              : Math.max(0, budgetChars - packedUsedChars)
+          const stateSection = buildStateSection(db, project_path, {
+            asOf,
+            remainingChars: queryStateBudget,
+          })
 
           const miss = explainMiss(db, project_path, results.length, { materialize: true })
           recordRetrievalEvent(db, {
@@ -604,6 +804,7 @@ export async function handleTool(
             ...(guide.length > 0 ? { guide } : {}),
             ...(miss ? { miss } : {}),
             ...budgetExtras,
+            ...stateSectionFields(stateSection),
             ...historicalLimitations,
           })
         }
@@ -638,6 +839,7 @@ export async function handleTool(
         let topicsOut: unknown = clusters
         let budgetExtras: Record<string, unknown> = {}
         let budgetAccounting: RetrievalBudgetAccounting | undefined
+        let packedUsedChars = 0
         if (budgetChars !== undefined) {
           const packed = packWithinBudget({
             budget_chars: budgetChars,
@@ -654,6 +856,7 @@ export async function handleTool(
           rosterOut = packed.memories
           digestOut = packed.digest
           topicsOut = packed.topics
+          packedUsedChars = packed.budget.used_chars
           budgetExtras = {
             budget: packed.budget,
             dropped: packed.dropped,
@@ -661,6 +864,14 @@ export async function handleTool(
           }
           budgetAccounting = asBudgetAccounting(packed)
         }
+
+        const stateSection = buildStateSection(db, project_path, {
+          asOf,
+          remainingChars:
+            budgetChars === undefined
+              ? STATE_SECTION_CHARS_NO_BUDGET
+              : Math.max(0, budgetChars - packedUsedChars),
+        })
 
         const miss = explainMiss(db, project_path, memories.length, { materialize: true })
         recordRetrievalEvent(db, {
@@ -686,6 +897,7 @@ export async function handleTool(
           hint:
             'Blanket context (no query) returns a compact roster only; preview is capped at 160 chars. Pass query to scope retrieval via hybrid search and receive full content, or fetch a single memory with get_memory.',
           ...budgetExtras,
+          ...stateSectionFields(stateSection),
           ...historicalLimitations,
         })
       }
@@ -899,6 +1111,7 @@ export async function handleTool(
           // never inherited from the predecessor without an explicit opt-in
           shareable: args.shareable === true ? true : undefined,
           origin: 'mcp',
+          state_key: typeof args.state_key === 'string' ? args.state_key : undefined,
         }
         const result = await store.revise(input)
         if (!result) return err(`Memory ${id} not found`)
@@ -928,6 +1141,35 @@ export async function handleTool(
         })
       }
 
+      case 'get_state': {
+        const project_path = await resolveProjectPath(args, ctx)
+        // one normalizer, so a key read back is the key a write landed on
+        const normalizedKey = typeof args.key === 'string' ? normalizeStateKey(args.key) : null
+        if (args.key !== undefined && normalizedKey === null) {
+          return err('key must be 1-200 characters of non-whitespace text')
+        }
+        const key = normalizedKey ?? undefined
+        const startedAt = Date.now()
+        const view = getState(db, {
+          namespace: project_path,
+          key,
+          as_of: asOfFromArgs(args),
+          include_superseded: args.include_superseded === true,
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+        })
+        const latencyMs = Date.now() - startedAt
+        recordRetrievalEvent(db, {
+          tool: 'get_state',
+          mode: key === undefined ? 'slots' : 'slot',
+          namespace: project_path,
+          query: null,
+          resultIds: view.slots.flatMap((slot) => (slot.current ? [slot.current.memory_id] : [])),
+          latencyMs,
+          weak: view.slots.length === 0,
+        })
+        return ok(view)
+      }
+
       case 'get_memory_history': {
         const id = args.id as string
         const history = store.getHistory(id, {
@@ -949,7 +1191,9 @@ export async function handleTool(
         }
         const project_path = await resolveProjectPath(args, ctx)
         const startedAt = Date.now()
-        const result = await recallContext(db, store, search, {
+        // one recipe over the assembly read path: the default recipe carries the payload
+        // this tool has always returned, byte for byte
+        const result = await recallViaAssemble(db, store, search, {
           query: args.query as string,
           project_path,
           budget_chars: args.budget_chars as number,
@@ -982,6 +1226,42 @@ export async function handleTool(
             truncated_topics: result.truncated.topics,
           },
           weak: result.memories.length < WEAK_RESULT_THRESHOLD,
+        })
+        return ok(result)
+      }
+
+      case 'assemble_context': {
+        const project_path = await resolveProjectPath(args, ctx)
+        const query = typeof args.query === 'string' ? args.query.trim() : ''
+        const recipe = typeof args.recipe === 'string' ? args.recipe : DEFAULT_RECIPE_NAME
+        const asOf = asOfFromArgs(args)
+        const startedAt = Date.now()
+        const result = await assemble(db, store, search, {
+          scope: project_path,
+          ...(query !== '' ? { query } : {}),
+          budgetChars:
+            typeof args.budget_chars === 'number'
+              ? args.budget_chars
+              : DEFAULT_ASSEMBLE_BUDGET_CHARS,
+          recipe,
+          ...(asOf !== undefined ? { asOf } : {}),
+          now: Date.now(),
+        })
+        const memories = result.sections.find((section) => section.kind === 'memories')
+        recordRetrievalEvent(db, {
+          tool: 'assemble_context',
+          mode: recipe,
+          namespace: project_path,
+          query,
+          resultIds: memories?.items.map((item) => item.id) ?? [],
+          latencyMs: Date.now() - startedAt,
+          budget: {
+            budget_chars: result.accounting.budget,
+            used_chars: result.accounting.used,
+            dropped_memories: result.accounting.dropped,
+            truncated_memories: result.accounting.truncated,
+          },
+          weak: (memories?.items.length ?? 0) < WEAK_RESULT_THRESHOLD,
         })
         return ok(result)
       }
@@ -1037,6 +1317,139 @@ export async function handleTool(
         const memory = getBrainMemory(brain, id)
         if (!memory) return err(`Memory ${id} not found in brain ${brain}`)
         return ok({ brain, memory })
+      }
+
+      case 'task_start': {
+        const namespace = await resolveProjectPath(args, ctx)
+        const task = createTask(db, {
+          namespace,
+          title: args.title as string,
+          goal: args.goal as string,
+          session_id: typeof args.session_id === 'string' ? args.session_id : null,
+          plan: args.plan as TaskStartInput['plan'],
+          artifacts: args.artifacts as string[] | undefined,
+          open_questions: args.open_questions as string[] | undefined,
+          author: typeof args.author === 'string' ? args.author : null,
+        })
+        return ok({ task, namespace })
+      }
+
+      case 'task_update': {
+        const id = args.id as string
+        const task = getTask(db, id)
+        if (!task) return err(`Task ${id} not found`)
+        const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
+        if (mismatch) return err(mismatch)
+
+        const delta: TaskDelta = {
+          status: args.status as TaskStatus,
+          title: args.title as string | undefined,
+          goal: args.goal as string | undefined,
+          plan: args.plan as TaskDelta['plan'],
+          progress: args.progress as string[] | undefined,
+          artifacts: args.artifacts as string[] | undefined,
+          open_questions: args.open_questions as string[] | undefined,
+          resolved_questions: args.resolved_questions as string[] | undefined,
+        }
+        const updated = updateTask(db, id, delta, {
+          author: typeof args.author === 'string' ? args.author : null,
+        })
+        if (!updated) return err(`Task ${id} not found`)
+        return ok({ task: updated.task, applied: updated.applied })
+      }
+
+      case 'task_get': {
+        const id = typeof args.id === 'string' ? args.id : ''
+        if (id) {
+          const task = getTask(db, id)
+          if (!task) return err(`Task ${id} not found`)
+          const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
+          if (mismatch) return err(mismatch)
+          return ok({
+            task,
+            ...(args.include_events === true ? { events: listTaskEvents(db, id) } : {}),
+          })
+        }
+
+        const namespace = await resolveProjectPath(args, ctx)
+        const tasks = listTasks(db, {
+          namespace,
+          status: args.status as TaskStatus,
+          limit: typeof args.limit === 'number' ? args.limit : undefined,
+        })
+        return ok({ namespace, tasks })
+      }
+
+      case 'task_close': {
+        const id = args.id as string
+        const task = getTask(db, id)
+        if (!task) return err(`Task ${id} not found`)
+        const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
+        if (mismatch) return err(mismatch)
+
+        const status = (args.status as TaskStatus) ?? 'done'
+        const author = typeof args.author === 'string' ? args.author : null
+        if (CLOSED_STATUSES.includes(task.status)) {
+          return ok({ task, closed: false, reason: `task is already ${task.status}` })
+        }
+
+        // the only route from working state into durable memory: one summary, written
+        // through the store so admission, embedding and linking all still apply
+        const content = taskSummary(task, args.summary as string | undefined)
+        const written = await store.store({
+          content,
+          session_id: await sessionFor(sessions, task.namespace),
+          project_path: task.namespace,
+          type: 'note',
+          importance: 0.6,
+          importanceProvided: true,
+          tags: ['task-summary', task.id],
+          origin: 'mcp',
+        })
+        const memoryId = written.status === 'rejected' ? null : written.id
+        const closed = closeTask(db, id, { status, summaryMemoryId: memoryId, author })
+        return ok({
+          task: closed,
+          closed: true,
+          memory:
+            written.status === 'rejected'
+              ? { status: 'rejected', rule: written.rule, reason: written.reason, hint: written.hint }
+              : { status: written.status, id: written.id },
+        })
+      }
+
+      case 'task_handoff': {
+        const id = args.id as string
+        const task = getTask(db, id)
+        if (!task) return err(`Task ${id} not found`)
+        const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
+        if (mismatch) return err(mismatch)
+
+        const audience = (args.for as 'subagent' | 'new-session') ?? 'subagent'
+        const brief = handoff(
+          task,
+          audience,
+          typeof args.budget_chars === 'number' ? args.budget_chars : DEFAULT_HANDOFF_CHARS
+        )
+        appendTaskEvent(
+          db,
+          id,
+          'handoff',
+          { for: audience, used_chars: brief.used_chars, omitted: brief.omitted },
+          typeof args.author === 'string' ? args.author : null
+        )
+        return ok(brief)
+      }
+
+      case 'session_start': {
+        const namespace = await resolveProjectPath(args, ctx)
+        return ok(
+          sessionStartPayload(db, {
+            namespace,
+            sessionId: typeof args.session_id === 'string' ? args.session_id : undefined,
+            budgetChars: typeof args.budget_chars === 'number' ? args.budget_chars : undefined,
+          })
+        )
       }
 
       case 'mark_shareable': {

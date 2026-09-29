@@ -325,7 +325,8 @@ async function runAdjudicationStage(
   }
 
   const status = gatewayStatus()
-  notes.push(`gateway: configured (host ${status.host}, model ${status.model})`)
+  // the host is left out on purpose: it says nothing about comparability and may be internal
+  notes.push(`gateway: configured (model ${status.model})`)
   const verdicts: PairVerdict[] = []
   const callLatencies: number[] = []
   let failures = 0

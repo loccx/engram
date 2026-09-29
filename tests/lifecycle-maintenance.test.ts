@@ -395,13 +395,17 @@ describe('lifecycle job types', () => {
 })
 
 describe('migration 013 (lifecycle schema)', () => {
-  it('is idempotent, leaves a contiguous user_version, and applies every lifecycle shape', async () => {
+  it('is idempotent, leaves user_version at the high-water mark, and applies every lifecycle shape', async () => {
     const { db } = createTestDb()
     const { migration013 } = await import('../src/db/migrations/013_lifecycle_archive_tier.js')
     const { migrations } = await import('../src/db/migrations/index.js')
 
+    // a reserved number is supported (parallel branches), so the invariant is unique
+    // and strictly increasing from 1, not contiguous: a gap is a sibling not merged yet
     const versions = migrations.map((m) => m.version).sort((a, b) => a - b)
-    expect(versions).toEqual(versions.map((_, i) => i + 1))
+    expect(versions[0]).toBe(1)
+    expect(new Set(versions).size).toBe(versions.length)
+    for (let i = 1; i < versions.length; i++) expect(versions[i]).toBeGreaterThan(versions[i - 1])
     const userVersion = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version
     expect(userVersion).toBe(versions[versions.length - 1])
 

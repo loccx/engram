@@ -66,6 +66,11 @@ export const tools = [
           description:
             'Wait synchronously (up to 2s) for contradiction adjudication to complete before returning. Default false: adjudication runs in background.',
         },
+        state_key: {
+          type: 'string',
+          description:
+            'Slot key for a single-valued fact: a subject+attribute such as "atlas deploy target", or any caller key. Writing the same key again retires the previous value (closes its validity window and links the new row over it), so recall, search and as_of reads serve the current value without waiting for contradiction adjudication. Normalised: trimmed, whitespace collapsed, lowercased. Read the slot back with get_state; the retired values stay queryable with their windows.',
+        },
         procedure_meta: {
           type: 'object',
           description: 'Structured procedure metadata (only for type=procedure)',
@@ -84,6 +89,111 @@ export const tools = [
       destructiveHint: false,
       idempotentHint: false,
       openWorldHint: true,
+    },
+  },
+  {
+    name: 'ingest_episodes',
+    description:
+      'Ingest raw evidence — one turn or chunk per item — instead of curating it into a memory. Episodes are immutable, deduplicated on (source, external_id), accept partial batches, and are searched by their own channel; a derived memory cites them through memory_episodes. Use it for transcripts, tool output and documents whose detail matters later; keep store_memory for the durable point. Admission runs here too: an item carrying a credential is refused, and the response names the shape, never the value. No llm runs on this path.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        source: {
+          type: 'object',
+          properties: {
+            system: { type: 'string', description: 'Source system, e.g. claude-code, codex, adk, custom' },
+            instance: { type: 'string', description: 'Which install of it, e.g. host:user' },
+            version: { type: 'string', description: 'Source version' },
+          },
+          required: ['system'],
+          description: 'Where the evidence came from; with external_id it is the idempotency key',
+        },
+        episodes: {
+          type: 'array',
+          minItems: 1,
+          maxItems: 2000,
+          description: 'The evidence itself, in source order; a partial batch is accepted',
+          items: {
+            type: 'object',
+            properties: {
+              external_id: {
+                type: 'string',
+                description: 'The source system\'s own id for this turn or chunk; re-sending it is a no-op',
+              },
+              content: { type: 'string', description: 'The text as it should be served' },
+              session_id: { type: 'string', description: 'Conversation or run this turn belongs to' },
+              task_id: { type: 'string', description: 'Task this evidence belongs to, when one is open' },
+              author: { type: 'string', description: 'Actor that produced it (user, agent, tool)' },
+              role: { type: 'string', description: 'Message role, when the source has one' },
+              occurred_at: {
+                type: 'number',
+                description: 'Unix ms when it happened; the session date in a served timeline',
+              },
+              content_type: { type: 'string', description: 'Mime type (default text/plain)' },
+              uri: { type: 'string', description: 'Where it lives, for a document or a file' },
+              turn_index: {
+                type: 'number',
+                description: 'Position inside the session, so the timeline can be rebuilt in order',
+              },
+              parent_external_id: { type: 'string', description: 'Item this one derives from' },
+              provenance: {
+                type: 'object',
+                description: 'url, repo, commit, path, tool_call_id — whatever locates the source',
+              },
+              chunk: {
+                type: 'object',
+                properties: {
+                  index: { type: 'number', description: 'Chunk position, 0-based' },
+                  of: { type: 'number', description: 'Chunk count, so a partial ingest is visible' },
+                  parent_external_id: {
+                    type: 'string',
+                    description: 'The whole this chunk was cut from; never lose the whole',
+                  },
+                },
+                description: 'Present when the source sends pre-chunked content',
+              },
+            },
+            required: ['external_id', 'content'],
+          },
+        },
+        namespace: namespaceField,
+        project_path: projectPathField,
+        permissions: {
+          type: 'object',
+          properties: {
+            visibility: {
+              type: 'string',
+              enum: ['personal', 'project', 'team', 'org'],
+              description: 'Who may read it (default personal)',
+            },
+            retention: {
+              type: 'string',
+              enum: ['durable', 'session', 'ephemeral'],
+              description: 'How long it is kept (default durable)',
+            },
+            ttl_ms: { type: 'number', description: 'With retention, an expiry in ms from now' },
+          },
+          description: 'Permissions and retention for the whole batch',
+        },
+        defer_vectors: {
+          type: 'boolean',
+          description:
+            'Write the rows and their fts index now and leave embed_state stale, instead of computing embeddings before this call returns (default false). Use it when the caller must not wait on the local model; the maintenance queue embeds the backlog. A search before then ranks these rows lexically and reports the evidence channel as degraded.',
+        },
+        batch_embeddings: {
+          type: 'boolean',
+          description:
+            'Embed the batch in one forward pass per chunk instead of one call per item (default false). Faster on large batches, but NOT the same vectors: the tokenizer pads every row to the longest in its chunk, which moves the rows that got padded (min cosine ~0.97 vs the single-call vector). Leave it off when stored vectors must match a one-call embedding.',
+        },
+      },
+      required: ['source', 'episodes'],
+    },
+    annotations: {
+      title: 'Ingest episodes',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
     },
   },
   {
@@ -568,6 +678,10 @@ export const tools = [
           type: 'boolean',
           description: 'Explicit opt-in to mark the revision shareable. NEVER inherited from the predecessor.',
         },
+        state_key: {
+          type: 'string',
+          description: 'Slot key (default: the predecessor\'s key, so a revision stays in its slot).',
+        },
       },
       required: ['id', 'content'],
     },
@@ -597,6 +711,47 @@ export const tools = [
     },
     annotations: {
       title: 'Get memory history',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'get_state',
+    description:
+      'The current value of state slots (single-valued facts that change over time): without key, every slot in the namespace, most recently updated first; with key, that slot alone. Each slot reports current (value, valid_from, superseded_at) and prior, so a caller can say "this was X until <date>, now Y". Slots come from an explicit state_key on store_memory / revise_memory and from every supersession chain, so nothing else has to be keyed for this to answer. Pass include_superseded=true for the full trajectory (every value with its window and the reason it was retired), or as_of for the value that was current at that time. This answers "what is true now"; search_memories answers "what was said".',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_path: projectPathField,
+        namespace: namespaceField,
+        key: {
+          type: 'string',
+          description: 'Slot key to read. Omit to list every slot in the namespace.',
+        },
+        as_of: {
+          type: 'number',
+          description:
+            'Unix timestamp (ms). Historical view: the value current at that instant (valid_from <= as_of <= valid_until, both inclusive) with supersession judged after as_of ignored.',
+        },
+        include_superseded: {
+          type: 'boolean',
+          default: false,
+          description:
+            'Add each slot\'s trajectory: every value valid at the read time, oldest first, with its window and the reason it was retired.',
+        },
+        limit: {
+          type: 'number',
+          default: 20,
+          maximum: 100,
+          description: 'Max slots returned when no key is given (default 20)',
+        },
+      },
+      required: [],
+    },
+    annotations: {
+      title: 'Get state',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,
@@ -646,6 +801,45 @@ export const tools = [
     },
   },
   {
+    name: 'assemble_context',
+    description:
+      'One assembled read: named sections (working task briefs, current state heads, fused memories, digests and cluster summaries, and an evidence channel that passes memories through until episode snippets land) packed into a single character budget, with per-section accounting, the channels and layers searched, and every channel that failed or could not run. A recipe picks the sections and their budget shares: default (the recall_context contract), session-priming (working and state first) and qa (memories and evidence heavy). Read-only and repeatable: no access stamping, no digest refresh, no generated text. Deterministic for the same store and inputs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description:
+            'Retrieval query feeding the fused memory channel. Without it the working, state and summary sections still assemble; the memories and evidence sections report that the channel did not run.',
+        },
+        budget_chars: {
+          type: 'number',
+          minimum: 50,
+          description: 'Strict content-character budget across every section (default 4000)',
+        },
+        recipe: {
+          type: 'string',
+          description:
+            'Named recipe: default | session-priming | qa, or a recipe added to the registry. Default is `default`.',
+        },
+        as_of: {
+          type: 'number',
+          description:
+            'Unix timestamp (ms). Historical view (see search_memories.as_of). Present-state text is omitted: task briefs cannot be reconstructed and report it in degraded; the digest summary is dropped; state heads are the values true at as_of.',
+        },
+        project_path: projectPathField,
+        namespace: namespaceField,
+      },
+    },
+    annotations: {
+      title: 'Assemble context',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'get_maintenance_status',
     description:
       'Read-only view of the durable maintenance job queue: counts by status/type plus recent jobs. Maintenance jobs run in safe shadow mode — they inspect state and record summaries into result_json but never write canonical memories, digests, clusters, importance, or contradiction links.',
@@ -657,6 +851,184 @@ export const tools = [
     },
     annotations: {
       title: 'Maintenance status',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'task_start',
+    description:
+      'Open a working-state task for this namespace: the goal, an optional plan with per-item status, artifacts and open questions. Working state lives beside memories, never inside them — no search returns it, it survives compaction, and task_update records every change as an event. Use it for work that outlives one context window; use store_memory for durable facts.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'One line naming the work' },
+        goal: { type: 'string', description: 'What done looks like, with the constraint that matters' },
+        plan: {
+          type: 'array',
+          items: {
+            oneOf: [
+              { type: 'string' },
+              {
+                type: 'object',
+                properties: {
+                  text: { type: 'string' },
+                  status: { type: 'string', enum: ['pending', 'active', 'done', 'blocked'] },
+                },
+                required: ['text'],
+              },
+            ],
+          },
+          description: 'Ordered steps; each becomes an item with a stable id (p1, p2, …) that task_update addresses',
+        },
+        artifacts: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Files, branches or outputs this task owns — the paths a fresh session needs',
+        },
+        open_questions: { type: 'array', items: { type: 'string' }, description: 'Unresolved questions to carry across a handoff' },
+        session_id: { type: 'string', description: 'Host session id (optional)' },
+        author: { type: 'string', description: 'Attribution recorded on the event log (optional)' },
+        project_path: projectPathField,
+        namespace: namespaceField,
+      },
+      required: ['title', 'goal'],
+    },
+    annotations: {
+      title: 'Start task',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'task_update',
+    description:
+      'Apply a delta to a task: set status, mark plan items done or active by id, append progress notes, artifacts and open questions, resolve a question. Deltas append rather than replace, and the applied delta is written to the append-only event log with its author. Answers with the applied delta, so an update that changed nothing is visible as such.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task id from task_start or task_get' },
+        status: { type: 'string', enum: ['open', 'blocked', 'done', 'abandoned'], description: 'Task status; done and abandoned stamp closed_at' },
+        title: { type: 'string' },
+        goal: { type: 'string' },
+        plan: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string', description: 'An existing plan item (p1, p2, …); omit to append a new step' },
+              text: { type: 'string' },
+              status: { type: 'string', enum: ['pending', 'active', 'done', 'blocked'] },
+            },
+          },
+          description: 'Plan deltas: an entry with an id updates that item, an entry without one appends',
+        },
+        progress: { type: 'array', items: { type: 'string' }, description: 'Progress notes to append, each dated and attributed' },
+        artifacts: { type: 'array', items: { type: 'string' }, description: 'Artifacts to add; a duplicate value is ignored' },
+        open_questions: { type: 'array', items: { type: 'string' }, description: 'Questions to add' },
+        resolved_questions: { type: 'array', items: { type: 'string' }, description: 'Questions to remove, matched by exact text' },
+        author: { type: 'string', description: 'Attribution recorded on the event log (optional)' },
+        project_path: projectPathField,
+        namespace: namespaceField,
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Update task',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'task_get',
+    description:
+      'Read working state. With an id: that task and, on request, its event log. Without one: the tasks for the namespace, newest first, filtered by status (open and blocked by default). Never a search — this is how a resumed or compacted session finds out what it was doing.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task id; without it the namespace list is returned' },
+        status: { type: 'string', enum: ['open', 'blocked', 'done', 'abandoned'], description: 'Filter the list (with no id)' },
+        limit: { type: 'number', default: 5, maximum: 50, description: 'Max tasks in the list (with no id)' },
+        include_events: { type: 'boolean', default: false, description: 'Include the append-only event log (with an id)' },
+        project_path: projectPathField,
+        namespace: namespaceField,
+      },
+    },
+    annotations: {
+      title: 'Get task',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'task_close',
+    description:
+      'Finish a task and write one summary memory through the normal store path, so the write is admitted, embedded and linked like any other fact. The task keeps its plan, progress notes and event log. Idempotent: a task that is already done or abandoned is returned unchanged and no second memory is written.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task id' },
+        status: { type: 'string', enum: ['done', 'abandoned'], default: 'done', description: 'How it ended' },
+        summary: { type: 'string', description: 'Extra line for the summary memory, e.g. the outcome that is worth remembering' },
+        author: { type: 'string', description: 'Attribution recorded on the event log (optional)' },
+        project_path: projectPathField,
+        namespace: namespaceField,
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Close task',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'task_handoff',
+    description:
+      'Render one bounded, deterministic brief for a task and log the handoff: goal, plan with status, recent progress, open questions, artifacts. for=subagent trims to the unfinished work (the parent keeps the history); for=new-session carries the fuller state so a fresh session can resume. Pass budget_chars to fit a host context limit.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Task id' },
+        for: { type: 'string', enum: ['subagent', 'new-session'], default: 'subagent', description: 'Who the brief is for' },
+        budget_chars: { type: 'number', minimum: 80, description: 'Cap on the brief in characters (default 900)' },
+        author: { type: 'string', description: 'Attribution recorded on the event log (optional)' },
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Hand off task',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+      openWorldHint: false,
+    },
+  },
+  {
+    name: 'session_start',
+    description:
+      'One priming call for a session beside a long-horizon harness: standing rules, the open task briefs (what was in flight, what step is active, what is unresolved), the pinned-fact digest and the namespace roster, packed into one character budget. Call it at session start and after a compaction.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        session_id: { type: 'string', description: 'Host session id: a task opened under it is preferred over the newest one' },
+        budget_chars: { type: 'number', minimum: 200, description: 'Cap for the whole payload (default 2400)' },
+        project_path: projectPathField,
+        namespace: namespaceField,
+      },
+    },
+    annotations: {
+      title: 'Start session',
       readOnlyHint: true,
       destructiveHint: false,
       idempotentHint: true,

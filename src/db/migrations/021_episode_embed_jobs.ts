@@ -1,0 +1,57 @@
+import type Database from 'better-sqlite3'
+import type { Migration } from './types.js'
+import { tableExists } from './types.js'
+
+// adds the 'reembed_episodes' job type. sqlite cannot alter a check constraint, so the
+// table is rebuilt with the extended check, every row copied and every index recreated —
+// the partial unique index on active (job_type, target_key) rows above all, since that is
+// what makes a re-enqueue idempotent. skipped when the table is absent or its
+// sqlite_master sql already mentions the job type.
+export const migration021: Migration = {
+  version: 21,
+  description: 'Add reembed_episodes job type to maintenance_jobs (rebuild CHECK constraint)',
+  up(db: Database.Database) {
+    if (!tableExists(db, 'maintenance_jobs')) return
+
+    const current = db
+      .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'maintenance_jobs'")
+      .get() as { sql: string } | undefined
+    if (current?.sql && current.sql.includes('reembed_episodes')) return
+
+    db.exec(`
+      ALTER TABLE maintenance_jobs RENAME TO maintenance_jobs_pre_episode_embed;
+
+      CREATE TABLE maintenance_jobs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        job_type TEXT NOT NULL CHECK (job_type IN ('digest', 'cluster', 'importance', 'adjudication', 'promote', 'prune', 'retention', 'reembed_episodes')),
+        target_key TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'queued' CHECK (status IN ('queued', 'running', 'done', 'failed', 'dead')),
+        attempt INTEGER NOT NULL DEFAULT 0,
+        max_attempts INTEGER NOT NULL DEFAULT 3,
+        lease_owner TEXT,
+        lease_expires_at INTEGER,
+        enqueued_at INTEGER NOT NULL,
+        started_at INTEGER,
+        finished_at INTEGER,
+        last_error TEXT,
+        result_json TEXT,
+        source TEXT
+      );
+
+      INSERT INTO maintenance_jobs
+        (id, job_type, target_key, status, attempt, max_attempts, lease_owner, lease_expires_at,
+         enqueued_at, started_at, finished_at, last_error, result_json, source)
+      SELECT id, job_type, target_key, status, attempt, max_attempts, lease_owner, lease_expires_at,
+         enqueued_at, started_at, finished_at, last_error, result_json, source
+      FROM maintenance_jobs_pre_episode_embed;
+
+      DROP TABLE maintenance_jobs_pre_episode_embed;
+
+      CREATE UNIQUE INDEX idx_maintenance_jobs_active
+        ON maintenance_jobs(job_type, target_key)
+        WHERE status IN ('queued', 'running');
+
+      CREATE INDEX idx_maintenance_jobs_status ON maintenance_jobs(status);
+    `)
+  },
+}

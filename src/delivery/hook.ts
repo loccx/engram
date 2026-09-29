@@ -1,9 +1,18 @@
+import { closeSync, openSync, readSync, statSync } from 'node:fs'
 import { PROTOCOL_SLIM } from './protocol.js'
 import { daemonBaseUrl, daemonPost } from './daemon.js'
+import { authHeaders } from '../mcp/auth.js'
 import { resolveWorkspaceNamespace } from './workspace.js'
 import { cueStatePath, forgetSeen, markSeen } from './cue-state.js'
+import {
+  POST_COMPACT_BRIEF_CHARS,
+  SUBAGENT_BRIEF_CHARS,
+  type TaskBriefPayload,
+} from './tasks.js'
+import { DEFAULT_BRIEF_CHARS } from '../tasks/brief.js'
 import type { CueHit } from './cue.js'
 import type { RosterHit } from './roster.js'
+import type { HandoffAudience } from '../tasks/types.js'
 
 /**
  * `engram hook <event>` is the push side: the host hands over its own json payload on
@@ -11,7 +20,15 @@ import type { RosterHit } from './roster.js'
  * daemon, a slow call or an unreadable payload produces no output and no error.
  */
 
-export const HOOK_EVENTS = ['session-start', 'pre-tool-use'] as const
+export const HOOK_EVENTS = [
+  'session-start',
+  'pre-tool-use',
+  'pre-compact',
+  'post-compact',
+  'subagent-start',
+  'subagent-stop',
+  'session-end',
+] as const
 export type HookEvent = (typeof HOOK_EVENTS)[number]
 
 /** set during a hook, so a nested invocation exits instead of re-reading the store */
@@ -21,6 +38,19 @@ export const HOOK_TIMEOUT_MS = 1500
 
 const CUE_CONTENT_CHARS = 240
 const PATH_FIELDS = ['file_path', 'filePath', 'notebook_path']
+const TRANSCRIPT_TAIL_BYTES = 256 * 1024
+export const SUBAGENT_SUMMARY_CHARS = 1200
+
+/** the host's own name for each event, which is also what its hook envelope wants back */
+const HOST_EVENT_NAMES: Record<HookEvent, string> = {
+  'session-start': 'SessionStart',
+  'pre-tool-use': 'PreToolUse',
+  'pre-compact': 'PreCompact',
+  'post-compact': 'PostCompact',
+  'subagent-start': 'SubagentStart',
+  'subagent-stop': 'SubagentStop',
+  'session-end': 'SessionEnd',
+}
 
 export interface HookInput {
   cwd?: string
@@ -28,6 +58,16 @@ export interface HookInput {
   source?: string
   tool_name?: string
   tool_input?: Record<string, unknown>
+  /** pre-compact: manual or auto */
+  trigger?: string
+  /** subagent events */
+  agent_id?: string
+  agent_type?: string
+  agent_transcript_path?: string
+  transcript_path?: string
+  last_assistant_message?: string
+  summary?: string
+  reason?: string
 }
 
 export interface HookOptions {
@@ -39,7 +79,7 @@ export interface HookOptions {
 }
 
 export function hookEventName(event: HookEvent): string {
-  return event === 'session-start' ? 'SessionStart' : 'PreToolUse'
+  return HOST_EVENT_NAMES[event]
 }
 
 /** hosts that parse json get json; every other host gets the text */
@@ -68,22 +108,65 @@ export function renderCueText(hits: CueHit[]): string {
   return lines.join('\n')
 }
 
+function namespaceFor(input: HookInput, env: NodeJS.ProcessEnv): string {
+  return resolveWorkspaceNamespace(input.cwd ?? process.cwd(), env)
+}
+
+async function postTo<T>(
+  path: string,
+  body: Record<string, unknown>,
+  env: NodeJS.ProcessEnv,
+  options: HookOptions
+): Promise<T | null> {
+  return daemonPost<T>(path, body, {
+    baseUrl: daemonBaseUrl(env),
+    timeoutMs: options.timeoutMs,
+    fetchImpl: options.fetchImpl,
+    headers: authHeaders(env),
+  })
+}
+
+async function fetchBriefs(
+  input: HookInput,
+  options: HookOptions,
+  params: { for: 'session' | HandoffAudience; budgetChars: number; limit?: number }
+): Promise<TaskBriefPayload[]> {
+  const env = options.env ?? process.env
+  const result = await postTo<{ briefs: TaskBriefPayload[] }>(
+    '/delivery/task-brief',
+    {
+      namespace: namespaceFor(input, env),
+      session_id: input.session_id,
+      for: params.for,
+      budget_chars: params.budgetChars,
+      limit: params.limit,
+    },
+    env,
+    options
+  )
+  return result?.briefs ?? []
+}
+
+function briefText(entries: TaskBriefPayload[]): string {
+  return entries
+    .map((entry) => entry.brief.text)
+    .filter((text) => text.length > 0)
+    .join('\n\n')
+}
+
 async function renderSessionStart(input: HookInput, options: HookOptions): Promise<string> {
   const env = options.env ?? process.env
-  const namespace = resolveWorkspaceNamespace(input.cwd ?? process.cwd(), env)
-  const roster = await daemonPost<{ entries: RosterHit[] }>(
-    '/delivery/roster',
-    { namespace },
-    {
-      baseUrl: daemonBaseUrl(env),
-      timeoutMs: options.timeoutMs,
-      fetchImpl: options.fetchImpl,
-    }
-  )
-  if (!roster) return ''
+  const namespace = namespaceFor(input, env)
+  const [roster, briefs] = await Promise.all([
+    postTo<{ entries: RosterHit[] }>('/delivery/roster', { namespace }, env, options),
+    fetchBriefs(input, options, { for: 'session', budgetChars: DEFAULT_BRIEF_CHARS, limit: 1 }),
+  ])
+  if (!roster && briefs.length === 0) return ''
 
   const parts = [PROTOCOL_SLIM]
-  if (roster.entries.length > 0) {
+  const tasks = briefText(briefs)
+  if (tasks) parts.push(tasks)
+  if (roster && roster.entries.length > 0) {
     parts.push(`engram context for ${namespace}`)
     for (const entry of roster.entries) parts.push(`- [${entry.type}] ${entry.preview}`)
   }
@@ -95,15 +178,12 @@ async function renderCue(input: HookInput, options: HookOptions): Promise<string
   const filePath = toolPaths(input.tool_input)[0]
   if (!filePath) return ''
 
-  const namespace = resolveWorkspaceNamespace(input.cwd ?? process.cwd(), env)
-  const found = await daemonPost<{ entries: CueHit[] }>(
+  const namespace = namespaceFor(input, env)
+  const found = await postTo<{ entries: CueHit[] }>(
     '/delivery/cue',
     { namespace, path: filePath },
-    {
-      baseUrl: daemonBaseUrl(env),
-      timeoutMs: options.timeoutMs,
-      fetchImpl: options.fetchImpl,
-    }
+    env,
+    options
   )
   if (!found || found.entries.length === 0) return ''
 
@@ -120,13 +200,170 @@ async function renderCue(input: HookInput, options: HookOptions): Promise<string
   return formatForHost(options.host, 'pre-tool-use', renderCueText(hits))
 }
 
+/** pre-compact: checkpoint every open task and queue consolidation, then say nothing at all */
+async function renderPreCompact(input: HookInput, options: HookOptions): Promise<string> {
+  const env = options.env ?? process.env
+  await postTo(
+    '/delivery/task-checkpoint',
+    { namespace: namespaceFor(input, env), session_id: input.session_id, reason: input.trigger },
+    env,
+    options
+  )
+  return ''
+}
+
+async function renderPostCompact(input: HookInput, options: HookOptions): Promise<string> {
+  const briefs = await fetchBriefs(input, options, {
+    for: 'session',
+    budgetChars: POST_COMPACT_BRIEF_CHARS,
+    limit: 1,
+  })
+  const text = briefText(briefs)
+  return text ? formatForHost(options.host, 'post-compact', text) : ''
+}
+
+async function renderSubagentStart(input: HookInput, options: HookOptions): Promise<string> {
+  const briefs = await fetchBriefs(input, options, {
+    for: 'subagent',
+    budgetChars: SUBAGENT_BRIEF_CHARS,
+    limit: 1,
+  })
+  const text = briefText(briefs)
+  return text ? formatForHost(options.host, 'subagent-start', text) : ''
+}
+
+/** subagent-stop: whatever the subagent returned becomes a progress note on the parent task */
+async function renderSubagentStop(input: HookInput, options: HookOptions): Promise<string> {
+  const env = options.env ?? process.env
+  const text = subagentSummary(input)
+  if (!text) return ''
+  await postTo(
+    '/delivery/task-progress',
+    {
+      namespace: namespaceFor(input, env),
+      session_id: input.session_id,
+      text,
+      author: input.agent_type ?? input.agent_id ?? 'subagent',
+    },
+    env,
+    options
+  )
+  return ''
+}
+
+/**
+ * session-end: close the namespace's current session and queue its consolidation.
+ * the host's own session id is not an engram session id, so it is not sent — the daemon
+ * resolves the session for the namespace it was told about.
+ */
+async function renderSessionEnd(input: HookInput, options: HookOptions): Promise<string> {
+  const env = options.env ?? process.env
+  await postTo(
+    '/delivery/session-end',
+    { namespace: namespaceFor(input, env), summary: input.reason },
+    env,
+    options
+  )
+  return ''
+}
+
+function readTail(path: string, maxBytes: number): string {
+  const size = statSync(path).size
+  const length = Math.min(size, maxBytes)
+  if (length <= 0) return ''
+  const fd = openSync(path, 'r')
+  try {
+    const buffer = Buffer.alloc(length)
+    readSync(fd, buffer, 0, length, size - length)
+    return buffer.toString('utf8')
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .filter(isRecord)
+    .filter((part) => part.type === 'text' && typeof part.text === 'string')
+    .map((part) => part.text as string)
+    .join('\n')
+    .trim()
+}
+
+function assistantText(entry: unknown): string {
+  if (!isRecord(entry)) return ''
+  const message = isRecord(entry.message) ? entry.message : entry
+  if (message.role !== 'assistant') return ''
+  return textOf(message.content)
+}
+
+/** the last assistant message in a jsonl transcript; a line that does not parse is skipped */
+export function lastAssistantText(path: string): string {
+  let tail: string
+  try {
+    tail = readTail(path, TRANSCRIPT_TAIL_BYTES)
+  } catch {
+    return ''
+  }
+  const lines = tail.split('\n')
+  for (let index = lines.length - 1; index >= 0; index--) {
+    const line = lines[index].trim()
+    if (!line.startsWith('{')) continue
+    let parsed: unknown
+    try {
+      parsed = JSON.parse(line)
+    } catch {
+      continue
+    }
+    const text = assistantText(parsed)
+    if (text) return text
+  }
+  return ''
+}
+
+/** the host either hands over the summary directly or names the transcript to read it from */
+export function subagentSummary(
+  input: HookInput,
+  maxChars: number = SUBAGENT_SUMMARY_CHARS
+): string {
+  const direct = [input.last_assistant_message, input.summary].find(
+    (value) => typeof value === 'string' && value.trim().length > 0
+  )
+  const raw = direct ?? lastAssistantText(input.agent_transcript_path ?? input.transcript_path ?? '')
+  const flat = raw.replace(/\s+/g, ' ').trim()
+  if (!flat) return ''
+  return flat.length > maxChars ? `${flat.slice(0, maxChars - 1)}…` : flat
+}
+
 export async function renderHook(
   event: HookEvent,
   input: HookInput,
   options: HookOptions = {}
 ): Promise<string> {
-  if (event === 'pre-tool-use') return renderCue(input, options)
-  return renderSessionStart(input, options)
+  switch (event) {
+    case 'pre-tool-use':
+      return renderCue(input, options)
+    case 'session-start':
+      return renderSessionStart(input, options)
+    case 'pre-compact':
+      return renderPreCompact(input, options)
+    case 'post-compact':
+      return renderPostCompact(input, options)
+    case 'subagent-start':
+      return renderSubagentStart(input, options)
+    case 'subagent-stop':
+      return renderSubagentStop(input, options)
+    case 'session-end':
+      return renderSessionEnd(input, options)
+    default:
+      return ''
+  }
 }
 
 /** a host payload; unreadable json is "no payload", never an error */

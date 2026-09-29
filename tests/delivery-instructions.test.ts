@@ -40,12 +40,16 @@ describe('MCP initialize instructions', () => {
     expect(result?.instructions).toContain('store_memory')
   })
 
-  it('leaves the rest of the initialize result as it was', async () => {
+  it('echoes the requested legacy version and advertises the non-tool surfaces', async () => {
     const { result, error } = await initialize()
     expect(error).toBeUndefined()
     expect(result?.protocolVersion).toBe('2024-11-05')
     expect(result?.serverInfo?.name).toBe('engram')
-    expect(result?.capabilities).toEqual({ tools: {} })
+    expect(result?.capabilities).toEqual({
+      tools: {},
+      resources: { listChanged: false, subscribe: false },
+      prompts: { listChanged: false },
+    })
   })
 
   it('keeps the payload small enough to sit in a system prompt', () => {
