@@ -1,4 +1,5 @@
 import { PROTOCOL_SLIM } from '../delivery/protocol.js'
+import { withRequest } from '../memory/access.js'
 import { logger } from '../utils/logger.js'
 import { handleTool, type RequestContext } from './handlers.js'
 import { getPrompt, listPrompts } from './prompts.js'
@@ -137,7 +138,9 @@ export async function dispatchRpc(body: unknown, options: DispatchOptions = {}):
     if (rejected) return rejected
   }
 
-  return serve(method, params, id, meta.modern, options)
+  // the credential rides the whole dispatch, so resources and prompts read as the same
+  // caller a tools/call does
+  return withRequest(options.ctx?.caller, method, () => serve(method, params, id, meta.modern, options))
 }
 
 async function serve(

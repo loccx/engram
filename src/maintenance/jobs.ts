@@ -1,7 +1,7 @@
 // durable maintenance job queue (schema in migration 009). handlers are
 // shadow-only — inspect state, write a summary into the job row — apart from the
 // sanctioned writes: nav digests and navtree consolidation (namespace_nodes
-// only), promote, prune and retention.
+// only), promote, prune, retention and the episode expiry sweep.
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { logger } from '../utils/logger.js'
@@ -13,6 +13,13 @@ import { runDuplicatePrune } from './prune.js'
 import { runRetention } from './retention.js'
 import { requestMaintenanceDrain } from './scheduler.js'
 import { reembedStaleEpisodes } from '../db/workers/reembed.js'
+import {
+  countSessionRetentionEpisodes,
+  episodeSweepTargetKey,
+  nextEpisodeSweepPage,
+  sweepExpiredEpisodes,
+  EPISODE_SWEEP_TARGET,
+} from './episode-retention.js'
 import { MODEL_ID } from '../embeddings/pipeline.js'
 
 export type MaintenanceJobType =
@@ -24,6 +31,7 @@ export type MaintenanceJobType =
   | 'prune'
   | 'retention'
   | 'reembed_episodes'
+  | 'episodes_expired'
 export type MaintenanceStatus = 'queued' | 'running' | 'done' | 'failed' | 'dead'
 
 /** one job turn embeds at most this many episodes, one call each, so a lease is safe */
@@ -400,13 +408,42 @@ async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise
         duration_ms: stats.durationMs,
       }
     }
+    case 'episodes_expired': {
+      // the sanctioned writer for the evidence tier: an expired row is already hidden
+      // from reads, so removing it changes no answer, only the disk it holds
+      const report = sweepExpiredEpisodes(db)
+      if (report.truncated) {
+        enqueueMaintenanceJob(db, {
+          jobType: 'episodes_expired',
+          targetKey: episodeSweepTargetKey(nextEpisodeSweepPage(job.target_key)),
+          source: 'episodes_expired',
+        })
+      }
+      if (report.episodes > 0) {
+        logger.info(
+          { episodes: report.episodes, vectors: report.vectors, links: report.links },
+          'maintenance: reclaimed expired episodes'
+        )
+      }
+      return {
+        shadow: false,
+        episodes_expired: true,
+        target: job.target_key,
+        episodes: report.episodes,
+        vectors: report.vectors,
+        links: report.links,
+        fts: report.fts,
+        truncated: report.truncated,
+        limit: report.limit,
+      }
+    }
     case 'prune': {
       // idempotent: an archived row leaves the scan, so a retry finishes the work
       const target = job.target_key.startsWith('prune:')
         ? job.target_key.slice('prune:'.length)
         : job.target_key
       const namespace = target === '*' || target === '' ? undefined : target
-      const report = runDuplicatePrune(db, namespace ? { namespace } : {})
+      const report = runDuplicatePrune(db, namespace ? { namespace, jobId: job.id } : { jobId: job.id })
       return {
         shadow: false,
         prune: true,
@@ -419,6 +456,7 @@ async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise
         archived: report.archived,
         links_repointed: report.links_repointed,
         links_removed: report.links_removed,
+        episodes_repointed: report.episodes_repointed,
         threshold: report.threshold,
         prefix_chars: report.prefix_chars,
         duration_ms: report.duration_ms,
@@ -437,7 +475,7 @@ async function shadowRun(db: Database.Database, job: MaintenanceJobRow): Promise
         ? job.target_key.slice('retention:'.length)
         : job.target_key
       const namespace = target === '*' || target === 'global' || target === '' ? undefined : target
-      const report = runRetention(db, namespace ? { namespace } : {})
+      const report = runRetention(db, namespace ? { namespace, jobId: job.id } : { jobId: job.id })
       if (report.archived > 0) {
         logger.info(
           { archived: report.archived, corpus: report.corpus_size, namespace: namespace ?? null },
@@ -545,6 +583,7 @@ export function getMaintenanceStatus(
       'prune',
       'retention',
       'reembed_episodes',
+      'episodes_expired',
     ].map((t) => [t, 0])
   ) as Record<MaintenanceJobType, number>
   for (const row of db
@@ -652,6 +691,18 @@ export function enqueueEndSessionMaintenance(
       })
       if (!promote.coalesced) enqueued++
     }
+
+    // the session ending is what expires the evidence ingested under its own id, so
+    // sweep now; a session holding none adds no job
+    if (countSessionRetentionEpisodes(db, sessionId) > 0) {
+      const sweep = enqueueMaintenanceJob(db, {
+        jobType: 'episodes_expired',
+        targetKey: EPISODE_SWEEP_TARGET,
+        source: 'end_session',
+        now,
+      })
+      if (!sweep.coalesced) enqueued++
+    }
     // fire and forget, and armed by the daemon only, so a library/test caller
     // keeps enqueue deterministic
     if (enqueued > 0) requestMaintenanceDrain(db)
@@ -705,6 +756,14 @@ export function enqueueNamespaceMaintenance(db: Database.Database, now?: number)
   enqueueMaintenanceJob(db, {
     jobType: 'retention',
     targetKey: 'retention:global',
+    source: 'startup',
+    now,
+  })
+
+  // the evidence tier's eviction, same shape: one coalesced global job per boot
+  enqueueMaintenanceJob(db, {
+    jobType: 'episodes_expired',
+    targetKey: EPISODE_SWEEP_TARGET,
     source: 'startup',
     now,
   })

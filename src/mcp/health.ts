@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { ancestorPaths, ensureNode, getNode } from '../namespace/tree.js'
 import { WEAK_RESULT_THRESHOLD } from '../metrics/retrieval-log.js'
+import { visibilityClause } from '../memory/access.js'
 
 // agent-facing health + miss explanation: read-only and bounded for the roster path
 
@@ -46,14 +47,17 @@ function descendantPatterns(ns: string): [string, string] {
   return [`${escaped}/%`, `${escaped}//%`]
 }
 
-function subtree(ns: string): { clause: string; values: string[] } {
+function subtree(ns: string): { clause: string; values: unknown[] } {
   const patterns = descendantPatterns(ns)
+  // the health numbers count rows, so they count the rows this caller may read
+  const visibility = visibilityClause('m')
   return {
     clause:
       "(COALESCE(m.namespace, m.project_path) = ?" +
       " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'" +
-      " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\')",
-    values: [ns, ...patterns],
+      " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\')" +
+      ` AND ${visibility.sql}`,
+    values: [ns, ...patterns, ...visibility.params],
   }
 }
 

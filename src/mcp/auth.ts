@@ -82,16 +82,29 @@ export interface AuthDecision {
   message: string
 }
 
+/**
+ * `accept` is the store's own credential check (a live principal token); a presented
+ * token that it accepts is allowed even with no install token configured
+ */
 export function authorizeRequest(
   header: string | undefined,
-  env: NodeJS.ProcessEnv = process.env
+  env: NodeJS.ProcessEnv = process.env,
+  accept?: (presented: string) => boolean
 ): AuthDecision {
   const lookup = loadAuthToken(env)
+  const presented = bearerToken(header)
+  if (presented !== null && accept?.(presented) === true) {
+    return { allowed: true, status: 401, message: '' }
+  }
   if (lookup.error) return { allowed: false, status: 500, message: lookup.error }
   if (!lookup.token) {
+    // a presented credential the store rejected is an auth failure, not a misconfigured
+    // install; without one, a non-loopback bind with no token at all still is
+    if (accept && presented !== null) {
+      return { allowed: false, status: 401, message: 'unauthorized: bearer token rejected' }
+    }
     return { allowed: false, status: 500, message: 'no bearer token configured; run `engram auth token`' }
   }
-  const presented = bearerToken(header)
   if (presented === null) {
     return { allowed: false, status: 401, message: 'unauthorized: a bearer token is required' }
   }

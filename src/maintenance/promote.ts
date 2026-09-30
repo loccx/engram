@@ -6,6 +6,7 @@ import { children, parseNamespacePath } from '../namespace/tree.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
 import { logger } from '../utils/logger.js'
 import { normalizeIdentifiers } from '../db/lexical-index.js'
+import { inheritMemoryEpisodes } from '../memory/episodes.js'
 
 /**
  * pattern promotion: distills a synthetic leaf scope's repeated memories into one
@@ -216,6 +217,9 @@ export async function promoteScopePatterns(
     }
     const patternId = insertPattern(db, parentPath, token, distilled)
     linkSources(db, patternId, memories)
+    // the distilled pattern stands in for memories that may each cite evidence, so it
+    // cites the union of theirs: a reader of the pattern can still reach the raw turns
+    inheritMemoryEpisodes(db, patternId, memories.map((memory) => memory.id))
     report.promoted.push(token)
   }
 

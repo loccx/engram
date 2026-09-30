@@ -135,6 +135,7 @@ describe('migration 019', () => {
       'embed_state',
       'embedding_model',
       'embedding_dim',
+      'owner_principal',
     ])
 
     const memoryColumns = (
@@ -822,9 +823,10 @@ describe('ingest_episodes tool', () => {
 
     const replay = JSON.parse(
       (
+        // the same envelope, instance included: the identity key is tenant-scoped
         await handleTool('ingest_episodes', {
           project_path: NS,
-          source: { system: 'claude-code' },
+          source: { system: 'claude-code', instance: 'host:alice' },
           episodes: [{ external_id: 'session:msg:42', content: 'user: what is the deploy window?' }],
         })
       ).content[0].text

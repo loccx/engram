@@ -15,6 +15,7 @@ import type {
   HistoryLink,
 } from './types.js'
 import { rowToMemory, type MemoryRow } from './row.js'
+import { currentCaller, visibilityClause, visibilityOf, type CallerScope } from './access.js'
 import {
   getEmbedding,
   LINK_DISTANCE_THRESHOLD,
@@ -176,8 +177,8 @@ export class MemoryStore {
     // after-insert trigger used a per-character recursive cte and cost far more of
     // an ordinary write. the trigger now only copies the column into memories_ident_fts.
     this.stmtInsertMemory = this.db.prepare(
-      `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, valid_from, procedure_meta, importance_source, origin, ident_text, state_key)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO memories (id, session_id, project_path, namespace, content, type, importance, tags, created_at, valid_from, procedure_meta, importance_source, origin, ident_text, state_key, owner_principal, visibility)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     this.stmtInsertEntity = this.db.prepare(
       'INSERT OR IGNORE INTO memory_entities (memory_id, entity_text, entity_type, created_at, ident_text) VALUES (?, ?, ?, ?, ?)'
@@ -317,6 +318,7 @@ export class MemoryStore {
       }
     }
 
+    const caller = currentCaller()
     this.stmtInsertMemory.run(
       id,
       input.session_id,
@@ -333,7 +335,9 @@ export class MemoryStore {
       input.origin ?? 'mcp',
       // exactly the expression the 012 trigger used, so the indexed text is unchanged
       normalizeIdentifiers(`${input.content} ${tags}`),
-      stateKey
+      stateKey,
+      caller.localOwner ? null : caller.principalId,
+      visibilityOf(caller, input.visibility)
     )
 
     this.recordEvent({
@@ -515,10 +519,11 @@ export class MemoryStore {
            AND COALESCE(namespace, project_path) = ?
            AND type = ?
            AND ${notSupersededClause('memories.id')}
+           AND ${visibilityClause('memories').sql}
          ORDER BY created_at ASC, id ASC
          LIMIT 1`
       )
-      .get(content, namespace, type) as MemoryRow | undefined
+      .get(content, namespace, type, ...visibilityClause('memories').params) as MemoryRow | undefined
     return row ?? null
   }
 
@@ -533,9 +538,10 @@ export class MemoryStore {
                 m.pinned, m.archived_at,
                 COALESCE(m.namespace, m.project_path) AS namespace
          FROM (SELECT rowid, distance FROM memory_vectors WHERE embedding MATCH ? LIMIT 20) knn
-         JOIN memories m ON m.vec_rowid = knn.rowid`
+         JOIN memories m ON m.vec_rowid = knn.rowid
+         WHERE ${visibilityClause('m').sql}`
       )
-      .all(Buffer.from(embedding.buffer)) as KnnNeighbour[]
+      .all(Buffer.from(embedding.buffer), ...visibilityClause('m').params) as KnnNeighbour[]
   }
 
   /**
@@ -833,6 +839,9 @@ export class MemoryStore {
       conditions.push('COALESCE(namespace, project_path) = ?')
       values.push(filters.project_path)
     }
+    const visibility = visibilityClause('memories', filters.caller)
+    conditions.push(visibility.sql)
+    values.push(...visibility.params)
     if (filters.type) {
       conditions.push('type = ?')
       values.push(filters.type)
@@ -925,17 +934,20 @@ export class MemoryStore {
   }
 
   update(id: string, patch: UpdateMemoryPatch): boolean {
-    const before = this.getById(id)
+    const before = this.db.prepare('SELECT * FROM memories WHERE id = ?').get(id) as
+      | MemoryRow
+      | undefined
     if (!before) return false
+    const beforeMemory = rowToMemory(before)
     const sets: string[] = []
     const values: unknown[] = []
     const fieldKeys: string[] = []
-    if (patch.type !== undefined && patch.type !== before.type) {
+    if (patch.type !== undefined && patch.type !== beforeMemory.type) {
       sets.push('type = ?')
       values.push(patch.type)
       fieldKeys.push('type')
     }
-    if (patch.importance !== undefined && patch.importance !== before.importance) {
+    if (patch.importance !== undefined && patch.importance !== beforeMemory.importance) {
       sets.push('importance = ?', "importance_source = 'user'")
       values.push(patch.importance)
       fieldKeys.push('importance')
@@ -957,6 +969,11 @@ export class MemoryStore {
       sets.push('valid_until = ?')
       values.push(patch.valid_until)
       fieldKeys.push('valid_until')
+    }
+    if (patch.visibility !== undefined && patch.visibility !== (before.visibility ?? null)) {
+      sets.push('visibility = ?')
+      values.push(patch.visibility)
+      fieldKeys.push('visibility')
     }
     if (sets.length === 0) return false
     values.push(id)
@@ -989,7 +1006,7 @@ export class MemoryStore {
     entityText: string,
     projectPath?: string,
     limit: number = 10,
-    options: { include_superseded?: boolean; as_of?: number } = {}
+    options: { include_superseded?: boolean; as_of?: number; caller?: CallerScope } = {}
   ): Memory[] {
     const conditions = ['me.entity_text = ? COLLATE NOCASE']
     const values: unknown[] = [entityText]
@@ -1009,6 +1026,9 @@ export class MemoryStore {
       conditions.push('COALESCE(m.namespace, m.project_path) = ?')
       values.push(projectPath)
     }
+    const visibility = visibilityClause('m', options.caller)
+    conditions.push(visibility.sql)
+    values.push(...visibility.params)
     values.push(limit)
     const rows = this.db
       .prepare(
@@ -1027,7 +1047,7 @@ export class MemoryStore {
   getLinked(
     id: string,
     limit: number = 10,
-    options: { include_superseded?: boolean; as_of?: number } = {}
+    options: { include_superseded?: boolean; as_of?: number; caller?: CallerScope } = {}
   ): Array<Memory & { similarity: number; link_type: LinkType }> {
     const params: unknown[] = [id]
     const timeFilter =
@@ -1042,6 +1062,7 @@ export class MemoryStore {
     if (options.as_of !== undefined && !options.include_superseded) {
       params.push(options.as_of)
     }
+    params.push(...visibilityClause('m', options.caller).params)
     params.push(limit)
 
     const rows = this.db
@@ -1050,6 +1071,7 @@ export class MemoryStore {
          FROM memory_links ml
          JOIN memories m ON m.id = ml.target_id
          WHERE ml.source_id = ?${timeFilter}${supersededFilter}
+           AND ${visibilityClause('m', options.caller).sql}
          ORDER BY ml.similarity DESC
          LIMIT ?`
       )
@@ -1135,8 +1157,8 @@ export class MemoryStore {
           `INSERT INTO memories
              (id, session_id, project_path, namespace, content, type, importance, tags,
               created_at, valid_from, procedure_meta, importance_source, pinned, shareable, origin,
-              ident_text, state_key)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+              ident_text, state_key, owner_principal, visibility)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
         )
         .run(
           newId,
@@ -1155,7 +1177,10 @@ export class MemoryStore {
           input.shareable === true ? 1 : 0,
           origin,
           normalizeIdentifiers(`${input.content} ${JSON.stringify(tags)}`),
-          stateKey
+          stateKey,
+          // a revision is the same writer's row, so it keeps the predecessor's ownership
+          prevRow.owner_principal ?? null,
+          prevRow.visibility ?? null
         )
 
       // the predecessor keeps its own rows; this is append-only

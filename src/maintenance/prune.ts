@@ -1,6 +1,13 @@
 import type Database from 'better-sqlite3'
 import { notSupersededClause } from '../contradictions/supersession.js'
+import { computeTier, type Tier } from '../memory/enrichment.js'
+import {
+  recordEvictionEvents,
+  pruneEvictionEvents,
+  type EvictionEventInput,
+} from '../metrics/eviction-log.js'
 import { logger } from '../utils/logger.js'
+import { inheritMemoryEpisodes } from '../memory/episodes.js'
 
 // archives near-identical duplicate memories, all but one member of each family.
 // grouping is lexical and deterministic: bucket by (namespace, type, text prefix),
@@ -10,6 +17,11 @@ import { logger } from '../utils/logger.js'
 export const PRUNE_DEFAULT_SIMILARITY = 0.95
 export const PRUNE_DEFAULT_PREFIX_CHARS = 48
 export const PRUNE_DEFAULT_SCAN_LIMIT = 20000
+
+/** why a redundant family member is retired */
+export const PRUNE_ARCHIVE_REASON = 'duplicate_family'
+/** the one member the family keeps */
+export const PRUNE_KEEPER_REASON = 'family_keeper'
 
 export interface PruneOptions {
   namespace?: string
@@ -61,6 +73,8 @@ export interface PruneReport extends PrunePlan {
   archived: number
   links_repointed: number
   links_removed: number
+  /** evidence links a keeper inherited from the duplicate it absorbed */
+  episodes_repointed: number
   duration_ms: number
 }
 
@@ -289,11 +303,23 @@ export function planDuplicatePrune(db: Database.Database, opts: PruneOptions = {
 interface ArchivePair {
   redundantId: string
   keeperId: string
+  namespace: string
+}
+
+interface MemorySignalsRow {
+  archived_at: number | null
+  importance: number
+  access_count: number
+  last_accessed: number | null
+  created_at: number
+  pinned: number
 }
 
 export interface ApplyPruneOptions extends PruneOptions {
   /** cap on members archived in one run (lease-safe increment) */
   maxArchive?: number
+  /** maintenance job this run belongs to, recorded on every event */
+  jobId?: number
 }
 
 // one transaction per member, so an interrupted run leaves a resumable state
@@ -301,14 +327,20 @@ export function applyDuplicatePrune(
   db: Database.Database,
   plan: PrunePlan,
   opts: ApplyPruneOptions = {}
-): { archived: number; links_repointed: number; links_removed: number } {
+): {
+  archived: number
+  links_repointed: number
+  links_removed: number
+  episodes_repointed: number
+} {
   const now = opts.now ?? Date.now()
   const maxArchive = opts.maxArchive ?? 5000
+  const jobId = opts.jobId ?? null
   const pairs: ArchivePair[] = []
   for (const group of plan.groups) {
     for (const redundantId of group.redundant_ids) {
       if (redundantId === group.keeper_id) continue
-      pairs.push({ redundantId, keeperId: group.keeper_id })
+      pairs.push({ redundantId, keeperId: group.keeper_id, namespace: group.namespace })
     }
   }
 
@@ -332,22 +364,51 @@ export function applyDuplicatePrune(
   )
   const deleteLinks = db.prepare('DELETE FROM memory_links WHERE source_id = ? OR target_id = ?')
   const archive = db.prepare('UPDATE memories SET archived_at = ? WHERE id = ? AND archived_at IS NULL')
+  const readSignals = db.prepare(
+    `SELECT archived_at, importance, access_count, last_accessed, created_at, pinned
+     FROM memories WHERE id = ?`
+  )
+  const tierOf = (row: MemorySignalsRow): Tier =>
+    computeTier(
+      {
+        importance: row.importance,
+        access_count: row.access_count,
+        last_accessed: row.last_accessed,
+        created_at: row.created_at,
+        pinned: row.pinned,
+      },
+      now
+    )
 
   let archived = 0
   let repointed = 0
   let removed = 0
+  let episodesRepointed = 0
+  const events: EvictionEventInput[] = []
+  const keeperNamespaces = new Map<string, string>()
 
   const applyOne = db.transaction((pair: ArchivePair) => {
-    const stillOpen = db
-      .prepare('SELECT archived_at FROM memories WHERE id = ?')
-      .get(pair.redundantId) as { archived_at: number | null } | undefined
+    const stillOpen = readSignals.get(pair.redundantId) as MemorySignalsRow | undefined
     if (!stillOpen || stillOpen.archived_at !== null) return
     const info = archive.run(now, pair.redundantId)
     if (info.changes === 0) return
     archived++
+    events.push({
+      ts: now,
+      namespace: pair.namespace,
+      memoryId: pair.redundantId,
+      action: 'pruned',
+      reason: PRUNE_ARCHIVE_REASON,
+      tier: tierOf(stillOpen),
+      jobId,
+    })
+    keeperNamespaces.set(pair.keeperId, pair.namespace)
     repointed += insertLink.run(pair.keeperId, pair.redundantId, pair.keeperId).changes
     repointed += insertLinkInbound.run(pair.keeperId, pair.redundantId, pair.keeperId).changes
     removed += deleteLinks.run(pair.redundantId, pair.redundantId).changes
+    // the duplicate keeps its own links: it is archived, not deleted, so the keeper
+    // gains the union of the evidence instead of taking it away
+    episodesRepointed += inheritMemoryEpisodes(db, pair.keeperId, [pair.redundantId], now)
   })
 
   for (const pair of pairs) {
@@ -359,7 +420,30 @@ export function applyDuplicatePrune(
     }
   }
 
-  return { archived, links_repointed: repointed, links_removed: removed }
+  // one kept event per keeper that actually kept something this run
+  for (const [keeperId, namespace] of keeperNamespaces) {
+    const keeper = readSignals.get(keeperId) as MemorySignalsRow | undefined
+    if (!keeper) continue
+    events.push({
+      ts: now,
+      namespace,
+      memoryId: keeperId,
+      action: 'kept',
+      reason: PRUNE_KEEPER_REASON,
+      tier: tierOf(keeper),
+      jobId,
+    })
+  }
+  recordEvictionEvents(db, events)
+  // the pass that writes the events is also the one that bounds them
+  pruneEvictionEvents(db, { now })
+
+  return {
+    archived,
+    links_repointed: repointed,
+    links_removed: removed,
+    episodes_repointed: episodesRepointed,
+  }
 }
 
 // replanned every run: archived rows leave the scan, so a retry rediscovers the rest

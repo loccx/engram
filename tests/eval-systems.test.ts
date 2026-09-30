@@ -181,6 +181,9 @@ describe('systems registry', () => {
     expect(systemNames()).toEqual([
       'engram',
       'engram-assemble',
+      'engram-qa',
+      'engram-qa-evidence',
+      'engram-qa-evidence-wide',
       'engram-turns',
       'engram-turns-w3',
       'engram-hybrid',

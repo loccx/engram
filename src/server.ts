@@ -2,6 +2,8 @@ import { Hono } from 'hono'
 import { cors } from 'hono/cors'
 import { dispatchRpc, type HttpRequestHeaders } from './mcp/dispatch.js'
 import { authorizeRequest } from './mcp/auth.js'
+import { livePrincipalForToken, resolveCredential } from './mcp/principals.js'
+import { authorizeNamespace, withRequest, type CallerScope } from './memory/access.js'
 import { getDatabase } from './db/init.js'
 import { cueHits } from './delivery/cue.js'
 import { rosterHits } from './delivery/roster.js'
@@ -77,12 +79,46 @@ export function createServer(options: ServerOptions = {}): Hono {
   app.use('*', cors({ origin: (origin) => resolveCorsOrigin(origin) }))
 
   app.use('*', async (c, next) => {
-    if (!options.requireAuth) return next()
-    const decision = authorizeRequest(c.req.header('authorization'))
-    if (decision.allowed) return next()
-    c.header('www-authenticate', 'Bearer realm="engram"')
-    return c.json({ error: decision.message }, decision.status)
+    const db = getDatabase().db
+    const header = c.req.header('authorization')
+    const decision = options.requireAuth
+      ? authorizeRequest(header, process.env, (presented) =>
+          livePrincipalForToken(db, presented) !== null
+        )
+      : { allowed: true, status: 401 as const, message: '' }
+    if (!decision.allowed) {
+      c.header('www-authenticate', 'Bearer realm="engram"')
+      return c.json({ error: decision.message }, decision.status)
+    }
+    // no route runs without a resolved caller: once a principal exists, a request that
+    // presents nothing is refused even on a loopback bind rather than served as the owner
+    if (!resolveCredential(db, header)) {
+      return c.json(
+        {
+          error:
+            header === undefined
+              ? 'unauthorized: a bearer token is required'
+              : 'unauthorized: bearer token rejected',
+        },
+        401
+      )
+    }
+    return next()
   })
+
+  /**
+   * the credential on the request decides which principal a route runs as. there is no
+   * fallback here: the middleware refuses before a route body runs, and a null means the
+   * route refuses rather than acting as an owner nobody authenticated as.
+   */
+  const callerOf = (header: string | undefined): CallerScope | null =>
+    resolveCredential(getDatabase().db, header)?.caller ?? null
+
+  const refuseNamespace = (
+    caller: CallerScope,
+    namespace: string,
+    verb: 'read' | 'write'
+  ): string | null => authorizeNamespace(caller, namespace, verb)
 
   app.get('/health', (c) => {
     try {
@@ -122,7 +158,18 @@ export function createServer(options: ServerOptions = {}): Hono {
       const namespace = c.req.query('namespace') || undefined
       const sinceStr = c.req.query('since')
       const since = sinceStr ? parseInt(sinceStr, 10) : undefined
-      return c.json(tracker.getStats({ namespace, since }))
+      const caller = callerOf(c.req.header('authorization'))
+      if (!caller) return c.json({ error: 'unauthorized' }, 401)
+      // store-wide counters are the local owner's; a granted caller reads its own namespace
+      if (!namespace) {
+        if (!caller.localOwner) {
+          return c.json({ error: 'metrics without a namespace are the local owner’s' }, 403)
+        }
+      } else {
+        const refusal = refuseNamespace(caller, namespace, 'read')
+        if (refusal) return c.json({ error: refusal }, 403)
+      }
+      return c.json(withRequest(caller, 'metrics', () => tracker.getStats({ namespace, since })))
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       return c.json({ error: message }, 500)
@@ -135,8 +182,14 @@ export function createServer(options: ServerOptions = {}): Hono {
     const body = await deliveryBody(c.req)
     const namespace = body ? stringField(body, 'namespace') : ''
     if (!namespace) return c.json({ error: 'namespace is required' }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'read')
+    if (refusal) return c.json({ error: refusal }, 403)
     try {
-      return c.json({ entries: rosterHits(getDatabase().db, namespace) })
+      return c.json({
+        entries: withRequest(caller, 'delivery/roster', () => rosterHits(getDatabase().db, namespace)),
+      })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       logger.error({ error: message, namespace }, 'delivery roster failed')
@@ -149,8 +202,14 @@ export function createServer(options: ServerOptions = {}): Hono {
     const namespace = body ? stringField(body, 'namespace') : ''
     const path = body ? stringField(body, 'path') : ''
     if (!namespace || !path) return c.json({ error: 'namespace and path are required' }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'read')
+    if (refusal) return c.json({ error: refusal }, 403)
     try {
-      return c.json({ entries: cueHits(getDatabase().db, namespace, path) })
+      return c.json({
+        entries: withRequest(caller, 'delivery/cue', () => cueHits(getDatabase().db, namespace, path)),
+      })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       logger.error({ error: message, namespace, path }, 'delivery cue failed')
@@ -163,6 +222,10 @@ export function createServer(options: ServerOptions = {}): Hono {
     const body = await deliveryBody(c.req)
     const namespace = body ? stringField(body, 'namespace') : ''
     if (!namespace) return c.json({ error: 'namespace is required' }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'read')
+    if (refusal) return c.json({ error: refusal }, 403)
     try {
       const audience = briefAudience(body)
       const fallback =
@@ -172,13 +235,15 @@ export function createServer(options: ServerOptions = {}): Hono {
             ? POST_COMPACT_BRIEF_CHARS
             : DEFAULT_BRIEF_CHARS
       return c.json({
-        briefs: openTaskBriefs(getDatabase().db, {
-          namespace,
-          sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
-          limit: numberField(body, 'limit'),
-          budgetChars: numberField(body, 'budget_chars') ?? fallback,
-          for: audience,
-        }),
+        briefs: withRequest(caller, 'delivery/task-brief', () =>
+          openTaskBriefs(getDatabase().db, {
+            namespace,
+            sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
+            limit: numberField(body, 'limit'),
+            budgetChars: numberField(body, 'budget_chars') ?? fallback,
+            for: audience,
+          })
+        ),
       })
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -191,12 +256,18 @@ export function createServer(options: ServerOptions = {}): Hono {
     const body = await deliveryBody(c.req)
     const namespace = body ? stringField(body, 'namespace') : ''
     if (!namespace) return c.json({ error: 'namespace is required' }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'write')
+    if (refusal) return c.json({ error: refusal }, 403)
     try {
       return c.json(
-        checkpointOpenTasks(getDatabase().db, namespace, {
-          sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
-          reason: body ? stringField(body, 'reason') || undefined : undefined,
-        })
+        withRequest(caller, 'delivery/task-checkpoint', () =>
+          checkpointOpenTasks(getDatabase().db, namespace, {
+            sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
+            reason: body ? stringField(body, 'reason') || undefined : undefined,
+          })
+        )
       )
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -210,15 +281,21 @@ export function createServer(options: ServerOptions = {}): Hono {
     const namespace = body ? stringField(body, 'namespace') : ''
     const text = body ? stringField(body, 'text') : ''
     if (!namespace || !text) return c.json({ error: 'namespace and text are required' }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'write')
+    if (refusal) return c.json({ error: refusal }, 403)
     try {
       return c.json(
-        recordTaskProgress(getDatabase().db, {
-          namespace,
-          taskId: body ? stringField(body, 'task_id') || undefined : undefined,
-          sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
-          text,
-          author: body ? stringField(body, 'author') || undefined : undefined,
-        })
+        withRequest(caller, 'delivery/task-progress', () =>
+          recordTaskProgress(getDatabase().db, {
+            namespace,
+            taskId: body ? stringField(body, 'task_id') || undefined : undefined,
+            sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
+            text,
+            author: body ? stringField(body, 'author') || undefined : undefined,
+          })
+        )
       )
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -231,13 +308,19 @@ export function createServer(options: ServerOptions = {}): Hono {
     const body = await deliveryBody(c.req)
     const namespace = body ? stringField(body, 'namespace') : ''
     if (!namespace) return c.json({ error: 'namespace is required' }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'write')
+    if (refusal) return c.json({ error: refusal }, 403)
     try {
       return c.json(
-        endWorkspaceSession(getDatabase().db, {
-          namespace,
-          sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
-          summary: body ? stringField(body, 'summary') || undefined : undefined,
-        })
+        withRequest(caller, 'delivery/session-end', () =>
+          endWorkspaceSession(getDatabase().db, {
+            namespace,
+            sessionId: body ? stringField(body, 'session_id') || undefined : undefined,
+            summary: body ? stringField(body, 'summary') || undefined : undefined,
+          })
+        )
       )
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
@@ -265,9 +348,14 @@ export function createServer(options: ServerOptions = {}): Hono {
       method: c.req.header('mcp-method'),
       name: c.req.header('mcp-name'),
     }
+    // the middleware already resolved (or refused) the credential, so the caller bound
+    // here is the one the request authenticated as
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
     const ctx = {
       urlProject: c.req.query('project') || undefined,
       urlNamespace: c.req.query('namespace') || undefined,
+      caller,
     }
 
     try {

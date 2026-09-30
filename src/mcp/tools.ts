@@ -25,6 +25,13 @@ const includeSupersededField = {
     'Include memories that have been superseded by newer contradicting memories. Default false: stale facts are hidden.',
 }
 
+const includeArchivedField = {
+  type: 'boolean',
+  default: false,
+  description:
+    'Include archived (cold-tier) memories: rows retired by prune or retention. Default false, and asking for one counts as a page fault — the eviction report in get_stats reports the rate.',
+}
+
 export const tools = [
   {
     name: 'store_memory',
@@ -79,6 +86,12 @@ export const tools = [
             steps: { type: 'array', items: { type: 'string' } },
             postconditions: { type: 'array', items: { type: 'string' } },
           },
+        },
+        visibility: {
+          type: 'string',
+          enum: ['personal', 'project', 'team', 'org'],
+          description:
+            'Who the row belongs to. personal (the default for a named principal) is served only to its writer; project, team and org are served to anyone holding read on the namespace. A single-user install stores no visibility, which is not personal.',
         },
       },
       required: ['content'],
@@ -169,9 +182,14 @@ export const tools = [
             retention: {
               type: 'string',
               enum: ['durable', 'session', 'ephemeral'],
-              description: 'How long it is kept (default durable)',
+              description:
+                'How long it is kept (default durable). durable: until delete_episodes removes it. ephemeral: with ttl_ms, hidden from reads at the expiry and reclaimed by the maintenance sweep. session: expired when the session that produced it ends — a sweep job runs at session end and at startup, and it removes an episode whose session_id names a session row this store closed; an episode whose session this store never saw is kept until a ttl or delete_episodes removes it. Deleting takes the row, its vectors, its lexical index rows and its memory_episodes citations.',
             },
-            ttl_ms: { type: 'number', description: 'With retention, an expiry in ms from now' },
+            ttl_ms: {
+              type: 'number',
+              description:
+                'With retention, an absolute expiry this many ms after ingest. A ttl row is hidden from reads once it passes and the sweep reclaims it.',
+            },
           },
           description: 'Permissions and retention for the whole batch',
         },
@@ -197,9 +215,52 @@ export const tools = [
     },
   },
   {
+    name: 'delete_episodes',
+    description:
+      'Permanently delete stored evidence. `namespace` is required and is the widest thing one call can match: without source, external_ids or before it removes every episode in that namespace (with subtree, in it and below it), and a call that would match the whole store is refused. Narrow with source (the source system), external_ids (that source\'s own ids) or before (occurred_at strictly before a unix ms; an episode with no occurred_at is never matched). Removes the rows, their vectors, their lexical index rows and every memory_episodes citation of them, and answers with the counts per table (episodes, links, vectors, fts). dry_run reports the same counts and deletes nothing. The maintenance sweep uses the same path for expired retention, so a row can also disappear without this call.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        namespace: namespaceField,
+        subtree: {
+          type: 'boolean',
+          default: false,
+          description: 'Also match the namespaces below this one. Default false: this namespace alone.',
+        },
+        source: {
+          type: 'string',
+          description: 'Only evidence from this source system, e.g. claude-code or codex',
+        },
+        external_ids: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Only these ids, as the source system gave them at ingest',
+        },
+        before: {
+          type: 'number',
+          description:
+            'Only evidence that occurred strictly before this unix ms. An episode ingested without occurred_at has no time to compare, so it is never matched by this field.',
+        },
+        dry_run: {
+          type: 'boolean',
+          default: false,
+          description: 'Report the counts per table and delete nothing',
+        },
+      },
+      required: ['namespace'],
+    },
+    annotations: {
+      title: 'Delete episodes',
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'search_memories',
     description:
-      'Hybrid full-text + semantic search. Combines FTS5 (lexical) and local vector embeddings via Reciprocal Rank Fusion, re-ranked by query archetype + Ebbinghaus decay. Hides superseded memories by default. Set use_reranker=true to refine the top window with a cross-encoder (requires ENGRAM_RERANKER_ENABLED=1; adds ~500-1000ms latency).',
+      'Hybrid full-text + semantic search. Combines FTS5 (lexical) and local vector embeddings via Reciprocal Rank Fusion, re-ranked by query archetype + Ebbinghaus decay. Hides superseded and archived memories by default. Set use_reranker=true to refine the top window with a cross-encoder (requires ENGRAM_RERANKER_ENABLED=1; adds ~500-1000ms latency).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -218,6 +279,7 @@ export const tools = [
             'Unix timestamp (ms). Historical view: returns facts valid at this exact time (valid_from <= as_of <= valid_until — both boundaries inclusive) with time-aware supersession, so facts superseded after as_of still appear. Prefer over the legacy `before` field.',
         },
         include_superseded: includeSupersededField,
+        include_archived: includeArchivedField,
         use_reranker: {
           type: 'boolean',
           description:
@@ -499,11 +561,12 @@ export const tools = [
   {
     name: 'get_memory',
     description:
-      'Fetch a single memory by ID with its full enriched payload (entities, links, importance signals).',
+      'Fetch a single memory by ID with its full enriched payload (entities, links, importance signals), plus `episodes`: the evidence it was distilled from, one entry per cited episode with id, source, external_id, occurred_at, uri and the span inside it. A memory that no distillation path derived from episodes carries an empty list. An archived row answers like a missing one unless include_archived=true.',
     inputSchema: {
       type: 'object',
       properties: {
         id: { type: 'string', description: 'Memory ID' },
+        include_archived: includeArchivedField,
         as_of: {
           type: 'number',
           description:
@@ -521,9 +584,28 @@ export const tools = [
     },
   },
   {
+    name: 'unarchive_memory',
+    description:
+      'Restore an archived (cold-tier) memory. Prune and retention only set archived_at, so this is the reversal and the row becomes visible to every ordinary read again. Counts as a page fault in the eviction report.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'Memory ID' },
+      },
+      required: ['id'],
+    },
+    annotations: {
+      title: 'Unarchive memory',
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'update_memory',
     description:
-      'Patch a memory in place. Supported fields: type, importance, tags, valid_until. Setting importance flips importance_source to "user" and prevents LLM rescoring.',
+      'Patch a memory in place. Supported fields: type, importance, tags, valid_until, visibility. Setting importance flips importance_source to "user" and prevents LLM rescoring.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -534,6 +616,12 @@ export const tools = [
         valid_until: {
           type: ['number', 'null'],
           description: 'Unix timestamp (ms) when this fact stops being valid. Pass null to clear.',
+        },
+        visibility: {
+          type: 'string',
+          enum: ['personal', 'project', 'team', 'org'],
+          description:
+            'Who the row belongs to: personal is served only to its writer, project/team/org to anyone holding read on the namespace. Use it to promote a private row once the caller decides it should be shared.',
         },
       },
       required: ['id'],
@@ -569,7 +657,7 @@ export const tools = [
   {
     name: 'get_stats',
     description:
-      'Usage statistics: search hit rate, tokens served, estimated context savings in USD, and the query-level retrieval ledger. `tokenizer` states which estimator produced the token counts (an exact tokenizer when one is importable, otherwise chars/4) and `estimated_context_savings.assumptions` states what the money figure assumes. Supports namespace and time-range filters. Use for cross-instance aggregation via install_id.',
+      'Usage statistics: search hit rate, tokens served, estimated context savings in USD, the query-level retrieval ledger, and the eviction report (`evictions`: archived/kept counts by action and reason, cold-tier faults, and the fault rate over the window). `tokenizer` states which estimator produced the token counts (an exact tokenizer when one is importable, otherwise chars/4) and `estimated_context_savings.assumptions` states what the money figure assumes. Supports namespace and time-range filters. Use for cross-instance aggregation via install_id.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -696,7 +784,7 @@ export const tools = [
   {
     name: 'get_memory_history',
     description:
-      'Audit a memory\'s whole supersession chain: versions oldest-first plus the supersedes links between them. This is the BROAD audit view (not recall): it spans ALL supersedes edges — manual revisions AND LLM-adjudicated contradictions, confidence-agnostic — so chain members can include unrelated adjudicated memories. Optional as_of filters the returned versions to facts valid at that time; the links list still shows every edge found.',
+      'Audit a memory\'s whole supersession chain: versions oldest-first, each with the episodes it cites, plus the supersedes links between them. This is the BROAD audit view (not recall): it spans ALL supersedes edges — manual revisions AND LLM-adjudicated contradictions, confidence-agnostic — so chain members can include unrelated adjudicated memories. Optional as_of filters the returned versions to facts valid at that time; the links list still shows every edge found.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -866,6 +954,12 @@ export const tools = [
       properties: {
         title: { type: 'string', description: 'One line naming the work' },
         goal: { type: 'string', description: 'What done looks like, with the constraint that matters' },
+        visibility: {
+          type: 'string',
+          enum: ['personal', 'project', 'team', 'org'],
+          description:
+            'Who the task belongs to. personal (the default for a named principal) is served only to its writer; project/team/org to anyone holding read on the namespace.',
+        },
         plan: {
           type: 'array',
           items: {

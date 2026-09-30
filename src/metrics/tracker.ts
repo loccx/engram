@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { getTokenEstimator, tokenizerLabel } from './tokenizer.js'
+import { summarizeEvictions, type EvictionSummary } from './eviction-log.js'
 
 export type MetricEvent = 'search' | 'context' | 'store' | 'related' | 'consolidate' | 'recall'
 
@@ -33,6 +34,8 @@ export interface EngineStats {
     estimator: string
     assumptions: string
   }
+  /** null on a pre-024 database; fault_rate is null when nothing was archived */
+  evictions: EvictionSummary | null
   per_namespace: Array<{
     namespace: string
     tokens_served: number
@@ -224,6 +227,7 @@ export class MetricsTracker {
       results_served: row.results_served ?? 0,
       tokenizer: tokenizerLabel(),
       retrievals: this.getRetrievalSummary(options),
+      evictions: summarizeEvictions(this.db, options),
       estimated_context_savings: {
         tokens: tokensServed,
         tokens_realistic: tokensServed * 3,

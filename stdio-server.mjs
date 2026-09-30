@@ -33,7 +33,14 @@ function dataDir() {
   return join(process.env.XDG_DATA_HOME?.trim() || join(homedir(), '.local', 'share'), 'engram-nodejs');
 }
 
+/**
+ * the shim forwards whatever credential the host gave it: a principal token first, then
+ * the install token the daemon itself uses. ENGRAM_AUTH_TOKEN_FILE names the file for
+ * either, so a host can point the shim at a principal's token file.
+ */
 function readToken() {
+  const principal = process.env.ENGRAM_PRINCIPAL_TOKEN;
+  if (principal !== undefined) return principal.trim();
   const fromEnv = process.env.ENGRAM_AUTH_TOKEN;
   if (fromEnv !== undefined) return fromEnv.trim();
   const path = process.env.ENGRAM_AUTH_TOKEN_FILE?.trim() || join(dataDir(), 'auth.token');

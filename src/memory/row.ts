@@ -28,6 +28,8 @@ export interface MemoryRow {
   shareable?: number | null
   archived_at?: number | null
   state_key?: string | null
+  owner_principal?: string | null
+  visibility?: string | null
 }
 
 export function rowToMemory(row: MemoryRow): Memory {

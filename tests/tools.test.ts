@@ -37,9 +37,9 @@ describe('mcp tool annotations', () => {
     }
   })
 
-  it('forget_memory is the only destructive tool', () => {
+  it('forget_memory and delete_episodes are the destructive tools', () => {
     const destructive = (tools as Tool[]).filter((t) => t.annotations.destructiveHint)
-    expect(destructive.map((t) => t.name)).toEqual(['forget_memory'])
+    expect(destructive.map((t) => t.name)).toEqual(['delete_episodes', 'forget_memory'])
   })
 
   it('store_memory has openWorldHint=true (LLM adjudication side-effect)', () => {

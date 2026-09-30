@@ -5,6 +5,8 @@ export interface Session {
   ended_at: number | null
   summary: string | null
   tool_name: string | null
+  /** null is the local owner's session; a named principal's carries its id */
+  owner_principal: string | null
 }
 
 export interface StartSessionInput {

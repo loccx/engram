@@ -7,7 +7,7 @@ import { createHash } from 'node:crypto'
 import { readFileSync, readdirSync } from 'node:fs'
 import { basename, extname, isAbsolute, join, relative, resolve } from 'node:path'
 import { createMcpSystem, loadAdapterConfig } from '../adapters/mcp.js'
-import { assemble } from '../../src/memory/assemble.js'
+import { assemble, type AssembleOptions } from '../../src/memory/assemble.js'
 import { EvalSetupError } from './errors.js'
 import { latencyMsAsync } from './metrics.js'
 import { REPO_ROOT } from './report.js'
@@ -480,77 +480,170 @@ export function turnSystemFactory(name: string, options: TurnSystemOptions = {})
   }
 }
 
-export const engramAssembleSystem: SystemFactory = {
-  name: 'engram-assemble',
-  describe: 'engram in process: assemble() under the qa recipe, sections packed to the same budget',
-  create(deps) {
-    let writeCalls = 0
-    let stored: StoredVectors | null = null
-    return {
-      name: 'engram-assemble',
-      describe: engramAssembleSystem.describe,
-      adapter: BUILTIN,
-      async reset() {},
-      async ingest(ns, sessions) {
-        writeCalls += sessions.length
-        // the suite seeds this namespace for every system; ingest fills only a fresh one
-        if (namespaceRows(deps.harness, ns) > 0) {
-          stored = storedVectorsOf(deps.harness, { memories: [ns] })
-          return
-        }
-        await deps.harness.seedCorpus(
-          {
-            name: 'system-ingest',
-            seed: deps.seed,
-            memories: sessions.map((session) => ({
-              id: session.id,
-              namespace: ns,
-              content: session.text,
-              type: 'note',
-              tags: session.tags ?? [],
-              created_at: session.createdAt ?? 0,
-            })),
-            queries: [],
-          },
-          { mode: 'raw', embed: deps.harness.vectorsAvailable }
-        )
-        stored = storedVectorsOf(deps.harness, { memories: [ns] })
-      },
-      async retrieve(ns, query, budgetChars) {
-        const { ms, value } = await latencyMsAsync(() =>
-          assemble(deps.harness.db, deps.harness.store, deps.harness.search, {
-            scope: ns,
-            query,
-            budgetChars,
-            recipe: 'qa',
-          })
-        )
-        const blocks = value.sections.flatMap((section) =>
-          section.items.map((item) => item.text)
-        )
-        const memories = value.sections.find((section) => section.kind === 'memories')
-        return {
-          context: blocks.join('\n\n'),
-          blocks,
-          items: (memories?.items ?? []).map((item) => ({
-            text: item.text,
-            id: item.id,
-            ref: deps.harness.localIdOf(item.id),
-          })),
-          retrievalMs: ms,
-          note:
-            `recipe=qa, sections=${value.trace.channels.join('+')}, ` +
-            `used=${value.accounting.used}/${value.accounting.budget} chars, ` +
-            `dropped=${value.accounting.dropped}, deduped=${value.accounting.deduped}, ` +
-            `degraded=${value.degraded.length}`,
-        }
-      },
-      cost: () => ({ writeCalls, writeTokens: 0 }),
-      storedVectors: () => stored,
-      async close() {},
-    }
-  },
+/** one memory per session; the suite may already have seeded the namespace, then it is left alone */
+async function ingestSessionMemories(
+  deps: SystemDeps,
+  ns: string,
+  sessions: SystemSession[]
+): Promise<void> {
+  if (namespaceRows(deps.harness, ns) > 0) return
+  await deps.harness.seedCorpus(
+    {
+      name: 'system-ingest',
+      seed: deps.seed,
+      memories: sessions.map((session) => ({
+        id: session.id,
+        namespace: ns,
+        content: session.text,
+        type: 'note',
+        tags: session.tags ?? [],
+        created_at: session.createdAt ?? 0,
+      })),
+      queries: [],
+    },
+    { mode: 'raw', embed: deps.harness.vectorsAvailable }
+  )
 }
+
+/** one episode per turn, keyed so a re-ingest of the same session is a no-op */
+async function ingestTurnEpisodes(
+  deps: SystemDeps,
+  ns: string,
+  sessions: SystemSession[],
+  vectorsAvailable: boolean
+): Promise<number> {
+  let ingested = 0
+  for (const session of sessions) {
+    const turns = turnsOf(session)
+    if (turns.length === 0) continue
+    const result = await ingestEpisodes(deps.harness.db, {
+      namespace: ns,
+      source: EPISODE_SOURCE,
+      items: turns.map((turn, index) => ({
+        external_id: turnMemoryId(session.id, index),
+        content: turnText(turn),
+        session_id: session.id,
+        role: turn.role === '' ? undefined : turn.role,
+        turn_index: index,
+        occurred_at: session.createdAt ?? 0,
+      })),
+      origin: 'eval-system',
+      vectorsAvailable,
+      now: deps.harness.now,
+    })
+    ingested += result.ingested
+  }
+  return ingested
+}
+
+/**
+ * assemble() under the qa recipe. with episodes on, every turn is ingested beside the
+ * session memories, which is what a deployed store holds and what the recipe is built for
+ */
+function assembleSystemFactory(
+  name: string,
+  options: { episodes: boolean; quotas?: AssembleOptions['quotas']; note?: string }
+): SystemFactory {
+  const describe =
+    (options.episodes
+      ? 'engram in process: session memories plus one episode per turn, served by assemble() under the qa recipe'
+      : 'engram in process: assemble() under the qa recipe, sections packed to the same budget') +
+    (options.note ? `; ${options.note}` : '')
+  return {
+    name,
+    describe,
+    create(deps) {
+      let writeCalls = 0
+      let stored: StoredVectors | null = null
+      // the turns this system wrote go when it moves on or closes: a system that shares
+      // the namespace must never read them
+      let current: string | null = null
+      const drop = (ns: string): void => {
+        if (options.episodes) deleteEpisodes(deps.harness.db, { namespace: ns })
+      }
+      const adopt = (ns: string): void => {
+        if (current !== null && current !== ns) drop(current)
+        current = ns
+      }
+      return {
+        name,
+        describe,
+        adapter: BUILTIN,
+        async reset(ns) {
+          adopt(ns)
+          drop(ns)
+        },
+        async ingest(ns, sessions) {
+          adopt(ns)
+          writeCalls += sessions.length
+          await ingestSessionMemories(deps, ns, sessions)
+          if (options.episodes) {
+            writeCalls += await ingestTurnEpisodes(deps, ns, sessions, deps.harness.vectorsAvailable)
+          }
+          stored = storedVectorsOf(deps.harness, {
+            memories: [ns],
+            ...(options.episodes ? { episodes: [ns] } : {}),
+          })
+        },
+        async retrieve(ns, query, budgetChars) {
+          const { ms, value } = await latencyMsAsync(() =>
+            assemble(deps.harness.db, deps.harness.store, deps.harness.search, {
+              scope: ns,
+              query,
+              budgetChars,
+              recipe: 'qa',
+              ...(options.quotas ? { quotas: options.quotas } : {}),
+            })
+          )
+          const blocks = value.sections.flatMap((section) =>
+            section.items.map((item) => item.text)
+          )
+          const memories = value.sections.find((section) => section.kind === 'memories')
+          return {
+            context: blocks.join('\n\n'),
+            blocks,
+            items: (memories?.items ?? []).map((item) => ({
+              text: item.text,
+              id: item.id,
+              ref: deps.harness.localIdOf(item.id),
+            })),
+            retrievalMs: ms,
+            note:
+              `recipe=qa, sections=${value.trace.channels.join('+')}, ` +
+              `used=${value.accounting.used}/${value.accounting.budget} chars, ` +
+              `dropped=${value.accounting.dropped}, deduped=${value.accounting.deduped}, ` +
+              `degraded=${value.degraded.length}`,
+          }
+        },
+        cost: () => ({ writeCalls, writeTokens: 0 }),
+        storedVectors: () => stored,
+        async close() {
+          if (current !== null) drop(current)
+          current = null
+        },
+      }
+    },
+  }
+}
+
+export const engramAssembleSystem = assembleSystemFactory('engram-assemble', { episodes: false })
+export const engramQaSystem = assembleSystemFactory('engram-qa', { episodes: true })
+
+const NO_ROOM = { budgetShare: 0, limit: 0 }
+
+/** the qa recipe with only its evidence section left: the episodes arm, served through assemble */
+export const engramQaEvidenceSystem = assembleSystemFactory('engram-qa-evidence', {
+  episodes: true,
+  quotas: { memories: NO_ROOM, summaries: NO_ROOM },
+  note: 'memories and summaries sections zeroed',
+})
+
+/** the same with the session-group cap lifted, to tell the cap from the section mix */
+export const engramQaEvidenceWideSystem = assembleSystemFactory('engram-qa-evidence-wide', {
+  episodes: true,
+  quotas: { memories: NO_ROOM, summaries: NO_ROOM, evidence: { limit: 100 } },
+  note: 'memories and summaries zeroed, evidence group cap 100',
+})
 
 export interface EpisodeSystemOptions {
   /** how the episode assembly spends the budget, resolved per question the way a recipe resolves it */
@@ -598,26 +691,7 @@ export function episodeSystemFactory(name: string, options: EpisodeSystemOptions
         },
         async ingest(ns, sessions) {
           adopt(ns)
-          for (const session of sessions) {
-            const turns = turnsOf(session)
-            if (turns.length === 0) continue
-            const result = await ingestEpisodes(deps.harness.db, {
-              namespace: ns,
-              source: EPISODE_SOURCE,
-              items: turns.map((turn, index) => ({
-                external_id: turnMemoryId(session.id, index),
-                content: turnText(turn),
-                session_id: session.id,
-                role: turn.role === '' ? undefined : turn.role,
-                turn_index: index,
-                occurred_at: session.createdAt ?? 0,
-              })),
-              origin: 'eval-system',
-              vectorsAvailable,
-              now: deps.harness.now,
-            })
-            writeCalls += result.ingested
-          }
+          writeCalls += await ingestTurnEpisodes(deps, ns, sessions, vectorsAvailable)
           stored = storedVectorsOf(deps.harness, { episodes: [ns] })
         },
         async retrieve(ns, query, budgetChars) {
@@ -816,6 +890,9 @@ export const naiveRagSystem: SystemFactory = {
 export const SYSTEMS: SystemFactory[] = [
   engramSystem,
   engramAssembleSystem,
+  engramQaSystem,
+  engramQaEvidenceSystem,
+  engramQaEvidenceWideSystem,
   engramTurnsSystem,
   engramTurnsWindowSystem,
   engramHybridSystem,
@@ -1045,19 +1122,19 @@ export interface SystemQuestionInput {
 }
 
 /**
- * one system's turn on one question: the db and its fts index are shared, so the children
- * the last system wrote below the question go before this one ingests, and this one's go
- * once it has answered. without that, a system's numbers move when the set changes.
+ * one system's turn on one question: what the last system wrote (children below the
+ * question, episodes in it) goes before this one ingests, and this one's once it has
+ * answered, so a system's numbers never move when the set changes.
  */
 export async function runSystemQuestion(input: SystemQuestionInput): Promise<RetrievalResult> {
   const { harness, system, namespace, sessions, query, budgetChars } = input
-  harness.dropChildNamespaces(namespace)
+  harness.dropSystemRows(namespace)
   try {
     await system.reset(namespace)
     await system.ingest(namespace, sessions)
     return await system.retrieve(namespace, query, budgetChars)
   } finally {
-    harness.dropChildNamespaces(namespace)
+    harness.dropSystemRows(namespace)
   }
 }
 
@@ -1077,7 +1154,7 @@ export async function retrieveEachSystem(input: {
   const { harness, systems, namespace, sessions, queries, budgetChars } = input
   const out: RetrievalResult[][] = queries.map(() => [])
   for (const system of systems) {
-    harness.dropChildNamespaces(namespace)
+    harness.dropSystemRows(namespace)
     try {
       await system.reset(namespace)
       await system.ingest(namespace, sessions)
@@ -1085,7 +1162,7 @@ export async function retrieveEachSystem(input: {
         out[q].push(await system.retrieve(namespace, queries[q], budgetChars))
       }
     } finally {
-      harness.dropChildNamespaces(namespace)
+      harness.dropSystemRows(namespace)
     }
   }
   return out

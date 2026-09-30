@@ -3,6 +3,7 @@ import { STATE_KEY_MAX_CHARS, STATE_SLOT_LIMIT_MAX } from '../memory/state.js'
 import { EPISODE_BATCH_MAX } from '../memory/episodes.js'
 
 const MemoryType = z.enum(['note', 'decision', 'bug', 'pattern', 'gotcha', 'todo', 'procedure'])
+const Visibility = z.enum(['personal', 'project', 'team', 'org'])
 
 const stateKey = z
   .string()
@@ -44,6 +45,8 @@ export const StoreMemorySchema = z.object({
   procedure_meta: ProcedureMetaSchema,
   /** the slot this value belongs to; a later write to the same key retires this one */
   state_key: stateKey,
+  /** personal|project|team|org; a named principal's write starts personal */
+  visibility: Visibility.optional(),
 })
 
 export const GetStateSchema = z.object({
@@ -66,6 +69,8 @@ export const SearchMemoriesSchema = z.object({
   /** full historical view at as_of, supersession included; wins over before */
   as_of: z.number().int().optional(),
   include_superseded: z.boolean().optional().default(false),
+  /** audit read-back of archived (cold) rows; a served one is a page fault */
+  include_archived: z.boolean().optional().default(false),
   use_reranker: z.boolean().optional().default(false),
   rerank_top_n: z.number().int().min(2).max(100).optional(),
   /** content-character budget for the packed result set, opt-in */
@@ -168,7 +173,13 @@ export const ForgetMemorySchema = z.object({
 
 export const GetMemorySchema = z.object({
   id: z.string().min(1),
+  /** archived rows answer as missing without it */
+  include_archived: z.boolean().optional().default(false),
   as_of: z.number().int().optional(),
+})
+
+export const UnarchiveMemorySchema = z.object({
+  id: z.string().min(1),
 })
 
 export const UpdateMemorySchema = z.object({
@@ -177,6 +188,8 @@ export const UpdateMemorySchema = z.object({
   importance: z.number().min(0).max(1).optional(),
   tags: z.array(z.string()).optional(),
   valid_until: z.number().int().nullable().optional(),
+  /** personal|project|team|org; a named principal's row starts personal */
+  visibility: Visibility.optional(),
 })
 
 export const ReviseMemorySchema = z.object({
@@ -253,6 +266,8 @@ const PlanItemDelta = z.object({
 export const TaskStartSchema = z.object({
   title: z.string().min(1),
   goal: z.string().min(1),
+  /** personal|project|team|org; a named principal's task starts personal */
+  visibility: Visibility.optional(),
   plan: z.array(z.union([z.string(), PlanItemDelta])).optional(),
   artifacts: z.array(z.string()).optional(),
   open_questions: z.array(z.string()).optional(),
@@ -319,7 +334,7 @@ const EpisodeSourceSchema = z.object({
 })
 
 const EpisodePermissionsSchema = z.object({
-  visibility: z.enum(['personal', 'project', 'team', 'org']).optional(),
+  visibility: Visibility.optional(),
   retention: z.enum(['durable', 'session', 'ephemeral']).optional(),
   ttl_ms: z.number().int().positive().optional(),
 })
@@ -356,6 +371,18 @@ export const IngestEpisodesSchema = z.object({
   batch_embeddings: z.boolean().optional().default(false),
 })
 
+export const DeleteEpisodesSchema = z.object({
+  namespace: z
+    .string()
+    .min(1)
+    .describe('the namespace whose episodes go; delete_episodes never matches the whole store'),
+  subtree: z.boolean().optional().default(false),
+  source: z.string().min(1).optional(),
+  external_ids: z.array(z.string().min(1)).min(1).optional(),
+  before: z.number().int().optional(),
+  dry_run: z.boolean().optional().default(false),
+})
+
 export const ListBrainsSchema = z.object({})
 
 export const SearchBrainSchema = z.object({
@@ -387,6 +414,7 @@ export const SCHEMAS: Record<string, z.ZodType> = {
   list_memories: ListMemoriesSchema,
   forget_memory: ForgetMemorySchema,
   get_memory: GetMemorySchema,
+  unarchive_memory: UnarchiveMemorySchema,
   update_memory: UpdateMemorySchema,
   revise_memory: ReviseMemorySchema,
   get_memory_history: GetMemoryHistorySchema,
@@ -403,6 +431,7 @@ export const SCHEMAS: Record<string, z.ZodType> = {
   task_handoff: TaskHandoffSchema,
   session_start: SessionStartSchema,
   ingest_episodes: IngestEpisodesSchema,
+  delete_episodes: DeleteEpisodesSchema,
   list_brains: ListBrainsSchema,
   search_brain: SearchBrainSchema,
   get_brain_memory: GetBrainMemorySchema,

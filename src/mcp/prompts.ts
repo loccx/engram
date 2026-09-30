@@ -3,6 +3,7 @@ import { PROTOCOL_RULES } from '../delivery/protocol.js'
 import { rosterHits } from '../delivery/roster.js'
 import { getDatabase } from '../db/init.js'
 import { resolveNamespace } from '../namespace/resolver.js'
+import { authorizeNamespace, currentCaller } from '../memory/access.js'
 import { assemble, DEFAULT_ASSEMBLE_BUDGET_CHARS, DEFAULT_RECIPE_NAME } from '../memory/assemble.js'
 import { MemorySearch } from '../memory/search.js'
 import { MemoryStore } from '../memory/store.js'
@@ -148,6 +149,8 @@ export async function getPrompt(
     urlNamespace: ctx.urlNamespace,
     urlProject: ctx.urlProject,
   })
+  const refusal = authorizeNamespace(currentCaller(), resolved.namespace.replace(/\/+$/, ''), 'read')
+  if (refusal) return { error: refusal }
   const database = getDatabase()
   if (name === ASSEMBLED_CONTEXT) {
     const text = await assembledContextText(

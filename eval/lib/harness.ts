@@ -547,12 +547,25 @@ export class EvalHarness {
     this.dropNamespaceRows(namespace, true)
   }
 
+  /**
+   * everything a system may have written: the children below `ns`, and the episodes in
+   * `ns` itself. the suite seeds memories into `ns` for every system but never episodes,
+   * so any episode there is one system's own and must not reach the next
+   */
+  dropSystemRows(namespace: string): void {
+    this.dropNamespaceRows(namespace, true)
+    deleteEpisodes(this.db, { namespace })
+  }
+
   /** `ns`, or only what sits under `ns/` and `ns//`, across every namespace-keyed table */
   private dropNamespaceRows(namespace: string, childrenOnly: boolean): void {
     // the engine's own subtree clause and escaping, so a teardown covers exactly what a
-    // scoped read would have returned: `= ns OR LIKE ns/% OR LIKE ns//%`
+    // scoped read would have returned: `= ns OR LIKE ns/% OR LIKE ns//%`. the patterns
+    // are built here rather than sliced out of the clause, whose parameters now carry
+    // the caller's visibility too.
     const subtree = namespaceFilter('memories', { namespace_subtree: namespace })
-    const below = subtree.params.slice(1) as string[]
+    const escaped = namespace.replace(/[\\%_]/g, '\\$&')
+    const below = [`${escaped}/%`, `${escaped}//%`]
     const memoriesSql = childrenOnly
       ? `${subtree.sql} AND COALESCE(memories.namespace, memories.project_path) <> ?`
       : subtree.sql

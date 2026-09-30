@@ -42,8 +42,14 @@ import {
 } from '../memory/assemble.js'
 import { currentState, getState, normalizeStateKey } from '../memory/state.js'
 import {
+  citedEpisodes,
+  countMatchingEpisodes,
+  deleteEpisodes,
   episodeVectorsAvailable,
   ingestEpisodes,
+  linkTaskEpisodes,
+  type EpisodeDeleteCounts,
+  type EpisodeDeleteSelector,
   type IngestEpisodeItem,
   type IngestEpisodesInput,
 } from '../memory/episodes.js'
@@ -62,6 +68,8 @@ import {
   runPendingMaintenanceJobs,
 } from '../maintenance/jobs.js'
 import { getMetricsTracker, type MetricsTracker } from '../metrics/tracker.js'
+import { recordColdFaults } from '../metrics/eviction-log.js'
+import { unarchiveMemory } from '../memory/cold-tier.js'
 import { logger } from '../utils/logger.js'
 import { logAudit } from '../brains/audit.js'
 import type {
@@ -73,6 +81,24 @@ import type {
 import { SCHEMAS } from './schemas.js'
 import { listLocalBrains, searchBrain, getBrainMemory, markShareable } from '../brains/mcp.js'
 import type { Memory } from '../memory/types.js'
+import {
+  auditCrossOwnerRead,
+  authorizeNamespace,
+  coveredAncestors,
+  currentCaller,
+  currentTool,
+  derivedVisible,
+  holdsVerb,
+  memoryAccess,
+  rowVisible,
+  toolAccess,
+  visibilityOf,
+  WITHHELD_DIGEST,
+  WITHHELD_GUIDE,
+  WITHHELD_TOPICS,
+  withRequest,
+  type CallerScope,
+} from '../memory/access.js'
 
 type ToolResult = { content: Array<{ type: 'text'; text: string }>; isError?: boolean }
 
@@ -158,6 +184,26 @@ interface Services {
 export interface RequestContext {
   urlProject?: string
   urlNamespace?: string
+  /** the credential the request arrived with; absent is the local owner */
+  caller?: CallerScope
+}
+
+/** a store-wide tool acts on every namespace, so no grant can cover it */
+function assertLocalOwner(tool: string): void {
+  const caller = currentCaller()
+  if (!caller.localOwner) {
+    throw new Error(`${tool} acts on the whole store and is not covered by a namespace grant`)
+  }
+}
+
+/**
+ * a row addressed by id is checked like a namespace, and a refusal answers exactly as a
+ * missing id does, so an id cannot be probed for existence
+ */
+const TASK_TOOLS = new Set(['task_get', 'task_update', 'task_close', 'task_handoff'])
+
+function notFound(tool: string, id: string): string {
+  return `${TASK_TOOLS.has(tool) ? 'Task' : 'Memory'} ${id} not found`
 }
 
 function ok(data: unknown): ToolResult {
@@ -316,11 +362,71 @@ async function resolveProjectPath(
     urlNamespace: ctx.urlNamespace,
     urlProject: ctx.urlProject,
   })
-  return resolved.namespace
+  // resolution order is unchanged; the credential decides whether the result is reachable
+  return authorizeResolved(resolved.namespace)
+}
+
+/**
+ * the resolved namespace must fall under a grant prefix carrying the verb the tool
+ * needs. the argument may narrow the credential, never widen it, and the refusal names
+ * only the namespace the caller supplied.
+ */
+function authorizeResolved(namespace: string): string {
+  const trimmed = trimNamespace(namespace)
+  const caller = currentCaller()
+  const access = toolAccess(currentTool())
+  if (access === 'owner') {
+    assertLocalOwner(currentTool())
+    return trimmed
+  }
+  if (!holdsVerb(caller, trimmed, access)) {
+    throw new Error(authorizeNamespace(caller, trimmed, access) ?? 'not authorized')
+  }
+  return trimmed
+}
+
+/** the namespace a by-id row lives in, authorized for the verb the tool needs */
+interface AccessRow {
+  id: string
+  namespace: string
+  owner_principal?: string | null
+  visibility?: string | null
+}
+
+/** the row's own namespace needs the verb, and a personal row has to be the caller's */
+function mayReach(row: AccessRow, verb: 'read' | 'write' | 'share' | 'delete'): boolean {
+  const caller = currentCaller()
+  return holdsVerb(caller, trimNamespace(row.namespace), verb) && rowVisible(row, caller)
+}
+
+/** the by-id check for a memory, answering a refusal as a missing id */
+function authorizeMemory(
+  db: import('better-sqlite3').Database,
+  id: string,
+  verb: 'read' | 'write' | 'share' | 'delete'
+): void {
+  const row = memoryAccess(db, id)
+  if (!row) return
+  if (!mayReach(row, verb)) throw new Error(notFound(currentTool(), id))
+}
+
+/** the same check for a task, whose row carries its own namespace and ownership */
+function authorizeTask(task: AccessRow, verb: 'read' | 'write'): void {
+  if (!mayReach(task, verb)) throw new Error(notFound(currentTool(), task.id))
+}
+
+/** a session belongs to the credential that opened it; the local owner's is the null one */
+function sessionOwnedByCaller(session: { owner_principal: string | null }): boolean {
+  const caller = currentCaller()
+  return caller.localOwner
+    ? session.owner_principal === null
+    : session.owner_principal === caller.principalId
 }
 
 function trimNamespace(value: string): string {
-  return value.replace(/\/+$/, '')
+  const trimmed = value.replace(/\/+$/, '')
+  // the root is its own namespace: trimming it to '' would authorize nothing
+  return trimmed === '' ? '/' : trimmed
 }
 
 /**
@@ -399,6 +505,16 @@ function asBudgetAccounting(packed: {
 }
 
 export async function handleTool(
+  name: string,
+  args: Record<string, unknown>,
+  ctx: RequestContext = {}
+): Promise<ToolResult> {
+  // every read below runs inside this scope, so a query that builds the shared namespace
+  // clause inherits the caller's visibility predicate without being handed the caller
+  return withRequest(ctx.caller ?? currentCaller(), name, () => runTool(name, args, ctx))
+}
+
+async function runTool(
   name: string,
   args: Record<string, unknown>,
   ctx: RequestContext = {}
@@ -485,6 +601,7 @@ export async function handleTool(
           procedure_meta: args.procedure_meta as StoreMemoryInput['procedure_meta'],
           origin: 'mcp',
           state_key: typeof args.state_key === 'string' ? args.state_key : undefined,
+          visibility: visibilityOf(currentCaller(), args.visibility) ?? undefined,
         }
         const result = await store.store(input)
         // a refusal is an answer, not a broken tool: isError would hide the reason
@@ -584,6 +701,37 @@ export async function handleTool(
         return ok(result)
       }
 
+      case 'delete_episodes': {
+        const requested = typeof args.namespace === 'string' ? args.namespace.trim() : ''
+        if (requested === '') {
+          return err('namespace is required: delete_episodes never sweeps the whole store')
+        }
+        // the namespace comes straight from the arguments, so it is authorized here for
+        // the delete verb rather than through resolveProjectPath
+        const namespace = authorizeResolved(requested)
+        const subtree = args.subtree === true
+        const source = typeof args.source === 'string' ? args.source : undefined
+        const externalIds = Array.isArray(args.external_ids)
+          ? (args.external_ids as string[])
+          : undefined
+        const before = typeof args.before === 'number' ? args.before : undefined
+        const narrowed = source !== undefined || (externalIds?.length ?? 0) > 0 || before !== undefined
+        // a root subtree with nothing else to narrow it is a whole-store delete wearing
+        // a namespace, and the spec is that such a call is refused
+        if (subtree && (namespace === '/' || namespace === '~' || namespace === '.') && !narrowed) {
+          return err(
+            'refusing to delete every episode in the store: pass a deeper namespace, source, external_ids or before'
+          )
+        }
+        const scope = subtree ? { namespace_subtree: namespace } : { namespace }
+        const selector: EpisodeDeleteSelector = { source, external_ids: externalIds, before }
+        const dryRun = args.dry_run === true
+        const counts: EpisodeDeleteCounts = dryRun
+          ? countMatchingEpisodes(db, scope, selector)
+          : deleteEpisodes(db, scope, selector)
+        return ok({ namespace, subtree, dry_run: dryRun, ...counts })
+      }
+
       case 'search_memories': {
         const query = args.query as string
 
@@ -599,6 +747,7 @@ export async function handleTool(
             before: beforeFromArgs(args),
             as_of: asOfFromArgs(args),
             include_superseded: args.include_superseded === true,
+            include_archived: args.include_archived === true,
             use_reranker: args.use_reranker === true,
             rerank_top_n: typeof args.rerank_top_n === 'number' ? args.rerank_top_n : undefined,
           },
@@ -626,9 +775,21 @@ export async function handleTool(
           response.results = enrichSearchResults(db, results, breakdown)
         }
 
+        // cold rows in the served set are faults: the caller reached into the archive.
+        // only what the response carries counts, so a budget that drops them is not one
+        if (args.include_archived === true) {
+          recordColdFaults(db, response.results as Memory[], 'search')
+        }
+
         const miss = explainMiss(db, project_path, results.length, { materialize: false })
         if (miss) response.miss = miss
 
+        auditCrossOwnerRead(db, {
+          tool: 'search_memories',
+          namespace: project_path,
+          ids: results.map((r) => r.id),
+          channel: 'hybrid',
+        })
         recordRetrievalEvent(db, {
           tool: 'search_memories',
           mode: 'hybrid',
@@ -654,6 +815,11 @@ export async function handleTool(
         const legacyFullRequested = args.full_content === true
         const wrapContent = <T extends { content: string }>(items: T[]): T[] =>
           legacyFullRequested ? items : truncateContent(items)
+        // a digest, a topic summary or a nav line merges many rows, so it is served only
+        // to a caller that owns every row behind it; otherwise the section is withheld
+        const derivedOk = derivedVisible(db, project_path)
+        const withheld: string[] = []
+        if (!derivedOk) withheld.push(WITHHELD_DIGEST, WITHHELD_TOPICS)
         // cluster summaries are present state, so an as_of read omits them
         const baseClusters = asOf === undefined ? search.getClusters(project_path) : []
         // topics are sampled on both paths by default (a project-wide cluster can
@@ -720,9 +886,21 @@ export async function handleTool(
               // ancestors() is root-first; reverse so the trace runs deepest first
               // and ends at the root
               const parents = ancestors(db, node.path).reverse()
+              // the funnel never ascends above a grant, and a parent whose own rows are
+              // not the caller's is not navigated either
+              const reachable = new Set(
+                coveredAncestors(
+                  currentCaller(),
+                  parents.map((parent) => parent.path)
+                )
+              )
               const rich =
                 results.length >= FUNNEL_K_MIN && (topScoreNorm ?? 0) >= FUNNEL_THETA
               for (const parent of parents) {
+                if (!reachable.has(parent.path) || !derivedVisible(db, parent.path)) {
+                  if (!rich) withheld.push(`${WITHHELD_GUIDE}:${parent.path}`)
+                  continue
+                }
                 if (rich) {
                   scope_trace.push({
                     namespace: parent.path,
@@ -795,6 +973,12 @@ export async function handleTool(
             weak: results.length < WEAK_RESULT_THRESHOLD,
           })
 
+          auditCrossOwnerRead(db, {
+            tool: 'get_context',
+            namespace: project_path,
+            ids: results.map((r) => r.id),
+            channel: 'hybrid',
+          })
           return ok({
             namespace: project_path,
             digest: digestOut,
@@ -806,6 +990,7 @@ export async function handleTool(
             ...budgetExtras,
             ...stateSectionFields(stateSection),
             ...historicalLimitations,
+            ...(withheld.length > 0 ? { degraded: withheld } : {}),
           })
         }
 
@@ -825,13 +1010,17 @@ export async function handleTool(
         const scope_trace: ScopeTraceEntry[] = node
           ? [{ namespace: node.path, depth: node.depth, hits: memories.length, action: 'searched' }]
           : []
+        // a child's digest is derived from that child's rows, so it is served only when
+        // the caller owns them; the roster line is dropped otherwise, not emptied
         const guide: GuideEntry[] = node
-          ? childRoster(db, node.path).map((c) => ({
-              namespace: node.path,
-              kind: 'child_roster' as const,
-              source: c.path,
-              excerpt: clipNavExcerpt(c.digest),
-            }))
+          ? childRoster(db, node.path)
+              .filter((c) => derivedVisible(db, c.path))
+              .map((c) => ({
+                namespace: node.path,
+                kind: 'child_roster' as const,
+                source: c.path,
+                excerpt: clipNavExcerpt(c.digest),
+              }))
           : []
 
         let digestOut = asOf === undefined ? getDigest(db, project_path) : null
@@ -885,6 +1074,12 @@ export async function handleTool(
           weak: memories.length < WEAK_RESULT_THRESHOLD,
         })
 
+        auditCrossOwnerRead(db, {
+          tool: 'get_context',
+          namespace: project_path,
+          ids: memories.map((m) => m.id),
+          channel: 'roster',
+        })
         return ok({
           namespace: project_path,
           digest: digestOut,
@@ -899,6 +1094,7 @@ export async function handleTool(
           ...budgetExtras,
           ...stateSectionFields(stateSection),
           ...historicalLimitations,
+          ...(withheld.length > 0 ? { degraded: withheld } : {}),
         })
       }
 
@@ -914,6 +1110,12 @@ export async function handleTool(
             as_of: asOfFromArgs(args),
           }
         )
+        auditCrossOwnerRead(db, {
+          tool: 'search_by_entity',
+          namespace: project_path,
+          ids: results.map((r) => r.id),
+          channel: 'entity',
+        })
         return ok({ namespace: project_path, results: enrichMemories(db, results) })
       }
 
@@ -925,7 +1127,16 @@ export async function handleTool(
         const depth = typeof args.depth === 'number' ? Math.min(Math.max(args.depth, 1), 5) : 1
         const include_superseded = args.include_superseded === true
         const memory = store.getById(memory_id)
-        if (!memory) return err(`Memory ${memory_id} not found`)
+        if (!memory) return err(notFound(name, memory_id))
+        authorizeMemory(db, memory_id, 'read')
+        // the anchor is read by id like get_memory, and this tool has no cold-tier flag,
+        // so an archived anchor answers as missing instead of leaking a retired payload
+        if (memory.archived_at != null) return err(notFound(name, memory_id))
+        // a walk from one row keeps to that row's namespace for a granted caller, so a
+        // hop cannot leave the grant even when the far row is shared
+        const walkScope = currentCaller().localOwner
+          ? {}
+          : { namespace_subtree: trimNamespace(memory.namespace ?? memory.project_path) }
         const [enrichedMemory] = enrichMemories(db, [memory])
         if (depth <= 1) {
           const related = store.getLinked(memory_id, limit, { include_superseded })
@@ -937,7 +1148,7 @@ export async function handleTool(
             ),
           })
         }
-        const related = search.pprSearch([memory_id], limit, { include_superseded })
+        const related = search.pprSearch([memory_id], limit, { include_superseded, ...walkScope })
         metrics.recordRelated(related, memory.project_path)
         return ok({
           memory: enrichedMemory,
@@ -954,8 +1165,11 @@ export async function handleTool(
       }
 
       case 'get_stats': {
-        const namespace = typeof args.namespace === 'string' ? args.namespace : undefined
+        const namespace =
+          typeof args.namespace === 'string' ? authorizeResolved(args.namespace) : undefined
         const since = typeof args.since === 'number' ? args.since : undefined
+        // without a namespace the counters span the store, which only the owner reaches
+        if (!namespace) assertLocalOwner('get_stats')
         return ok(metrics.getStats({ namespace, since }))
       }
 
@@ -1000,6 +1214,10 @@ export async function handleTool(
           return ok({ ...closed, ended: true })
         }
 
+        // the id goes through the same ownership rule as the listing: a session carries
+        // the caller's own summary, so ending someone else's answers as a missing one
+        const owned = sessions.getById(session_id)
+        if (!owned || !sessionOwnedByCaller(owned)) return err(`Session ${session_id} not found`)
         const session = sessions.end(session_id, summary)
         if (!session) return err(`Session ${session_id} not found`)
         // best effort: maintenance never fails the tool call
@@ -1039,12 +1257,21 @@ export async function handleTool(
           include_superseded: args.include_superseded === true,
           as_of: asOfFromArgs(args),
         })
+        auditCrossOwnerRead(db, {
+          tool: 'list_memories',
+          namespace: project_path,
+          ids: memories.map((m) => m.id),
+          channel: 'list',
+        })
         return ok({ namespace: project_path, memories: enrichMemories(db, memories) })
       }
 
       case 'forget_memory': {
         const id = args.id as string
         const existing = store.getById(id)
+        const reachable = memoryAccess(db, id)
+        // a refusal answers exactly as a missing id does, so no delete is attempted
+        if (reachable && !mayReach(reachable, 'delete')) return ok({ success: false, id })
         const deleted = store.delete(id)
         if (deleted && existing) {
           // a deleted pin must stop being served: key the digest like the reads do
@@ -1063,9 +1290,23 @@ export async function handleTool(
       case 'get_memory': {
         const id = args.id as string
         const asOf = asOfFromArgs(args)
+        const includeArchived = args.include_archived === true
         // the chain member that was current at as_of
         const memory = asOf !== undefined ? store.getByIdAt(id, asOf) : store.getById(id)
-        if (!memory) return err(`Memory ${id} not found`)
+        if (!memory) return err(notFound(name, id))
+        authorizeMemory(db, id, 'read')
+        // archived is hidden by id too, and the caller that asks for it anyway pays a
+        // fault. the same not-found answer as a missing row, so cold rows stay cold
+        if (memory.archived_at != null) {
+          if (!includeArchived) return err(notFound(name, id))
+          recordColdFaults(db, [memory], 'read')
+        }
+        auditCrossOwnerRead(db, {
+          tool: 'get_memory',
+          namespace: trimNamespace(memory.namespace ?? memory.project_path),
+          ids: [memory.id],
+          channel: 'by-id',
+        })
         // the one genuine use signal: naming an id (rather than taking what a search
         // ranked first) means the row was actually read. under
         // under ENGRAM_ACCESS_SIGNAL=explicit nothing else feeds access_count at all, and
@@ -1074,18 +1315,41 @@ export async function handleTool(
         // ranker its own output.
         if (recordsAccessOnExplicitFetch()) store.recordAccess(memory.id)
         const [enriched] = enrichMemories(db, [memory])
-        return ok(enriched)
+        // the evidence this fact was distilled from, when a distillation path cited it
+        return ok({ ...enriched, episodes: citedEpisodes(db, memory.id) })
+      }
+
+      case 'unarchive_memory': {
+        const id = args.id as string
+        // an unreachable row answers exactly like a missing one, before anything changes
+        const reachable = memoryAccess(db, id)
+        if (reachable && !mayReach(reachable, 'write')) {
+          return ok({ success: false, id, reason: 'not found' })
+        }
+        const result = unarchiveMemory(db, id)
+        if (!result.unarchived) {
+          return ok({
+            success: false,
+            id,
+            reason: store.getById(id) ? 'not archived' : 'not found',
+          })
+        }
+        const restored = store.getById(id)
+        const [enriched] = restored ? enrichMemories(db, [restored]) : []
+        return ok({ success: true, id, memory: enriched ?? null })
       }
 
       case 'update_memory': {
         const id = args.id as string
         const existing = store.getById(id)
-        if (!existing) return err(`Memory ${id} not found`)
+        if (!existing) return err(notFound(name, id))
+        authorizeMemory(db, id, 'write')
         // metadata only: content changes go through revise_memory (append-only)
         const patch: UpdateMemoryPatch = {
           type: args.type as MemoryType | undefined,
           importance: typeof args.importance === 'number' ? args.importance : undefined,
           tags: Array.isArray(args.tags) ? (args.tags as string[]) : undefined,
+          visibility: args.visibility as UpdateMemoryPatch['visibility'],
           valid_until:
             args.valid_until === null
               ? null
@@ -1101,6 +1365,9 @@ export async function handleTool(
 
       case 'revise_memory': {
         const id = args.id as string
+        const predecessor = store.getById(id)
+        if (!predecessor) return err(notFound(name, id))
+        authorizeMemory(db, id, 'write')
         const input: ReviseMemoryInput = {
           id,
           content: args.content as string,
@@ -1114,7 +1381,7 @@ export async function handleTool(
           state_key: typeof args.state_key === 'string' ? args.state_key : undefined,
         }
         const result = await store.revise(input)
-        if (!result) return err(`Memory ${id} not found`)
+        if (!result) return err(notFound(name, id))
         // revise can widen the export gate without mark_shareable, which would leave
         // the audit trail empty; mirror that event here
         if (input.shareable === true) {
@@ -1143,6 +1410,8 @@ export async function handleTool(
 
       case 'get_state': {
         const project_path = await resolveProjectPath(args, ctx)
+        const slotIds = (view: { slots: Array<{ current: { memory_id: string } | null }> }): string[] =>
+          view.slots.flatMap((slot) => (slot.current ? [slot.current.memory_id] : []))
         // one normalizer, so a key read back is the key a write landed on
         const normalizedKey = typeof args.key === 'string' ? normalizeStateKey(args.key) : null
         if (args.key !== undefined && normalizedKey === null) {
@@ -1158,28 +1427,43 @@ export async function handleTool(
           limit: typeof args.limit === 'number' ? args.limit : undefined,
         })
         const latencyMs = Date.now() - startedAt
+        const servedIds = slotIds(view)
         recordRetrievalEvent(db, {
           tool: 'get_state',
           mode: key === undefined ? 'slots' : 'slot',
           namespace: project_path,
           query: null,
-          resultIds: view.slots.flatMap((slot) => (slot.current ? [slot.current.memory_id] : [])),
+          resultIds: servedIds,
           latencyMs,
           weak: view.slots.length === 0,
+        })
+        auditCrossOwnerRead(db, {
+          tool: 'get_state',
+          namespace: project_path,
+          ids: servedIds,
+          channel: 'state',
         })
         return ok(view)
       }
 
       case 'get_memory_history': {
         const id = args.id as string
+        const authored = store.getById(id)
+        if (!authored) return err(notFound(name, id))
+        authorizeMemory(db, id, 'read')
         const history = store.getHistory(id, {
           as_of: asOfFromArgs(args),
           limit: typeof args.limit === 'number' ? args.limit : undefined,
         })
-        if (!history) return err(`Memory ${id} not found`)
+        if (!history) return err(notFound(name, id))
         return ok({
           id: history.id,
-          versions: enrichMemories(db, history.versions),
+          // each version carries the episodes it cites, so a revision chain shows
+          // where every step of it came from
+          versions: enrichMemories(db, history.versions).map((version) => ({
+            ...version,
+            episodes: citedEpisodes(db, version.id),
+          })),
           links: history.links,
         })
       }
@@ -1208,6 +1492,12 @@ export async function handleTool(
         // record the served memories and the dropped/truncated counts, or budget
         // starvation stays invisible in every surface
         metrics.recordRecall(result.memories, project_path)
+        auditCrossOwnerRead(db, {
+          tool: 'recall_context',
+          namespace: project_path,
+          ids: result.memories.map((m) => m.id),
+          channel: 'recall',
+        })
         recordRetrievalEvent(db, {
           tool: 'recall_context',
           mode: result.mode,
@@ -1248,6 +1538,12 @@ export async function handleTool(
           now: Date.now(),
         })
         const memories = result.sections.find((section) => section.kind === 'memories')
+        auditCrossOwnerRead(db, {
+          tool: 'assemble_context',
+          namespace: project_path,
+          ids: (memories?.items ?? []).map((item) => item.id),
+          channel: `assemble:${recipe}`,
+        })
         recordRetrievalEvent(db, {
           tool: 'assemble_context',
           mode: recipe,
@@ -1267,10 +1563,12 @@ export async function handleTool(
       }
 
       case 'get_maintenance_status': {
+        assertLocalOwner(name)
         return ok(getMaintenanceStatus(db, typeof args.limit === 'number' ? args.limit : 20))
       }
 
       case 'run_pending_maintenance': {
+        assertLocalOwner(name)
         // global opt-out: report disabled without claiming or running a job
         if (!isMaintenanceEnabled()) {
           return ok({ claimed: 0, done: 0, failed: 0, disabled: true })
@@ -1285,7 +1583,8 @@ export async function handleTool(
         const id = args.id as string
         const pinned = args.pinned === true
         const memory = store.getById(id)
-        if (!memory) return err(`Memory ${id} not found`)
+        if (!memory) return err(notFound(name, id))
+        authorizeMemory(db, id, 'write')
         const updated = store.setPinned(id, pinned)
         // key the digest like the reads do (namespace ?? project_path), or an override
         // refreshes the wrong row
@@ -1299,11 +1598,15 @@ export async function handleTool(
       }
 
       case 'list_brains': {
+        // a brain is a file in the owner's home directory, so it sits outside every
+        // namespace tree and no grant can cover it
+        assertLocalOwner(name)
         const brains = listLocalBrains()
         return ok({ brains, count: brains.length })
       }
 
       case 'search_brain': {
+        assertLocalOwner(name)
         const brain = args.brain as string
         const query = args.query as string
         const limit = typeof args.limit === 'number' ? args.limit : 10
@@ -1312,6 +1615,7 @@ export async function handleTool(
       }
 
       case 'get_brain_memory': {
+        assertLocalOwner(name)
         const brain = args.brain as string
         const id = args.id as string
         const memory = getBrainMemory(brain, id)
@@ -1323,6 +1627,7 @@ export async function handleTool(
         const namespace = await resolveProjectPath(args, ctx)
         const task = createTask(db, {
           namespace,
+          visibility: visibilityOf(currentCaller(), args.visibility) ?? undefined,
           title: args.title as string,
           goal: args.goal as string,
           session_id: typeof args.session_id === 'string' ? args.session_id : null,
@@ -1337,7 +1642,8 @@ export async function handleTool(
       case 'task_update': {
         const id = args.id as string
         const task = getTask(db, id)
-        if (!task) return err(`Task ${id} not found`)
+        if (!task) return err(notFound(name, id))
+        authorizeTask(task, 'write')
         const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
         if (mismatch) return err(mismatch)
 
@@ -1354,7 +1660,7 @@ export async function handleTool(
         const updated = updateTask(db, id, delta, {
           author: typeof args.author === 'string' ? args.author : null,
         })
-        if (!updated) return err(`Task ${id} not found`)
+        if (!updated) return err(notFound(name, id))
         return ok({ task: updated.task, applied: updated.applied })
       }
 
@@ -1362,7 +1668,8 @@ export async function handleTool(
         const id = typeof args.id === 'string' ? args.id : ''
         if (id) {
           const task = getTask(db, id)
-          if (!task) return err(`Task ${id} not found`)
+          if (!task) return err(notFound(name, id))
+          authorizeTask(task, 'read')
           const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
           if (mismatch) return err(mismatch)
           return ok({
@@ -1383,7 +1690,8 @@ export async function handleTool(
       case 'task_close': {
         const id = args.id as string
         const task = getTask(db, id)
-        if (!task) return err(`Task ${id} not found`)
+        if (!task) return err(notFound(name, id))
+        authorizeTask(task, 'write')
         const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
         if (mismatch) return err(mismatch)
 
@@ -1407,10 +1715,14 @@ export async function handleTool(
           origin: 'mcp',
         })
         const memoryId = written.status === 'rejected' ? null : written.id
+        // the summary condenses the evidence ingested under this task id, so it cites
+        // it: get_memory on the summary then leads back to the raw turns
+        const linkedEpisodes = memoryId ? linkTaskEpisodes(db, memoryId, id) : 0
         const closed = closeTask(db, id, { status, summaryMemoryId: memoryId, author })
         return ok({
           task: closed,
           closed: true,
+          linked_episodes: linkedEpisodes,
           memory:
             written.status === 'rejected'
               ? { status: 'rejected', rule: written.rule, reason: written.reason, hint: written.hint }
@@ -1421,7 +1733,8 @@ export async function handleTool(
       case 'task_handoff': {
         const id = args.id as string
         const task = getTask(db, id)
-        if (!task) return err(`Task ${id} not found`)
+        if (!task) return err(notFound(name, id))
+        authorizeTask(task, 'write')
         const mismatch = await taskNamespaceMismatch(args, ctx, task.namespace)
         if (mismatch) return err(mismatch)
 
@@ -1455,6 +1768,9 @@ export async function handleTool(
       case 'mark_shareable': {
         const id = args.id as string
         const shareable = args.shareable !== false
+        const owned = store.getById(id)
+        if (!owned) return err(notFound(name, id))
+        authorizeMemory(db, id, 'share')
         // scope the write to the namespace this session is connected to and attribute
         // it to the session, so a prompt-injected call cannot flag another project's
         // memories and the audit trail stays traceable; a caller that declares no

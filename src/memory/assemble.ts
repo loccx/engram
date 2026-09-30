@@ -92,7 +92,7 @@ export interface AssembleResult {
 export interface RecipeSection {
   kind: SectionKind
   title: string
-  /** share of the character budget; sections pack in recipe order and hand back unused room */
+  /** share of the character budget; sections pack in recipe order */
   budgetShare: number
   limit: number
   /** how the evidence section spends its room on turns: a policy per query archetype */
@@ -129,6 +129,12 @@ export interface Recipe {
   minRelevance?: number
   /** candidate cap handed to the retrieval channel */
   maxCandidates?: number
+  /**
+   * unused room flows to later sections, then back to any that dropped or clipped, so a
+   * store with no episodes or no memories still fills the budget. off by default: the
+   * default recipe's bytes are pinned to recall_context
+   */
+  carryUnused?: boolean
 }
 
 export const DEFAULT_RECIPE_NAME = 'default'
@@ -168,25 +174,23 @@ export const RECIPES: Record<string, Recipe> = {
   qa: {
     name: 'qa',
     description:
-      'question answering: memories and evidence carry the budget, summaries stay small',
+      'question answering: the raw turns carry the budget, a few memories ride beside them, and anything left returns to whichever section can use it',
     sections: [
-      { kind: 'memories', title: 'memories', budgetShare: 0.55, limit: 12 },
+      // turn-level evidence answers the temporal, update and multi-session questions that
+      // whole-session memories miss, and it needs breadth across sessions, so it takes
+      // nearly all the room; curated memories keep a small share beside it
       {
         kind: 'evidence',
         title: 'evidence',
-        budgetShare: 0.25,
+        budgetShare: 0.9,
         limit: 12,
-        // an aggregation question is answered from one turn per session, so its evidence
-        // is bought session by session with the top hit reserved; every other archetype
-        // keeps the shipped order and therefore the bytes it served before
-        allocation: {
-          default: { policy: 'rank-greedy' },
-          archetypes: { aggregation: { policy: 'breadth-first', reserveTopHits: 1 } },
-        },
+        allocation: { default: { policy: 'rank-greedy' } },
       },
-      { kind: 'summaries', title: 'summaries', budgetShare: 0.2, limit: 6 },
+      { kind: 'memories', title: 'memories', budgetShare: 0.1, limit: 12 },
+      { kind: 'summaries', title: 'summaries', budgetShare: 0, limit: 4 },
     ],
     maxCandidates: 25,
+    carryUnused: true,
   },
 }
 
@@ -453,6 +457,12 @@ function packSection(
   return { items: kept, used, dropped, truncated, deduped }
 }
 
+/**
+ * sections whose producer packs to the room it is handed, so a larger room means asking
+ * the producer again rather than re-packing what it already returned
+ */
+const SELF_PACKING: ReadonlySet<SectionKind> = new Set<SectionKind>(['evidence'])
+
 /** a caller quota replaces the recipe's share and limit for that kind */
 function sectionsFor(recipe: Recipe, quotas?: AssembleOptions['quotas']): RecipeSection[] {
   return recipe.sections.map((section) => {
@@ -553,9 +563,13 @@ export async function assemble(
   let truncated = 0
   let deduped = channel ? channel.duplicate_ids + channel.near_duplicates : 0
 
+  let allotted = 0
+  const produced: Array<{ spec: RecipeSection; items: AssembleItem[]; producerDropped: number }> = []
   for (const spec of sections) {
     const share = Math.max(0, Math.floor(budget * spec.budgetShare))
-    const sectionChars = Math.min(share, Math.max(0, remaining))
+    const carried = recipe.carryUnused ? Math.max(0, allotted - used) : 0
+    allotted += share
+    const sectionChars = Math.min(share + carried, Math.max(0, remaining))
     let output: ProducerOutput
     let failed = false
     try {
@@ -579,6 +593,7 @@ export async function assemble(
 
     const packed = packSection(output.items, Math.max(spec.limit, 0), sectionChars, served)
     const sectionDropped = output.dropped + packed.dropped
+    produced.push({ spec, items: output.items, producerDropped: output.dropped })
     assembled.push({ kind: spec.kind, title: spec.title, items: packed.items })
     perSection[spec.title] = {
       used: packed.used,
@@ -592,6 +607,57 @@ export async function assemble(
     dropped += sectionDropped
     truncated += packed.truncated
     deduped += packed.deduped
+  }
+
+  // the forward pass only carries room to later sections, so what is still left goes back
+  // to any section that had to drop or clip, or that packs itself, in recipe order and
+  // deduped against the others
+  if (recipe.carryUnused && remaining > 0) {
+    for (let index = 0; index < produced.length && remaining > 0; index++) {
+      const entry = produced[index]
+      const before = perSection[entry.spec.title]
+      const selfPacked = SELF_PACKING.has(entry.spec.kind)
+      if (!selfPacked && before.dropped === entry.producerDropped && before.truncated === 0) continue
+      const room = before.used + remaining
+      const others = new Set(
+        assembled.flatMap((section, at) => (at === index ? [] : section.items.map((item) => item.id)))
+      )
+      let items = entry.items
+      let producerDropped = entry.producerDropped
+      if (selfPacked) {
+        try {
+          const again = await SECTION_PRODUCERS[entry.spec.kind]({
+            db,
+            search,
+            scope: options.scope,
+            spec: entry.spec,
+            sectionChars: room,
+            channel,
+            options,
+          })
+          items = again.items
+          producerDropped = again.dropped
+        } catch {
+          continue
+        }
+      }
+      const repacked = packSection(items, Math.max(entry.spec.limit, 0), room, others)
+      if (repacked.used <= before.used) continue
+      const sectionDropped = producerDropped + repacked.dropped
+      remaining -= repacked.used - before.used
+      used += repacked.used - before.used
+      dropped += sectionDropped - before.dropped
+      truncated += repacked.truncated - before.truncated
+      deduped += repacked.deduped - before.deduped
+      assembled[index] = { ...assembled[index], items: repacked.items }
+      perSection[entry.spec.title] = {
+        used: repacked.used,
+        items: repacked.items.length,
+        dropped: sectionDropped,
+        truncated: repacked.truncated,
+        deduped: repacked.deduped,
+      }
+    }
   }
 
   return {

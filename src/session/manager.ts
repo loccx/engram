@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import type { Session, StartSessionInput } from './types.js'
 import { detectProjectPath } from './detector.js'
+import { currentCaller, type CallerScope } from '../memory/access.js'
 
 interface SessionRow {
   id: string
@@ -10,10 +11,16 @@ interface SessionRow {
   ended_at: number | null
   summary: string | null
   tool_name: string | null
+  owner_principal?: string | null
 }
 
 function rowToSession(row: SessionRow): Session {
-  return { ...row }
+  return { ...row, owner_principal: row.owner_principal ?? null }
+}
+
+/** a session belongs to whoever opened it; the local owner's own is the null owner */
+function ownerPredicate(caller: CallerScope): { sql: string; params: unknown[] } {
+  return { sql: 'owner_principal IS ?', params: [caller.localOwner ? null : caller.principalId] }
 }
 
 const DEFAULT_SESSION_IDLE_MS = 12 * 60 * 60 * 1000
@@ -36,13 +43,14 @@ export class SessionManager {
     const project_path = input.project_path ?? (await detectProjectPath())
     const id = randomUUID()
     const now = Date.now()
+    const caller = currentCaller()
 
     this.db
       .prepare(
-        `INSERT INTO sessions (id, project_path, started_at, tool_name)
-         VALUES (?, ?, ?, ?)`
+        `INSERT INTO sessions (id, project_path, started_at, tool_name, owner_principal)
+         VALUES (?, ?, ?, ?, ?)`
       )
-      .run(id, project_path, now, input.tool_name ?? null)
+      .run(id, project_path, now, input.tool_name ?? null, caller.localOwner ? null : caller.principalId)
 
     return this.getById(id)!
   }
@@ -63,16 +71,19 @@ export class SessionManager {
     return row ? rowToSession(row) : null
   }
 
-  list(project_path?: string): Session[] {
+  list(project_path?: string, caller: CallerScope = currentCaller()): Session[] {
+    const owner = ownerPredicate(caller)
     if (project_path) {
       const rows = this.db
-        .prepare('SELECT * FROM sessions WHERE project_path = ? ORDER BY started_at DESC')
-        .all(project_path) as SessionRow[]
+        .prepare(
+          `SELECT * FROM sessions WHERE project_path = ? AND ${owner.sql} ORDER BY started_at DESC`
+        )
+        .all(project_path, ...owner.params) as SessionRow[]
       return rows.map(rowToSession)
     }
     const rows = this.db
-      .prepare('SELECT * FROM sessions ORDER BY started_at DESC')
-      .all() as SessionRow[]
+      .prepare(`SELECT * FROM sessions WHERE ${owner.sql} ORDER BY started_at DESC`)
+      .all(...owner.params) as SessionRow[]
     return rows.map(rowToSession)
   }
 
@@ -108,15 +119,16 @@ export class SessionManager {
     return ended
   }
 
-  getCurrentSession(project_path: string): Session | null {
+  getCurrentSession(project_path: string, caller: CallerScope = currentCaller()): Session | null {
+    const owner = ownerPredicate(caller)
     const row = this.db
       .prepare(
         `SELECT * FROM sessions
-         WHERE project_path = ? AND ended_at IS NULL
+         WHERE project_path = ? AND ended_at IS NULL AND ${owner.sql}
          ORDER BY started_at DESC
          LIMIT 1`
       )
-      .get(project_path) as SessionRow | undefined
+      .get(project_path, ...owner.params) as SessionRow | undefined
     return row ? rowToSession(row) : null
   }
 }

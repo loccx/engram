@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { notSupersededClause, SUPERSEDES_FILTER_THRESHOLD } from '../contradictions/supersession.js'
 import { computeTier, type Tier } from '../memory/enrichment.js'
+import { recordEvictionEvents, pruneEvictionEvents, type EvictionEventInput } from '../metrics/eviction-log.js'
 import { logger } from '../utils/logger.js'
 import { lexicalFamilyIndex } from './prune.js'
 
@@ -15,6 +16,15 @@ export const RETENTION_DEFAULT_MIN_CORPUS = 500
 export const RETENTION_DEFAULT_MIN_AGE_DAYS = 14
 export const RETENTION_DEFAULT_MAX_ARCHIVE = 200
 
+/** why a candidate is retired: redundant, below the score, unused past the age guard */
+export const RETENTION_ARCHIVE_REASON = 'redundant_below_threshold'
+/** eligible, but past this run's archive cap */
+export const RETENTION_CAP_REASON = 'archive_cap'
+/** the row was already archived by an earlier pass */
+export const RETENTION_ALREADY_ARCHIVED_REASON = 'already_archived'
+/** the archive update threw, so the row is still live */
+export const RETENTION_ARCHIVE_FAILED_REASON = 'archive_failed'
+
 export interface RetentionOptions {
   namespace?: string
   maxScore?: number
@@ -23,6 +33,8 @@ export interface RetentionOptions {
   maxArchive?: number
   now?: number
   scanLimit?: number
+  /** maintenance job this run belongs to, recorded on every event */
+  jobId?: number
 }
 
 export interface RetentionCandidate {
@@ -39,6 +51,16 @@ export interface RetentionCandidate {
   redundant: boolean
 }
 
+export interface RetentionDecision {
+  id: string
+  namespace: string
+  tier: Tier
+  /** the gate that kept it, or the archive/cap reason; the skipped keys are the gates */
+  reason: string
+  /** the plan wants this row archived */
+  archive: boolean
+}
+
 export interface RetentionPlan {
   namespace: string | null
   corpus_size: number
@@ -50,6 +72,8 @@ export interface RetentionPlan {
   skipped: Record<string, number>
   candidates: RetentionCandidate[]
   archive_ids: string[]
+  /** one per row considered, in scan order; apply turns these into events */
+  decisions: RetentionDecision[]
 }
 
 
@@ -177,30 +201,55 @@ export function planRetention(db: Database.Database, opts: RetentionOptions = {}
       : lexicalFamilyIndex(rows)
 
   const candidates: RetentionCandidate[] = []
+  const decisions: RetentionDecision[] = []
+  const decisionAt = new Map<string, number>()
+  // every row considered leaves one decision, so a kept row is as answerable as an
+  // archived one; the tier rides along whatever the gate
+  const decide = (row: RetentionRow, tier: Tier, reason: string): void => {
+    decisionAt.set(row.id, decisions.length)
+    decisions.push({ id: row.id, namespace: row.namespace, tier, reason, archive: false })
+  }
+
   for (const row of rows) {
+    const tier = computeTier(
+      {
+        importance: row.importance,
+        access_count: row.access_count,
+        last_accessed: row.last_accessed,
+        created_at: row.created_at,
+        pinned: false,
+      },
+      now
+    )
     if (corpusSize < minCorpusSize) {
       skipped.corpus_too_small++
+      decide(row, tier, 'corpus_too_small')
       continue
     }
     if (row.pinned === 1) {
       skipped.pinned++
+      decide(row, tier, 'pinned')
       continue
     }
     if (row.shareable === 1) {
       skipped.shareable++
+      decide(row, tier, 'shareable')
       continue
     }
     if (row.origin === 'promotion') {
       skipped.promotion++
+      decide(row, tier, 'promotion')
       continue
     }
     if (row.supersedes_out > 0) {
       // it won an adjudication: the surviving side of a contradiction
       skipped.adjudication_winner++
+      decide(row, tier, 'adjudication_winner')
       continue
     }
     if (row.duplicate_target > 0) {
       skipped.dedupe_keeper++
+      decide(row, tier, 'dedupe_keeper')
       continue
     }
 
@@ -215,18 +264,9 @@ export function planRetention(db: Database.Database, opts: RetentionOptions = {}
       },
       now
     )
-    const tier = computeTier(
-      {
-        importance: row.importance,
-        access_count: row.access_count,
-        last_accessed: row.last_accessed,
-        created_at: row.created_at,
-        pinned: false,
-      },
-      now
-    )
     if (tier === 'hot') {
       skipped.hot_tier++
+      decide(row, tier, 'hot_tier')
       continue
     }
     const ageDays = Math.max(0, now - (row.last_accessed ?? row.created_at)) / (24 * 60 * 60 * 1000)
@@ -238,16 +278,20 @@ export function planRetention(db: Database.Database, opts: RetentionOptions = {}
       row.duplicates_out > 0 || row.duplicate_target > 0 || (lexicalSiblings > 0 && !familyKeeper)
     if (!redundant) {
       skipped.non_redundant++
+      decide(row, tier, 'non_redundant')
       continue
     }
     if (ageDays < minAgeDays) {
       skipped.recently_used++
+      decide(row, tier, 'recently_used')
       continue
     }
     if (score >= maxScore) {
       skipped.above_threshold++
+      decide(row, tier, 'above_threshold')
       continue
     }
+    decide(row, tier, RETENTION_ARCHIVE_REASON)
     candidates.push({
       id: row.id,
       score,
@@ -265,6 +309,15 @@ export function planRetention(db: Database.Database, opts: RetentionOptions = {}
   candidates.sort((a, b) => a.score - b.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
   const archiveIds = candidates.slice(0, Math.max(0, maxArchive)).map((c) => c.id)
 
+  // the cap decides after the sort, so it is applied to the decisions here
+  const chosen = new Set(archiveIds)
+  for (const candidate of candidates) {
+    const at = decisionAt.get(candidate.id)
+    if (at === undefined) continue
+    if (chosen.has(candidate.id)) decisions[at].archive = true
+    else decisions[at].reason = RETENTION_CAP_REASON
+  }
+
   return {
     namespace: opts.namespace ?? null,
     corpus_size: corpusSize,
@@ -276,33 +329,80 @@ export function planRetention(db: Database.Database, opts: RetentionOptions = {}
     skipped,
     candidates,
     archive_ids: archiveIds,
+    decisions,
   }
+}
+
+// the plan says which row should retire, the pass says what actually happened: a row
+// that was already archived, or whose update threw, reads kept with its own reason
+function decisionReason(
+  decision: RetentionDecision,
+  retired: boolean,
+  failed: boolean
+): string {
+  if (failed) return RETENTION_ARCHIVE_FAILED_REASON
+  if (!decision.archive) return decision.reason
+  return retired ? decision.reason : RETENTION_ALREADY_ARCHIVED_REASON
+}
+
+function recordRetentionEvents(
+  db: Database.Database,
+  plan: RetentionPlan,
+  archivedIds: Set<string>,
+  now: number,
+  jobId: number | null,
+  failedIds: Set<string> = new Set()
+): void {
+  const events: EvictionEventInput[] = plan.decisions.map((decision) => {
+    const retired = decision.archive && archivedIds.has(decision.id)
+    const reason = decisionReason(decision, retired, failedIds.has(decision.id))
+    return {
+      ts: now,
+      namespace: decision.namespace,
+      memoryId: decision.id,
+      action: retired ? 'archived' : 'kept',
+      reason,
+      tier: decision.tier,
+      jobId,
+    }
+  })
+  recordEvictionEvents(db, events)
 }
 
 /** idempotent: only rows still un-archived change */
 export function applyRetention(
   db: Database.Database,
   plan: RetentionPlan,
-  now: number = Date.now()
+  now: number = Date.now(),
+  opts: { jobId?: number } = {}
 ): { archived: number } {
   const archive = db.prepare('UPDATE memories SET archived_at = ? WHERE id = ? AND archived_at IS NULL')
   let archived = 0
+  const archivedIds = new Set<string>()
+  const failedIds = new Set<string>()
   const tx = db.transaction((ids: string[]) => {
     for (const id of ids) {
       try {
-        archived += archive.run(now, id).changes
+        const changes = archive.run(now, id).changes
+        archived += changes
+        if (changes > 0) archivedIds.add(id)
       } catch (err) {
+        // a row that threw is still live, and the ledger has to say so
+        failedIds.add(id)
         logger.warn({ err, memoryId: id }, 'retention: archiving a row failed; continuing')
       }
     }
   })
   tx(plan.archive_ids)
+  recordRetentionEvents(db, plan, archivedIds, now, opts.jobId ?? null, failedIds)
+  // the pass that writes the events is also the one that bounds them
+  pruneEvictionEvents(db, { now })
   return { archived }
 }
 
 export function runRetention(db: Database.Database, opts: RetentionOptions = {}): RetentionReport {
   const t0 = Date.now()
   const plan = planRetention(db, opts)
-  const { archived } = applyRetention(db, plan, opts.now ?? Date.now())
+  const { archived } = applyRetention(db, plan, opts.now ?? Date.now(), { jobId: opts.jobId })
   return { ...plan, archived, duration_ms: Date.now() - t0 }
 }

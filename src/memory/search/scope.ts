@@ -6,18 +6,30 @@ import {
   notSupersededAtClause,
   validityAtClause,
 } from '../../contradictions/supersession.js'
+import { visibilityClause, type CallerScope } from '../access.js'
 
 export interface NamespaceFilterOptions {
   namespace_subtree?: string
   project_path?: string
+  /** the identity a read is served as; defaults to the caller in scope */
+  caller?: CallerScope
 }
 
-// `sql` is a bare clause and empty when unscoped: callers must treat empty as no filter
+/**
+ * `sql` is a bare clause and empty when unscoped: callers must treat empty as no filter.
+ * the visibility predicate rides here rather than at each call site, so lexical, vector,
+ * entity, graph, episode and statistic channels all serve the same rows.
+ */
 export function namespaceFilter(
   alias: string,
   options: NamespaceFilterOptions
 ): { sql: string; params: unknown[] } {
-  return namespaceClause(`COALESCE(${alias}.namespace, ${alias}.project_path)`, options)
+  const scope = namespaceClause(`COALESCE(${alias}.namespace, ${alias}.project_path)`, options)
+  const visibility = visibilityClause(alias, options.caller)
+  return {
+    sql: scope.sql ? `${scope.sql} AND ${visibility.sql}` : visibility.sql,
+    params: [...scope.params, ...visibility.params],
+  }
 }
 
 /**
@@ -51,6 +63,8 @@ export interface TemporalFilterOptions {
   as_of?: number
   before?: number
   include_superseded?: boolean
+  /** audit read-back: archived rows stay hidden otherwise, as in hybrid.ts */
+  include_archived?: boolean
 }
 
 // as_of wins over before, and supersession is time-aware whenever as_of is set
@@ -69,11 +83,19 @@ export function temporalFilter(
   }
   if (!options.include_superseded) {
     if (options.as_of !== undefined) {
-      clauses.push(notSupersededAtClause(`${alias}.id`, '?'))
+      clauses.push(
+        notSupersededAtClause(`${alias}.id`, '?', {
+          includeArchived: options.include_archived === true,
+        })
+      )
       params.push(options.as_of)
     } else {
-      clauses.push(notSupersededClause(`${alias}.id`))
+      clauses.push(
+        notSupersededClause(`${alias}.id`, { includeArchived: options.include_archived === true })
+      )
     }
+  } else if (!options.include_archived) {
+    clauses.push(`${alias}.archived_at IS NULL`)
   }
   return { sql: clauses.join(' AND '), params }
 }

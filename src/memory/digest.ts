@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import type Database from 'better-sqlite3'
 import { chat, isLlmConfigured } from '../llm/client.js'
 import { logger } from '../utils/logger.js'
+import { currentCaller, derivedVisible, type CallerScope } from './access.js'
 
 export const DEFAULT_DIGEST_BUDGET_CHARS = 2000
 
@@ -34,7 +35,17 @@ Rules:
 - Output markdown bullets only. No preamble, no headings, no closing commentary.
 - The output MUST be shorter than the character budget you are given.`
 
-export function getDigest(db: Database.Database, namespace: string): string {
+/**
+ * the digest is a summary of many rows, so it is served only to a caller that owns all
+ * of them: filtering it line by line would still leak the ones it merged away. a
+ * withheld digest reads as an empty one, and the tool surfaces say so in `degraded`.
+ */
+export function getDigest(
+  db: Database.Database,
+  namespace: string,
+  caller: CallerScope = currentCaller()
+): string {
+  if (!derivedVisible(db, namespace, caller)) return ''
   const row = db
     .prepare('SELECT content FROM project_digests WHERE namespace = ?')
     .get(namespace) as { content: string } | undefined

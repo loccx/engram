@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server'
 import { createServer } from './server.js'
 import { writePid, removePid } from './utils/pid.js'
 import { resolveAuthRequirement, TOKEN_ENV } from './mcp/auth.js'
+import { hasLivePrincipals } from './mcp/principals.js'
 import { logger } from './utils/logger.js'
 import { getDatabase } from './db/init.js'
 import { backfillNamespaces } from './db/workers/backfill.js'
@@ -167,7 +168,10 @@ export async function startDaemon(port: number = 8888): Promise<void> {
 
   const hostname = resolveBindHost()
   const auth = resolveAuthRequirement(hostname)
-  if (auth.error) {
+  // a store with principals authenticates that way, so the install token is one option
+  // among the credentials rather than the only one
+  const principalBacked = auth.error !== undefined && hasLivePrincipals(getDatabase().db)
+  if (auth.error && !principalBacked) {
     console.error(`engram: refusing to start. ${auth.error}`)
     process.exit(1)
   }
@@ -176,7 +180,11 @@ export async function startDaemon(port: number = 8888): Promise<void> {
   writePid(process.pid)
 
   if (auth.required) {
-    const where = auth.source === 'env' ? TOKEN_ENV : auth.path
+    const where = principalBacked
+      ? 'the store holds principals, so a principal token is accepted'
+      : auth.source === 'env'
+        ? TOKEN_ENV
+        : auth.path
     console.log(`Auth:   every request on ${hostname} needs a bearer token (${where})`)
   }
   serve({ fetch: app.fetch, port, hostname }, (info) => {

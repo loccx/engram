@@ -1,4 +1,5 @@
 export type MemoryType = 'note' | 'decision' | 'bug' | 'pattern' | 'gotcha' | 'todo' | 'procedure'
+import type { CallerScope } from './access.js'
 
 export interface ExtractedEntity {
   entity_text: string
@@ -126,6 +127,8 @@ export interface StoreMemoryInput {
   pinned?: boolean
   /** names the state slot this value belongs to; a second write to the same key retires the first */
   state_key?: string
+  /** personal|project|team|org; a named principal defaults to personal, the local owner to null */
+  visibility?: string
 }
 
 /** a revision inserts a new row plus a confidence=1 supersedes edge; content is never edited in place */
@@ -179,6 +182,8 @@ export interface UpdateMemoryPatch {
   importance?: number
   tags?: string[]
   valid_until?: number | null
+  /** personal|project|team|org; promotion is how a private row becomes shareable */
+  visibility?: 'personal' | 'project' | 'team' | 'org'
 }
 
 export interface ListMemoriesFilter {
@@ -191,6 +196,8 @@ export interface ListMemoriesFilter {
   include_archived?: boolean
   /** only facts valid at this time */
   as_of?: number
+  /** the identity the listing is served as; defaults to the caller in scope */
+  caller?: CallerScope
 }
 
 export type LinkType =

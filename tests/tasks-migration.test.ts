@@ -71,6 +71,8 @@ describe('migration 016', () => {
       'created_at',
       'updated_at',
       'closed_at',
+      'owner_principal',
+      'visibility',
     ])
 
     // working state is not searchable by construction: no fts and no vector table

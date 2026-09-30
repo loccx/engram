@@ -6,6 +6,7 @@ import {
   validityAtClause,
 } from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
+import { currentCaller, derivedVisible, visibilityClause, type CallerScope } from '../access.js'
 
 interface ClusterRow {
   id: number
@@ -30,6 +31,7 @@ export function prepareContextStatements(db: Database.Database): ContextStatemen
       `SELECT * FROM memories
        WHERE COALESCE(namespace, project_path) = ?
          AND ${notSupersededClause('memories.id')}
+         AND ${visibilityClause('memories').sql}
        ORDER BY
          CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
          (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
@@ -47,14 +49,28 @@ export function getContext(
   stmts: ContextStatements,
   project_path: string,
   limit: number = 20,
-  options: { include_superseded?: boolean; before?: number; as_of?: number } = {}
+  options: {
+    include_superseded?: boolean
+    before?: number
+    as_of?: number
+    caller?: CallerScope
+  } = {}
 ): Memory[] {
   const now = Date.now()
   const thirtyDaysAgo = now - THIRTY_DAYS_MS
 
-  // the default latest view needs no clause at all
+  // the caller rides as the visibility parameter, so the prepared statement stays reused
+  const caller = options.caller ?? currentCaller()
+  const callerParam = visibilityClause('memories', caller).params
+
+  // the default latest view needs no time clause at all
   if (!options.include_superseded && options.before === undefined && options.as_of === undefined) {
-    const rows = stmts.default.all(project_path, thirtyDaysAgo, limit) as MemoryRow[]
+    const rows = stmts.default.all(
+      project_path,
+      ...callerParam,
+      thirtyDaysAgo,
+      limit
+    ) as MemoryRow[]
     return rows.map(rowToMemory)
   }
 
@@ -79,12 +95,14 @@ export function getContext(
       supersededFilter = ` AND ${notSupersededClause('memories.id')}`
     }
   }
+  params.push(...callerParam)
   params.push(thirtyDaysAgo, limit)
 
   const rows = db
     .prepare(
       `SELECT * FROM memories
        WHERE COALESCE(namespace, project_path) = ?${timeFilter}${supersededFilter}
+         AND ${visibilityClause('memories', caller).sql}
         ORDER BY
           CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
           (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
@@ -97,7 +115,14 @@ export function getContext(
   return rows.map(rowToMemory)
 }
 
-export function getClusters(stmts: ContextStatements, projectPath: string): MemoryCluster[] {
+/** cluster summaries are derived from many rows, so they are withheld rather than filtered */
+export function getClusters(
+  db: Database.Database,
+  stmts: ContextStatements,
+  projectPath: string,
+  caller: CallerScope = currentCaller()
+): MemoryCluster[] {
+  if (!derivedVisible(db, projectPath, caller)) return []
   const rows = stmts.clusters.all(projectPath) as ClusterRow[]
 
   return rows.map((r) => {

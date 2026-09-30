@@ -1,11 +1,13 @@
 // episodes: raw turn- or chunk-granularity evidence beside the curated memories.
 // a long session is thousands of turns, so the evidence lives here and `memories`
-// keeps its size, its bm25 statistics and its digests. rows are immutable and
-// idempotent on (source, external_id), which is what makes a re-sent or partial
-// batch safe. a derived memory cites the episode it came from through
-// memory_episodes, and the read path is src/memory/episode-context.ts.
+// keeps its size, its bm25 statistics and its digests. rows are immutable and idempotent
+// on (namespace, source, source instance, external id) — the same upstream id in two
+// namespaces is two rows — which is what makes a re-sent or partial batch safe. a derived
+// memory cites the episode it came from through memory_episodes, and the read path is
+// src/memory/episode-context.ts.
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
+import { currentCaller, visibilityClause, type CallerScope } from './access.js'
 import {
   getEmbedding,
   getEmbeddings,
@@ -79,6 +81,8 @@ export interface IngestEpisodesInput {
   items: IngestEpisodeItem[]
   /** 'mcp' for a tool call: only an agent write can be refused by a warn-mode rule */
   origin?: string
+  /** the identity the rows are written for; defaults to the caller in scope */
+  caller?: CallerScope
   now?: number
   /** false when sqlite-vec is unavailable: the row is written without a vector */
   vectorsAvailable?: boolean
@@ -191,6 +195,7 @@ const INGEST_COLUMNS = [
   'retention',
   'expires_at',
   'provenance_json',
+  'owner_principal',
 ] as const
 
 /** one statement per batch, one transaction for the batch */
@@ -225,10 +230,14 @@ function insertEpisodes(
   tx()
 }
 
-/** existing ids for a batch of keys, chunked so the IN list stays small */
+/**
+ * existing ids for a batch of keys, chunked so the IN list stays small. the key is the
+ * tenant-scoped identity (namespace, source, source instance, external id), which is the
+ * same one the unique index enforces, so the dedupe and the constraint agree.
+ */
 function existingIds(
   db: Database.Database,
-  source: string,
+  identity: EpisodeIdentity,
   externalIds: string[]
 ): Map<string, string> {
   const found = new Map<string, string>()
@@ -238,9 +247,16 @@ function existingIds(
     const placeholders = chunk.map(() => '?').join(', ')
     const rows = db
       .prepare(
-        `SELECT external_id, id FROM episodes WHERE source = ? AND external_id IN (${placeholders})`
+        `SELECT external_id, id FROM episodes
+         WHERE namespace = ? AND source = ? AND COALESCE(source_instance, '') = ?
+           AND external_id IN (${placeholders})`
       )
-      .all(source, ...chunk) as Array<{ external_id: string; id: string }>
+      .all(
+        identity.namespace,
+        identity.source,
+        identity.source_instance ?? '',
+        ...chunk
+      ) as Array<{ external_id: string; id: string }>
     for (const row of rows) found.set(row.external_id, row.id)
   }
   return found
@@ -259,6 +275,10 @@ export async function ingestEpisodes(
   const now = input.now ?? startedAt
   const namespace = input.namespace
   const agent = isAgentWrite(input.origin)
+  const caller = input.caller ?? currentCaller()
+  const owner = caller.localOwner ? null : caller.principalId
+  // a named principal's evidence is private unless it says otherwise; the local owner
+  // keeps the column default, which is what a single-user database already holds
   const visibility = input.visibility ?? 'personal'
   const retention = input.retention ?? 'durable'
   const expiresAt =
@@ -311,7 +331,7 @@ export async function ingestEpisodes(
 
   const known = existingIds(
     db,
-    input.source,
+    { namespace, source: input.source, source_instance: input.source_instance ?? null },
     pending.map(({ item }) => `${item.external_id}`)
   )
   const fresh: Array<{ item: IngestEpisodeItem; index: number }> = []
@@ -374,6 +394,7 @@ export async function ingestEpisodes(
       retention,
       expiresAt,
       JSON.stringify(item.provenance ?? {}),
+      owner,
     ])
     embeddings.push(vectors.get(index) ?? null)
     results[index] = { external_id: `${item.external_id}`, status: 'ingested', id }
@@ -401,6 +422,15 @@ export interface EpisodeNamespaceScope {
   namespace_subtree?: string
   /** with namespace_subtree: the node's own rows stay (a child-namespace teardown) */
   exclude_namespace?: string
+  /** the identity a read is served as; defaults to the caller in scope */
+  caller?: CallerScope
+}
+
+/** the columns the unique index keys on: the same upstream id in two namespaces is two rows */
+export interface EpisodeIdentity {
+  namespace: string
+  source: string
+  source_instance: string | null
 }
 
 /**
@@ -413,21 +443,26 @@ export function episodeNamespaceFilter(
   alias = ''
 ): {
   sql: string
-  params: string[]
+  params: unknown[]
 } {
   const col = alias === '' ? 'namespace' : `${alias}.namespace`
+  const visibility = visibilityClause(alias, scope.caller)
+  const scoped = (sql: string, params: unknown[]): { sql: string; params: unknown[] } => ({
+    sql: `${sql} AND ${visibility.sql}`,
+    params: [...params, ...visibility.params],
+  })
   if (scope.namespace_subtree) {
     const ns = scope.namespace_subtree
     const esc = ns.replace(/[\\%_]/g, '\\$&')
     const sql = `(${col} = ? OR ${col} LIKE ? ESCAPE '\\' OR ${col} LIKE ? ESCAPE '\\')`
     const params = [ns, `${esc}/%`, `${esc}//%`]
     if (scope.exclude_namespace) {
-      return { sql: `(${sql} AND ${col} <> ?)`, params: [...params, scope.exclude_namespace] }
+      return scoped(`(${sql} AND ${col} <> ?)`, [...params, scope.exclude_namespace])
     }
-    return { sql, params }
+    return scoped(sql, params)
   }
   if (scope.namespace) {
-    return { sql: `${col} = ?`, params: [scope.namespace] }
+    return scoped(`${col} = ?`, [scope.namespace])
   }
   return { sql: '', params: [] }
 }
@@ -458,23 +493,189 @@ export function unembeddedEpisodeCount(
   return row.n
 }
 
-/** drop evidence; the fts rows go with the delete trigger, the vectors by rowid */
-export function deleteEpisodes(db: Database.Database, scope: EpisodeNamespaceScope): void {
-  const filter = episodeNamespaceFilter(scope)
-  if (!filter.sql) throw new Error('deleteEpisodes needs a namespace or a namespace_subtree')
-  const ids = (
-    db
-      .prepare(`SELECT vec_rowid FROM episodes WHERE ${filter.sql} AND vec_rowid IS NOT NULL`)
-      .all(...filter.params) as Array<{ vec_rowid: number }>
-  ).map((row) => row.vec_rowid)
+/**
+ * what a delete matches on top of the namespace, in the item-level form the tool, the
+ * expiry sweep and a namespace teardown share. every field narrows further, and the two
+ * expiry flags are alternatives: a row expires at its ttl or at its session's end.
+ */
+export interface EpisodeDeleteSelector {
+  /** source system, as stored on the row */
+  source?: string
+  /** the source's own ids for the items */
+  external_ids?: string[]
+  /** occurred_at strictly before this ms; a row with no occurred_at never matches */
+  before?: number
+  /** a ttl row at or past its expires_at, judged against now */
+  expired?: boolean
+  /** retention='session' whose session row is closed; an unknown session never matches */
+  session_ended?: boolean
+  /** page bound: at most this many rows go in one call */
+  limit?: number
+  now?: number
+}
+
+/** what a delete removed, or would remove, per table */
+export interface EpisodeDeleteCounts {
+  episodes: number
+  links: number
+  vectors: number
+  fts: number
+}
+
+const IN_CHUNK = 400
+
+function placeholders(count: number): string {
+  return Array.from({ length: count }, () => '?').join(', ')
+}
+
+function inChunks(values: string[], size: number = IN_CHUNK): string[][] {
+  const out: string[][] = []
+  for (let i = 0; i < values.length; i += size) out.push(values.slice(i, i + size))
+  return out
+}
+
+function itemFilter(
+  selector: EpisodeDeleteSelector,
+  alias: string,
+  now: number
+): { sql: string; params: unknown[] } {
+  const parts: string[] = []
+  const params: unknown[] = []
+  if (selector.source !== undefined) {
+    parts.push(`${alias}.source = ?`)
+    params.push(selector.source)
+  }
+  if (selector.external_ids !== undefined) {
+    // an empty id list names nothing, so it has to match nothing rather than drop out
+    // of the clause and widen the delete to the whole namespace
+    if (selector.external_ids.length === 0) parts.push('0')
+    else {
+      parts.push(`${alias}.external_id IN (${placeholders(selector.external_ids.length)})`)
+      params.push(...selector.external_ids)
+    }
+  }
+  if (selector.before !== undefined) {
+    parts.push(`(${alias}.occurred_at IS NOT NULL AND ${alias}.occurred_at < ?)`)
+    params.push(selector.before)
+  }
+  const expiry: string[] = []
+  if (selector.expired === true) {
+    expiry.push(`(${alias}.expires_at IS NOT NULL AND ${alias}.expires_at <= ?)`)
+    params.push(now)
+  }
+  if (selector.session_ended === true) {
+    expiry.push(
+      `(${alias}.retention = 'session' AND EXISTS (SELECT 1 FROM sessions s
+         WHERE s.id = ${alias}.session_id AND s.ended_at IS NOT NULL))`
+    )
+  }
+  if (expiry.length > 0) parts.push(expiry.length === 1 ? expiry[0] : `(${expiry.join(' OR ')})`)
+  return { sql: parts.join(' AND '), params }
+}
+
+/**
+ * the namespace clause and the item clause, and the refusal that keeps a whole-store
+ * delete from being expressible by leaving both out
+ */
+function deleteMatch(
+  scope: EpisodeNamespaceScope,
+  selector: EpisodeDeleteSelector,
+  now: number
+): { sql: string; params: unknown[] } {
+  const namespace = episodeNamespaceFilter(scope, 'episodes')
+  const item = itemFilter(selector, 'episodes', now)
+  const parts = [namespace.sql, item.sql].filter((part) => part !== '')
+  if (parts.length === 0) {
+    throw new Error(
+      'deleteEpisodes refuses to match every episode in the store: pass a namespace, source, external_ids or before'
+    )
+  }
+  return { sql: parts.join(' AND '), params: [...namespace.params, ...item.params] }
+}
+
+/** the page bound, as one more predicate over the same match */
+function boundedMatch(
+  match: { sql: string; params: unknown[] },
+  limit: number | undefined
+): { sql: string; params: unknown[] } {
+  if (!limit || limit <= 0) return match
+  return {
+    sql: `rowid IN (SELECT rowid FROM episodes WHERE ${match.sql} LIMIT ?)`,
+    params: [...match.params, limit],
+  }
+}
+
+/** what deleteEpisodes would remove, for a dry run; the row count is the fts count too */
+export function countMatchingEpisodes(
+  db: Database.Database,
+  scope: EpisodeNamespaceScope = {},
+  selector: EpisodeDeleteSelector = {}
+): EpisodeDeleteCounts {
+  const now = selector.now ?? Date.now()
+  const match = boundedMatch(deleteMatch(scope, selector, now), selector.limit)
+  const rows = db
+    .prepare(`SELECT vec_rowid FROM episodes WHERE ${match.sql}`)
+    .all(...match.params) as Array<{ vec_rowid: number | null }>
+  const links = db
+    .prepare(
+      `SELECT COUNT(*) AS n FROM memory_episodes WHERE episode_id IN (SELECT id FROM episodes WHERE ${match.sql})`
+    )
+    .get(...match.params) as { n: number }
+  return {
+    episodes: rows.length,
+    links: links.n,
+    vectors: rows.filter((row) => row.vec_rowid !== null).length,
+    // one index row goes per episode: the delete trigger feeds the fts5 'delete' command
+    fts: rows.length,
+  }
+}
+
+/**
+ * drop evidence: the rows, their links, their fts index rows and their vectors, in one
+ * transaction, and the counts come back so a caller can report what it reclaimed.
+ * the vectors go by rowid because vec0 has no trigger.
+ */
+export function deleteEpisodes(
+  db: Database.Database,
+  scope: EpisodeNamespaceScope = {},
+  selector: EpisodeDeleteSelector = {}
+): EpisodeDeleteCounts {
+  const now = selector.now ?? Date.now()
+  const match = boundedMatch(deleteMatch(scope, selector, now), selector.limit)
+  const counts: EpisodeDeleteCounts = { episodes: 0, links: 0, vectors: 0, fts: 0 }
+  // a database opened without sqlite-vec has no episode_vectors at all, so there is
+  // nothing to remove even where a row carries a vec_rowid
+  const vectorsAvailable = episodeVectorsAvailable(db)
   const tx = db.transaction(() => {
-    db.prepare(`DELETE FROM episodes WHERE ${filter.sql}`).run(...filter.params)
-    // vec0 has no trigger, so the vectors of the deleted rows are removed here
-    for (const vecRowid of ids) {
-      db.prepare('DELETE FROM episode_vectors WHERE rowid = ?').run(vecRowid)
+    // the matched ids are materialized first: the delete then names them, so it never
+    // re-reads the table it is emptying
+    const rows = db
+      .prepare(`SELECT id, vec_rowid FROM episodes WHERE ${match.sql}`)
+      .all(...match.params) as Array<{ id: string; vec_rowid: number | null }>
+    const ids = rows.map((row) => row.id)
+    const ftsBefore = (
+      db.prepare('SELECT COUNT(*) AS n FROM episodes_fts').get() as { n: number }
+    ).n
+    for (const chunk of inChunks(ids)) {
+      const list = placeholders(chunk.length)
+      counts.links += db
+        .prepare(`DELETE FROM memory_episodes WHERE episode_id IN (${list})`)
+        .run(...chunk).changes
+      counts.episodes += db.prepare(`DELETE FROM episodes WHERE id IN (${list})`).run(...chunk).changes
+    }
+    counts.fts = ftsBefore -
+      (db.prepare('SELECT COUNT(*) AS n FROM episodes_fts').get() as { n: number }).n
+    if (vectorsAvailable) {
+      for (const row of rows) {
+        if (row.vec_rowid === null) continue
+        counts.vectors += db
+          .prepare('DELETE FROM episode_vectors WHERE rowid = ?')
+          .run(row.vec_rowid).changes
+      }
     }
   })
   tx()
+  return counts
 }
 
 export interface MemoryEpisodeLink {
@@ -496,23 +697,108 @@ export function linkMemoryEpisode(
   ).run(link.memory_id, link.episode_id, link.span_start ?? null, link.span_end ?? null, now)
 }
 
+/**
+ * cite the evidence a task's summary memory was distilled from: every episode the
+ * source tagged with that task id, at episode granularity, so the span stays unknown
+ * rather than invented
+ */
+export function linkTaskEpisodes(
+  db: Database.Database,
+  memoryId: string,
+  taskId: string,
+  now: number = Date.now()
+): number {
+  return db
+    .prepare(
+      `INSERT OR IGNORE INTO memory_episodes (memory_id, episode_id, span_start, span_end, created_at)
+       SELECT ?, id, NULL, NULL, ? FROM episodes WHERE task_id = ?`
+    )
+    .run(memoryId, now, taskId).changes
+}
+
+/**
+ * a memory derived from other memories cites the union of their evidence, spans
+ * included: the span belongs to the episode, not to the row that quoted it, so a
+ * reader walking back from the derived memory still lands on the same text
+ */
+export function inheritMemoryEpisodes(
+  db: Database.Database,
+  memoryId: string,
+  sourceMemoryIds: string[],
+  now: number = Date.now()
+): number {
+  const sources = sourceMemoryIds.filter((id) => id !== memoryId)
+  if (sources.length === 0) return 0
+  let linked = 0
+  for (const chunk of inChunks(sources)) {
+    linked += db
+      .prepare(
+        `INSERT OR IGNORE INTO memory_episodes (memory_id, episode_id, span_start, span_end, created_at)
+         SELECT ?, episode_id, span_start, span_end, ? FROM memory_episodes
+         WHERE memory_id IN (${placeholders(chunk.length)})`
+      )
+      .run(memoryId, now, ...chunk).changes
+  }
+  return linked
+}
+
 /** the evidence behind one memory, oldest episode first */
 export function episodesForMemory(
   db: Database.Database,
   memoryId: string
-): Array<MemoryEpisodeLink & { session_id: string; occurred_at: number | null }> {
+): Array<
+  MemoryEpisodeLink & {
+    source: string
+    external_id: string
+    uri: string | null
+    session_id: string
+    occurred_at: number | null
+  }
+> {
   return db
     .prepare(
       `SELECT me.memory_id, me.episode_id, me.span_start, me.span_end,
-              e.session_id, e.occurred_at
+              e.source, e.external_id, e.uri, e.session_id, e.occurred_at
        FROM memory_episodes me
        JOIN episodes e ON e.id = me.episode_id
        WHERE me.memory_id = ?
        ORDER BY e.occurred_at ASC, e.id ASC`
     )
     .all(memoryId) as Array<
-    MemoryEpisodeLink & { session_id: string; occurred_at: number | null }
+    MemoryEpisodeLink & {
+      source: string
+      external_id: string
+      uri: string | null
+      session_id: string
+      occurred_at: number | null
+    }
   >
+}
+
+/** one cited episode as a tool response carries it */
+export interface CitedEpisode {
+  id: string
+  source: string
+  external_id: string
+  uri: string | null
+  occurred_at: number | null
+  session_id: string
+  span_start: number | null
+  span_end: number | null
+}
+
+/** the evidence one memory cites, shaped for a response */
+export function citedEpisodes(db: Database.Database, memoryId: string): CitedEpisode[] {
+  return episodesForMemory(db, memoryId).map((row) => ({
+    id: row.episode_id,
+    source: row.source,
+    external_id: row.external_id,
+    uri: row.uri,
+    occurred_at: row.occurred_at,
+    session_id: row.session_id,
+    span_start: row.span_start,
+    span_end: row.span_end,
+  }))
 }
 
 /** the stored columns, as better-sqlite3 hands them back */

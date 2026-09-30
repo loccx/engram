@@ -24,6 +24,10 @@ export interface ProgressNote {
 export interface Task {
   id: string
   namespace: string
+  /** null is the local owner's task; a named principal's task carries its id */
+  owner_principal: string | null
+  /** null (the local owner's default) is not personal */
+  visibility: string | null
   session_id: string | null
   title: string
   goal: string
@@ -69,6 +73,8 @@ export interface TaskStartInput {
   namespace: string
   title: string
   goal: string
+  /** personal|project|team|org; a named principal defaults to personal */
+  visibility?: string
   session_id?: string | null
   plan?: Array<string | PlanItemDelta>
   artifacts?: string[]

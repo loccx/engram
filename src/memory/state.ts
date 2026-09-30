@@ -5,6 +5,7 @@
 // superseded value, which is the failure this module exists to remove.
 import type Database from 'better-sqlite3'
 import { SUPERSEDES_FILTER_THRESHOLD } from '../contradictions/supersession.js'
+import { visibilityClause } from './access.js'
 import type { MemoryRow } from './row.js'
 import type { MemoryType, StateEntry, StateSlot, StateView, GetStateOptions } from './types.js'
 
@@ -65,9 +66,10 @@ function chainIds(db: Database.Database, seedIds: string[], asOf?: number): stri
 function loadRows(db: Database.Database, ids: string[]): MemoryRow[] {
   if (ids.length === 0) return []
   const placeholders = ids.map(() => '?').join(',')
+  const visibility = visibilityClause('memories')
   return db
-    .prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
-    .all(...ids) as MemoryRow[]
+    .prepare(`SELECT * FROM memories WHERE id IN (${placeholders}) AND ${visibility.sql}`)
+    .all(...ids, ...visibility.params) as MemoryRow[]
 }
 
 /** the threshold-filtered link that retires each id, earliest verdict wins */
@@ -105,9 +107,11 @@ export function slotMembers(
 ): SlotMembers | null {
   const keyedRows = db
     .prepare(
-      `SELECT id FROM memories WHERE COALESCE(namespace, project_path) = ? AND state_key = ?`
+      `SELECT id FROM memories
+       WHERE COALESCE(namespace, project_path) = ? AND state_key = ?
+         AND ${visibilityClause('memories').sql}`
     )
-    .all(namespace, key) as Array<{ id: string }>
+    .all(namespace, key, ...visibilityClause('memories').params) as Array<{ id: string }>
   if (keyedRows.length === 0) return null
   const keyed = new Set(keyedRows.map((r) => r.id))
   const ids = chainIds(db, [...keyed], asOf)
@@ -205,11 +209,12 @@ function slotKeys(db: Database.Database, namespace: string, limit: number): stri
       `SELECT state_key AS key
        FROM memories
        WHERE COALESCE(namespace, project_path) = ? AND state_key IS NOT NULL AND state_key != ''
+         AND ${visibilityClause('memories').sql}
        GROUP BY state_key
        ORDER BY MAX(COALESCE(valid_from, created_at)) DESC, state_key ASC
        LIMIT ?`
     )
-    .all(namespace, limit) as Array<{ key: string }>
+    .all(namespace, ...visibilityClause('memories').params, limit) as Array<{ key: string }>
   return rows.map((r) => r.key)
 }
 

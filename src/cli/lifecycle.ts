@@ -9,6 +9,7 @@ import {
   type PruneReport,
 } from '../maintenance/prune.js'
 import { listSupersessionLinks, reverseSupersession } from '../contradictions/reversal.js'
+import { unarchiveMemory } from '../memory/cold-tier.js'
 import { logger } from '../utils/logger.js'
 
 // both commands dry-run by default. --apply goes through the durable queue rather
@@ -40,6 +41,7 @@ export async function runPruneCli(
         archived: 0,
         links_repointed: 0,
         links_removed: 0,
+        episodes_repointed: 0,
         duration_ms: 0,
       },
       enqueued_job_id: null,
@@ -206,11 +208,11 @@ export function registerLifecycleCommands(program: Command): void {
     .option('--db <path>', 'engram.db path')
     .action((id: string, opts: { db?: string }) => {
       const dbm = getDatabase(opts.db)
-      const info = dbm.db
-        .prepare('UPDATE memories SET archived_at = NULL WHERE id = ? AND archived_at IS NOT NULL')
-        .run(id)
+      const result = unarchiveMemory(dbm.db, id)
       console.log(
-        info.changes > 0 ? `Un-archived ${id}` : `Nothing to do: ${id} is not archived (or does not exist)`
+        result.unarchived
+          ? `Un-archived ${id}`
+          : `Nothing to do: ${id} is not archived (or does not exist)`
       )
       dbm.close()
     })

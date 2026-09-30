@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
+import { currentCaller, visibilityClause, visibilityOf, type CallerScope } from '../memory/access.js'
 import {
   CLOSED_STATUSES,
   PLAN_ITEM_STATUSES,
@@ -37,6 +38,8 @@ interface TaskRow {
   created_at: number
   updated_at: number
   closed_at: number | null
+  owner_principal?: string | null
+  visibility?: string | null
 }
 
 interface EventRow {
@@ -65,6 +68,8 @@ function rowToTask(row: TaskRow): Task {
   return {
     id: row.id,
     namespace: row.namespace,
+    owner_principal: row.owner_principal ?? null,
+    visibility: row.visibility ?? null,
     session_id: row.session_id,
     title: row.title,
     goal: row.goal,
@@ -147,9 +152,10 @@ export function createTask(db: Database.Database, input: TaskStartInput): Task {
   const artifacts = [...new Set(cleanList(input.artifacts))]
   const questions = [...new Set(cleanList(input.open_questions))]
 
+  const caller = currentCaller()
   db.prepare(
-    `INSERT INTO tasks (id, namespace, session_id, title, goal, status, plan_json, progress_json, artifacts_json, open_questions_json, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, 'open', ?, '[]', ?, ?, ?, ?)`
+    `INSERT INTO tasks (id, namespace, session_id, title, goal, status, plan_json, progress_json, artifacts_json, open_questions_json, created_at, updated_at, owner_principal, visibility)
+     VALUES (?, ?, ?, ?, ?, 'open', ?, '[]', ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     input.namespace,
@@ -160,7 +166,9 @@ export function createTask(db: Database.Database, input: TaskStartInput): Task {
     JSON.stringify(artifacts),
     JSON.stringify(questions),
     now,
-    now
+    now,
+    caller.localOwner ? null : caller.principalId,
+    visibilityOf(caller, input.visibility)
   )
 
   appendTaskEvent(db, id, 'update', { created: true }, input.author ?? null, now)
@@ -177,19 +185,26 @@ export interface ListTasksOptions {
   /** absent means every status */
   status?: TaskStatus
   limit?: number
+  /** the identity the listing is served as; defaults to the caller in scope */
+  caller?: CallerScope
 }
 
 export function listTasks(db: Database.Database, options: ListTasksOptions): Task[] {
   const limit = options.limit ?? DEFAULT_OPEN_TASKS
+  const visibility = visibilityClause('tasks', options.caller)
   const rows = options.status
     ? (db
         .prepare(
-          'SELECT * FROM tasks WHERE namespace = ? AND status = ? ORDER BY updated_at DESC, id ASC LIMIT ?'
+          `SELECT * FROM tasks WHERE namespace = ? AND status = ? AND ${visibility.sql}
+           ORDER BY updated_at DESC, id ASC LIMIT ?`
         )
-        .all(options.namespace, options.status, limit) as TaskRow[])
+        .all(options.namespace, options.status, ...visibility.params, limit) as TaskRow[])
     : (db
-        .prepare('SELECT * FROM tasks WHERE namespace = ? ORDER BY updated_at DESC, id ASC LIMIT ?')
-        .all(options.namespace, limit) as TaskRow[])
+        .prepare(
+          `SELECT * FROM tasks WHERE namespace = ? AND ${visibility.sql}
+           ORDER BY updated_at DESC, id ASC LIMIT ?`
+        )
+        .all(options.namespace, ...visibility.params, limit) as TaskRow[])
   return rows.map(rowToTask)
 }
 
@@ -200,18 +215,20 @@ export function listOpenTasks(
 ): Task[] {
   const limit = options.limit ?? DEFAULT_OPEN_TASKS
   const open = "status IN ('open', 'blocked')"
+  const visibility = visibilityClause('tasks')
   const rows = options.sessionId
     ? (db
         .prepare(
-          `SELECT * FROM tasks WHERE namespace = ? AND ${open}
+          `SELECT * FROM tasks WHERE namespace = ? AND ${open} AND ${visibility.sql}
            ORDER BY CASE WHEN session_id = ? THEN 0 ELSE 1 END, updated_at DESC, id ASC LIMIT ?`
         )
-        .all(namespace, options.sessionId, limit) as TaskRow[])
+        .all(namespace, ...visibility.params, options.sessionId, limit) as TaskRow[])
     : (db
         .prepare(
-          `SELECT * FROM tasks WHERE namespace = ? AND ${open} ORDER BY updated_at DESC, id ASC LIMIT ?`
+          `SELECT * FROM tasks WHERE namespace = ? AND ${open} AND ${visibility.sql}
+           ORDER BY updated_at DESC, id ASC LIMIT ?`
         )
-        .all(namespace, limit) as TaskRow[])
+        .all(namespace, ...visibility.params, limit) as TaskRow[])
   return rows.map(rowToTask)
 }
 

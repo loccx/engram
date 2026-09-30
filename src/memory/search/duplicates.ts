@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import type { Memory } from '../types.js'
 import { notSupersededClause } from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
+import { visibilityClause } from '../access.js'
 
 export interface DuplicateGroup {
   representative: Memory
@@ -44,6 +45,12 @@ export function findDuplicates(
   if (!options.include_superseded) {
     conditions.push(notSupersededClause('m1.id'))
     conditions.push(notSupersededClause('m2.id'))
+  }
+  // both sides of a pair are rows a duplicate group would name, so both are checked
+  for (const alias of ['m1', 'm2']) {
+    const visibility = visibilityClause(alias)
+    conditions.push(visibility.sql)
+    values.push(...visibility.params)
   }
   values.push(limit)
 

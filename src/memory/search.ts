@@ -6,6 +6,7 @@
 
 import type Database from 'better-sqlite3'
 import type { Memory, SearchResult, MemoryCluster } from './types.js'
+import type { CallerScope } from './access.js'
 import {
   hybridSearch,
   type SearchOptions,
@@ -50,13 +51,18 @@ export class MemorySearch {
   getContext(
     project_path: string,
     limit: number = 20,
-    options: { include_superseded?: boolean; before?: number; as_of?: number } = {}
+    options: {
+      include_superseded?: boolean
+      before?: number
+      as_of?: number
+      caller?: CallerScope
+    } = {}
   ): Memory[] {
     return getContext(this.db, this.contextStmts, project_path, limit, options)
   }
 
-  getClusters(projectPath: string): MemoryCluster[] {
-    return getClusters(this.contextStmts, projectPath)
+  getClusters(projectPath: string, caller?: CallerScope): MemoryCluster[] {
+    return getClusters(this.db, this.contextStmts, projectPath, caller)
   }
 
   traverseGraph(

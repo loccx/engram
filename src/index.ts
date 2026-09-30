@@ -2,6 +2,7 @@
 import { Command } from 'commander'
 import { readPid, isRunning, removePid } from './utils/pid.js'
 import { registerAuthCommands } from './cli/auth.js'
+import { registerPrincipalCommands } from './cli/principals.js'
 import { registerBrainCommands } from './cli/brain.js'
 import { registerHookCommands } from './cli/hook.js'
 import { authHeaders } from './mcp/auth.js'
@@ -356,6 +357,7 @@ program
   })
 
 registerAuthCommands(program)
+registerPrincipalCommands(program)
 registerBrainCommands(program)
 registerLifecycleCommands(program)
 registerSetupCommands(program)

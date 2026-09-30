@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import { getDigest } from '../memory/digest.js'
 import { rosterHits } from '../delivery/roster.js'
 import { PROTOCOL_RULES } from '../delivery/protocol.js'
+import { authorizeNamespace, currentCaller } from '../memory/access.js'
 import { getDatabase } from '../db/init.js'
 
 export interface ResourceEntry {
@@ -137,6 +138,9 @@ export function readResource(uri: string): ResourceReadOutcome | { error: string
   const kind = separator === -1 ? rest : rest.slice(separator + 1)
   const provider = RESOURCE_PROVIDERS.find((entry) => entry.kind === kind)
   if (!provider || !namespace.startsWith('/')) return { error: `unknown resource: ${uri}` }
+  // a uri names a namespace like any argument does, so the credential still decides
+  const refusal = authorizeNamespace(currentCaller(), namespace, 'read')
+  if (refusal) return { error: refusal }
 
   return {
     contents: [{ uri, mimeType: provider.mimeType, text: provider.read(getDatabase().db, namespace) }],

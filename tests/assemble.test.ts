@@ -177,16 +177,56 @@ describe('assemble', () => {
     )
   })
 
+  it('gives the room an empty evidence section leaves back to the qa memories', async () => {
+    // memories only, no episodes: evidence packs last and empty, so its share returns
+    seedNamespace()
+    const budget = 1000
+    const result = await assemble(db, store, search, options({ recipe: 'qa', budgetChars: budget }))
+    const memories = recipeOf('qa').sections.find((section) => section.kind === 'memories')!
+    expect(result.accounting.perSection.evidence.used).toBe(0)
+    expect(result.accounting.perSection.memories.used).toBeGreaterThan(
+      Math.floor(budget * memories.budgetShare)
+    )
+    expect(result.accounting.used).toBeLessThanOrEqual(budget)
+    const ids = result.sections.flatMap((section) => section.items.map((item) => item.id))
+    expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('lets the qa evidence spend the room the memories and summaries leave', async () => {
+    // turns only, no memories: the two small sections pack nothing and hand their room on
+    await ingestEpisodes(db, {
+      namespace: NS,
+      source: 'codex',
+      items: Array.from({ length: 10 }, (_, index) => ({
+        external_id: `carry-${index}`,
+        content: `user: kafka retention question ${index}: ${'how long are the partitions kept '.repeat(8)}`,
+        session_id: `carry-session-${index}`,
+        role: 'user',
+        turn_index: 0,
+        occurred_at: T0 - index * 86_400_000,
+      })),
+      now: T0,
+    })
+    const budget = 1000
+    const result = await assemble(db, store, search, options({ recipe: 'qa', budgetChars: budget }))
+    const evidence = recipeOf('qa').sections.find((section) => section.kind === 'evidence')!
+    expect(result.accounting.perSection.memories.used).toBe(0)
+    expect(result.accounting.perSection.evidence.used).toBeGreaterThan(
+      Math.floor(budget * evidence.budgetShare)
+    )
+    expect(result.accounting.used).toBeLessThanOrEqual(budget)
+  })
+
   it('serves the qa evidence section from the episode layer', async () => {
     seedNamespace()
     // no episodes ingested: the section is empty rather than a second copy of the memories
     const withoutEvidence = await assemble(db, store, search, options({ recipe: 'qa' }))
     expect(withoutEvidence.sections.map((section) => section.kind)).toEqual([
-      'memories',
       'evidence',
+      'memories',
       'summaries',
     ])
-    expect(withoutEvidence.sections[1].items).toEqual([])
+    expect(withoutEvidence.sections[0].items).toEqual([])
     expect(withoutEvidence.accounting.perSection.evidence.items).toBe(0)
     expect(withoutEvidence.accounting.deduped).toBe(0)
 
@@ -286,11 +326,17 @@ describe('assemble', () => {
       now: T0,
     })
 
-    const evidenceSpec = recipeOf('qa').sections.find((section) => section.kind === 'evidence')!
-    expect(evidenceSpec.allocation).toEqual({
-      default: { policy: 'rank-greedy' },
-      archetypes: { aggregation: { policy: 'breadth-first', reserveTopHits: 1 } },
-    })
+    // the shipped qa recipe serves every query in rank order; routing stays a producer
+    // capability a recipe can ask for, which is what the rest of this test exercises
+    const shipped = recipeOf('qa').sections.find((section) => section.kind === 'evidence')!
+    expect(shipped.allocation).toEqual({ default: { policy: 'rank-greedy' } })
+    const evidenceSpec = {
+      ...shipped,
+      allocation: {
+        default: { policy: 'rank-greedy' as const },
+        archetypes: { aggregation: { policy: 'breadth-first' as const, reserveTopHits: 1 } },
+      },
+    }
 
     // room for three dated groups, not for the deepest one of a single session
     const sectionChars = 150

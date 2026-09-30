@@ -82,6 +82,31 @@ describe('migration runner', () => {
       expect(indexExists(db, index), index).toBe(true)
     }
 
+    // 024: eviction ledger. 23 stays reserved for a branch that has not merged, so the
+    // registration is asserted by membership, never by a contiguous version list.
+    expect(migrations.map((m) => m.version)).toContain(24)
+    expect(tableExists(db, 'eviction_events')).toBe(true)
+    for (const index of [
+      'idx_eviction_events_ts',
+      'idx_eviction_events_action',
+      'idx_eviction_events_memory',
+    ]) {
+      expect(indexExists(db, index), index).toBe(true)
+    }
+    const evictionColumns = db.prepare("PRAGMA table_info('eviction_events')").all() as Array<{
+      name: string
+    }>
+    expect(evictionColumns.map((c) => c.name)).toEqual([
+      'id',
+      'ts',
+      'namespace',
+      'memory_id',
+      'action',
+      'reason',
+      'tier',
+      'job_id',
+    ])
+
     const auditRows = db.prepare('SELECT version, description FROM schema_migrations ORDER BY version').all()
     expect(auditRows).toEqual(
       migrations.map((m) => ({ version: m.version, description: m.description }))

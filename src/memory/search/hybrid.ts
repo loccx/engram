@@ -8,6 +8,7 @@ import {
   validityAtClause,
 } from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
+import { visibilityClause, type CallerScope } from '../access.js'
 import {
   ebbinghaus,
   classifyQuery,
@@ -46,6 +47,8 @@ export interface SearchOptions {
   project_path?: string
   /** the node itself or anything under it, never a sibling; not with project_path */
   namespace_subtree?: string
+  /** the identity the search is served as; defaults to the caller in scope */
+  caller?: CallerScope
   limit?: number
   type?: MemoryType
   /** legacy bound: only valid_from <= t, no valid_until */
@@ -53,6 +56,8 @@ export interface SearchOptions {
   /** full historical view at t, including time-aware supersession; wins over before */
   as_of?: number
   include_superseded?: boolean
+  /** audit read-back: archived (cold) rows stay hidden otherwise, on every channel */
+  include_archived?: boolean
   use_reranker?: boolean
   rerank_top_n?: number
   /** reranker weight; 1 leaves the window and the unwindowed tail on different scales */
@@ -415,6 +420,11 @@ function memoryPredicates(options: SearchOptions): { conditions: string[]; value
     conditions.push('COALESCE(m.namespace, m.project_path) = ?')
     values.push(options.project_path)
   }
+  // the ranker and the vector rowid set share these predicates, so the visibility rule
+  // lands on both or neither
+  const visibility = visibilityClause('m', options.caller)
+  conditions.push(visibility.sql)
+  values.push(...visibility.params)
   if (options.type) {
     conditions.push('m.type = ?')
     values.push(options.type)
@@ -428,11 +438,17 @@ function memoryPredicates(options: SearchOptions): { conditions: string[]; value
   }
   if (!options.include_superseded) {
     if (options.as_of !== undefined) {
-      conditions.push(notSupersededAtClause('m.id', '?'))
+      conditions.push(
+        notSupersededAtClause('m.id', '?', { includeArchived: options.include_archived === true })
+      )
       values.push(options.as_of)
     } else {
-      conditions.push(notSupersededClause('m.id'))
+      conditions.push(notSupersededClause('m.id', { includeArchived: options.include_archived === true }))
     }
+  } else if (!options.include_archived) {
+    // archived is not superseded: an audit read of superseded rows never resurrects a
+    // retired one, only include_archived opts in (the rule store.list already applies)
+    conditions.push('m.archived_at IS NULL')
   }
   return { conditions, values }
 }
