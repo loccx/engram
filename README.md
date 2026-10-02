@@ -109,12 +109,14 @@ every write backs the file up first (`<file>.engram.bak`, kept from the first ru
 | event | what it injects |
 |---|---|
 | `session-start` | the standing rules, the open task brief and a short roster for the session's namespace. fires again after compaction. |
-| `pre-tool-use` | a cue: the gotchas, bugs, decisions and patterns that mention the file a tool is about to touch, matched on the path, the path relative to the namespace and the basename. each memory is injected at most once per session. |
+| `pre-tool-use` | a cue: the gotchas, bugs, decisions and patterns that mention the file a tool is about to touch, matched on the path, the path relative to the namespace and the basename. a best-effort cache suppresses the most recent 200 cue ids in a window; compaction reopens eligibility. |
 | `pre-compact` | nothing on stdout. writes a checkpoint event to every open task and queues consolidation for the namespace, so the plan and the last progress note are already on disk when the host drops the context. |
 | `post-compact` | the open task brief again, so the work resumes from the stored plan rather than from the summary the host kept. |
 | `subagent-start` | a handoff brief trimmed to the unfinished plan items and the newest progress note. |
 | `subagent-stop` | nothing on stdout. records the subagent's returned summary as a progress note on the parent task. |
 | `session-end` | nothing on stdout. closes the namespace's session and queues its consolidation. |
+
+cue windows are keyed by the session and the compaction notification kinds. a repeated kind opens a new window even inside 30 s; `post-compact` and `session-start` with `source: compact` may pair once inside that delay. without a host compaction id, different-kind notifications for two distinct compactions can still look like one pair. a pair delayed beyond 30 s can re-deliver a cue twice. this is a bounded compatibility heuristic, not a complete context-residency guarantee.
 
 hooks fail open. daemon down, slower than 1.5 s, or unreadable input means no output and exit 0 — a hook must never break a session, so an unreachable store costs a cue, not a reply. to turn delivery off, run `engram setup <agent> --apply --uninstall`, or leave the hooks installed and set `"disableAllHooks": true` in the host's settings.
 

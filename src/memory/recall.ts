@@ -17,6 +17,8 @@ import type { MemoryStore } from './store.js'
 import type { MemorySearch } from './search.js'
 import type { SearchResult } from './types.js'
 import { getDigest } from './digest.js'
+import { namespaceFilter } from './search/scope.js'
+import { currentCaller, holdsVerb } from './access.js'
 
 export type RecallMode = 'fused' | 'hybrid' | 'graph' | 'entity'
 export type RecallSource = 'hybrid' | 'entity' | 'graph'
@@ -187,7 +189,7 @@ export async function recallChannel(
     const seeds = options.seed_id ? [options.seed_id] : []
     const walked =
       seeds.length > 0
-        ? search.pprSearch(seeds, limit, { include_superseded: false, as_of: asOf })
+        ? search.pprSearch(seeds, limit, { project_path: options.project_path, include_superseded: false, as_of: asOf })
         : []
     candidates = walked.map((m) => ({
       memory: { ...m, score: m.similarity },
@@ -205,6 +207,17 @@ export async function recallChannel(
     candidates = results.map((m) => ({ memory: m, source: 'hybrid' as RecallSource }))
   }
 
+  // each branch must enforce access before ranking; this final boundary also keeps a
+  // stale or substituted channel from leaking a row through enrichment or handles.
+  if (candidates.length > 0) {
+    const scope = namespaceFilter('m', { project_path: options.project_path })
+    const ids = [...new Set(candidates.map((c) => c.memory.id))]
+    const allowed = new Set((db.prepare(
+      `SELECT m.id FROM memories m WHERE m.id IN (${ids.map(() => '?').join(',')}) AND ${scope.sql}`
+    ).all(...ids, ...scope.params) as Array<{ id: string }>).map((row) => row.id))
+    candidates = candidates.filter((c) => allowed.has(c.memory.id))
+  }
+
   const byId = new Map<string, { memory: SearchResult; source: RecallSource }>()
   for (const c of candidates) {
     if (!byId.has(c.memory.id)) byId.set(c.memory.id, c)
@@ -219,7 +232,9 @@ export async function recallChannel(
     void _score
     return rest
   })
-  const enrichedAll = enrichMemories(db, baseMemories, now)
+  const enrichedAll = enrichMemories(db, baseMemories, now, {
+    project_path: options.project_path,
+  })
   const trustedIdx: number[] = []
   let trustFiltered = 0
   for (let i = 0; i < enrichedAll.length; i++) {
@@ -383,9 +398,10 @@ export function recallSummaries(
   options: { asOf?: number; memberIds?: Set<string> } = {}
 ): RecallSummaries {
   const asOf = options.asOf
+  if (!holdsVerb(currentCaller(), namespace, 'read')) return { digest: null, topics: [] }
   return {
     digest: asOf === undefined ? getDigest(db, namespace) : null,
-    topics: buildTopics(db, clusters, asOf, options.memberIds),
+    topics: buildTopics(db, namespace, clusters, asOf, options.memberIds),
   }
 }
 
@@ -395,13 +411,25 @@ export function recallSummaries(
  */
 function buildTopics(
   db: Database.Database,
+  namespace: string,
   clusters: MemoryCluster[],
   asOf: number | undefined,
   recallIds: Set<string> | undefined
 ): RecallTopic[] {
   const out: RecallTopic[] = []
+  const scope = namespaceFilter('memories', { project_path: namespace })
   for (const c of clusters) {
+    if (c.project_path !== namespace) continue
     let memberIds = c.member_ids
+    if (memberIds.length > 0) {
+      const placeholders = memberIds.map(() => '?').join(',')
+      const readable = new Set((db.prepare(
+        `SELECT id FROM memories WHERE id IN (${placeholders}) AND ${scope.sql}`
+      ).all(...memberIds, ...scope.params) as Array<{ id: string }>).map((row) => row.id))
+      // a summary is derived text, not a filterable list of facts; a forged foreign
+      // member withholds the topic instead of exposing its id, text, or full count.
+      if (memberIds.some((id) => !readable.has(id))) continue
+    }
     if (asOf !== undefined && memberIds.length > 0) {
       const placeholders = memberIds.map(() => '?').join(',')
       const validRows = db

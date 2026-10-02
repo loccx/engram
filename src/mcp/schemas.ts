@@ -401,11 +401,29 @@ export const MarkShareableSchema = z.object({
   shareable: z.boolean().optional().default(true),
 })
 
+/** exact structured reads; trusted hosts register schemas and attach sidecars. */
+export const QueryAssertionsSchema = z.object({
+  namespace: z.string().min(1).optional(),
+  project_path: z.string().min(1).optional(),
+  subject: z.string().min(1).max(512).optional(),
+  predicate: z.string().min(1).max(512).optional(),
+  schema_id: z.string().min(1).max(512).optional(),
+  // the bounded assertion validator checks recursive JSON shape and byte limits.
+  value: z.unknown().optional(),
+  as_of: z.number().int().optional(),
+  valid_at: z.number().int().optional(),
+  observed_before: z.number().int().optional(),
+  include_superseded: z.boolean().optional(),
+  include_archived: z.boolean().optional(),
+  limit: z.number().int().min(1).max(100).optional(),
+}).strict()
+
 export const SCHEMAS: Record<string, z.ZodType> = {
   store_memory: StoreMemorySchema,
   search_memories: SearchMemoriesSchema,
   get_context: GetContextSchema,
   get_state: GetStateSchema,
+  query_assertions: QueryAssertionsSchema,
   get_related: GetRelatedSchema,
   search_by_entity: SearchByEntitySchema,
   consolidate_memories: ConsolidateSchema,

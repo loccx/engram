@@ -110,6 +110,24 @@ describe('brains/privacy: snapshots carry no owner filesystem layout', () => {
     expect(manifest.included_layers ?? '').not.toContain(homedir())
   })
 
+  it('redacts custom home roots without changing siblings or embedded path fragments', () => {
+    const home = '/srv/profiles/fixture.a+z[1]'
+    expect(scrubHomePaths(`see ${home}/proj/x.ts and "${home}"`, home)).toBe(
+      'see ~/proj/x.ts and "~"'
+    )
+    expect(scrubHomePaths(`${home}-other/proj ${home}.other/proj /prefix${home}/proj`, home)).toBe(
+      `${home}-other/proj ${home}.other/proj /prefix${home}/proj`
+    )
+    expect(scrubHomePaths(`(${home}/proj), ${home}.`, `${home}/`)).toBe('(~/proj), ~.')
+    expect(scrubHomePaths('C:\\Profiles\\fixture\\proj', 'C:\\Profiles\\fixture')).toBe('~\\proj')
+    expect(scrubHomePaths('/srv/profiles/FIXTURE.A+Z[1]/proj', home)).toBe('~/proj')
+    expect(scrubHomePaths('/srv/profiles/FIXTURE.A+Z[1]-other/proj', home)).toBe(
+      '/srv/profiles/FIXTURE.A+Z[1]-other/proj'
+    )
+    expect(scrubHomePaths('c:\\profiles\\FIXTURE\\proj', 'C:\\Profiles\\fixture')).toBe('~\\proj')
+    expect(scrubHomePaths('/srv/proj', '/')).toBe('/srv/proj')
+  })
+
   it('redacts home paths inside free text and extracted entities', () => {
     expect(scrubHomePaths('see /Users/alice/proj/x.ts for the fix')).toBe('see ~/proj/x.ts for the fix')
     expect(scrubHomePaths('/home/bob/app and C:\\Users\\bob\\app')).toBe('~/app and ~\\app')

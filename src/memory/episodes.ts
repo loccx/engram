@@ -7,7 +7,7 @@
 // src/memory/episode-context.ts.
 import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
-import { currentCaller, visibilityClause, type CallerScope } from './access.js'
+import { authorizeNamespace, currentCaller, grantedPrefixes, visibilityClause, type CallerScope, type Verb } from './access.js'
 import {
   getEmbedding,
   getEmbeddings,
@@ -17,6 +17,7 @@ import {
 } from '../embeddings/pipeline.js'
 import { admit, isAgentWrite, type AdmissionWarning } from './admission.js'
 import { logger } from '../utils/logger.js'
+import { forgetSourceEpisodes, previewSourceForget } from '../sources/lifecycle.js'
 
 export type EpisodeVisibility = 'personal' | 'project' | 'team' | 'org'
 export type EpisodeRetention = 'durable' | 'session' | 'ephemeral'
@@ -424,6 +425,14 @@ export interface EpisodeNamespaceScope {
   exclude_namespace?: string
   /** the identity a read is served as; defaults to the caller in scope */
   caller?: CallerScope
+  /** explicit historical reads only; deletion/revocation removes the text entirely */
+  include_source_history?: boolean
+}
+
+/** current source revisions only; ordinary episodes retain their historical defaults. */
+export function episodeCurrentClause(alias = ''): string {
+  const col = alias === '' ? '' : `${alias}.`
+  return `${col}source_state = 'current'`
 }
 
 /** the columns the unique index keys on: the same upstream id in two namespaces is two rows */
@@ -440,22 +449,36 @@ export interface EpisodeIdentity {
  */
 export function episodeNamespaceFilter(
   scope: EpisodeNamespaceScope,
-  alias = ''
+  alias = '',
+  sourceVerb: Verb = 'read'
 ): {
   sql: string
   params: unknown[]
 } {
   const col = alias === '' ? 'namespace' : `${alias}.namespace`
   const visibility = visibilityClause(alias, scope.caller)
+  const caller = scope.caller ?? currentCaller()
+  const authority: string[] = []
+  const authorityParams: unknown[] = []
+  for (const prefix of grantedPrefixes(caller, sourceVerb)) {
+    const normalized = prefix.replace(/\/+$/, '')
+    if (normalized === '') { authority.push('1'); continue }
+    const esc = normalized.replace(/[\\%_]/g, '\\$&')
+    authority.push(`(${col} = ? OR (${col} LIKE ? ESCAPE '\\' AND substr(${col}, 1, length(?) + 1) COLLATE BINARY = ? || '/'))`)
+    authorityParams.push(normalized, `${esc}/%`, normalized, normalized)
+  }
+  // every evidence read intersects its query scope with the requested authority verb.
+  const sourceAuthority = `(${authority.length ? authority.join(' OR ') : '0'})`
   const scoped = (sql: string, params: unknown[]): { sql: string; params: unknown[] } => ({
-    sql: `${sql} AND ${visibility.sql}`,
-    params: [...params, ...visibility.params],
+    sql: `${sql} AND ${visibility.sql} AND ${sourceAuthority}${scope.include_source_history ? '' : ` AND ${episodeCurrentClause(alias)}`}`,
+    params: [...params, ...visibility.params, ...authorityParams],
   })
   if (scope.namespace_subtree) {
     const ns = scope.namespace_subtree
     const esc = ns.replace(/[\\%_]/g, '\\$&')
-    const sql = `(${col} = ? OR ${col} LIKE ? ESCAPE '\\' OR ${col} LIKE ? ESCAPE '\\')`
-    const params = [ns, `${esc}/%`, `${esc}//%`]
+    const prefix = `(${col} = ? OR ${col} LIKE ? ESCAPE '\\' OR ${col} LIKE ? ESCAPE '\\')`
+    const sql = caller.localOwner ? prefix : `(${prefix} AND (${col} = ? OR substr(${col}, 1, length(?) + 1) COLLATE BINARY = ? || '/'))`
+    const params = caller.localOwner ? [ns, `${esc}/%`, `${esc}//%`] : [ns, `${esc}/%`, `${esc}//%`, ns, ns, ns]
     if (scope.exclude_namespace) {
       return scoped(`(${sql} AND ${col} <> ?)`, [...params, scope.exclude_namespace])
     }
@@ -464,7 +487,10 @@ export function episodeNamespaceFilter(
   if (scope.namespace) {
     return scoped(`${col} = ?`, [scope.namespace])
   }
-  return { sql: '', params: [] }
+  return {
+    sql: `${visibility.sql} AND ${sourceAuthority}${scope.include_source_history ? '' : ` AND ${episodeCurrentClause(alias)}`}`,
+    params: [...visibility.params, ...authorityParams],
+  }
 }
 
 export function countEpisodes(db: Database.Database, scope: EpisodeNamespaceScope = {}): number {
@@ -582,10 +608,10 @@ function deleteMatch(
   selector: EpisodeDeleteSelector,
   now: number
 ): { sql: string; params: unknown[] } {
-  const namespace = episodeNamespaceFilter(scope, 'episodes')
+  const namespace = episodeNamespaceFilter(scope, 'episodes', 'delete')
   const item = itemFilter(selector, 'episodes', now)
   const parts = [namespace.sql, item.sql].filter((part) => part !== '')
-  if (parts.length === 0) {
+  if (!scope.namespace && !scope.namespace_subtree && item.sql === '') {
     throw new Error(
       'deleteEpisodes refuses to match every episode in the store: pass a namespace, source, external_ids or before'
     )
@@ -614,19 +640,28 @@ export function countMatchingEpisodes(
   const now = selector.now ?? Date.now()
   const match = boundedMatch(deleteMatch(scope, selector, now), selector.limit)
   const rows = db
-    .prepare(`SELECT vec_rowid FROM episodes WHERE ${match.sql}`)
-    .all(...match.params) as Array<{ vec_rowid: number | null }>
-  const links = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM memory_episodes WHERE episode_id IN (SELECT id FROM episodes WHERE ${match.sql})`
-    )
-    .get(...match.params) as { n: number }
+    .prepare(`SELECT id, vec_rowid FROM episodes WHERE ${match.sql}`)
+    .all(...match.params) as Array<{ id: string; vec_rowid: number | null }>
+  const impact = previewSourceForget(db, rows.map((row) => row.id))
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  for (const id of impact.episodeIds) {
+    if (byId.has(id)) continue
+    const row = db.prepare('SELECT id, vec_rowid FROM episodes WHERE id = ?').get(id) as { id: string; vec_rowid: number | null }
+    byId.set(id, row)
+  }
+  const links = new Set<number>()
+  for (const id of byId.keys()) {
+    for (const row of db.prepare('SELECT rowid FROM memory_episodes WHERE episode_id = ?').all(id) as Array<{ rowid: number }>) links.add(row.rowid)
+  }
+  for (const id of impact.memoryIds) {
+    for (const row of db.prepare('SELECT rowid FROM memory_episodes WHERE memory_id = ?').all(id) as Array<{ rowid: number }>) links.add(row.rowid)
+  }
   return {
-    episodes: rows.length,
-    links: links.n,
-    vectors: rows.filter((row) => row.vec_rowid !== null).length,
+    episodes: byId.size,
+    links: links.size,
+    vectors: [...byId.values()].filter((row) => row.vec_rowid !== null).length,
     // one index row goes per episode: the delete trigger feeds the fts5 'delete' command
-    fts: rows.length,
+    fts: byId.size,
   }
 }
 
@@ -653,9 +688,16 @@ export function deleteEpisodes(
       .prepare(`SELECT id, vec_rowid FROM episodes WHERE ${match.sql}`)
       .all(...match.params) as Array<{ id: string; vec_rowid: number | null }>
     const ids = rows.map((row) => row.id)
+    // source-managed evidence needs a durable identity-wide forget before links go.
+    // the hook also purges dependent claims inside this same transaction.
+    const linksBefore = (db.prepare('SELECT COUNT(*) AS n FROM memory_episodes').get() as { n: number }).n
+    const episodesBefore = (db.prepare('SELECT COUNT(*) AS n FROM episodes').get() as { n: number }).n
+    const vectorsBefore = vectorsAvailable
+      ? (db.prepare('SELECT COUNT(*) AS n FROM episode_vectors').get() as { n: number }).n : 0
     const ftsBefore = (
       db.prepare('SELECT COUNT(*) AS n FROM episodes_fts').get() as { n: number }
     ).n
+    forgetSourceEpisodes(db, ids)
     for (const chunk of inChunks(ids)) {
       const list = placeholders(chunk.length)
       counts.links += db
@@ -673,6 +715,10 @@ export function deleteEpisodes(
           .run(row.vec_rowid).changes
       }
     }
+    counts.links = linksBefore - (db.prepare('SELECT COUNT(*) AS n FROM memory_episodes').get() as { n: number }).n
+    counts.episodes = episodesBefore - (db.prepare('SELECT COUNT(*) AS n FROM episodes').get() as { n: number }).n
+    counts.vectors = vectorsAvailable
+      ? vectorsBefore - (db.prepare('SELECT COUNT(*) AS n FROM episode_vectors').get() as { n: number }).n : 0
   })
   tx()
   return counts
@@ -691,6 +737,20 @@ export function linkMemoryEpisode(
   link: MemoryEpisodeLink,
   now: number = Date.now()
 ): void {
+  const managed = db.prepare('SELECT namespace, owner_principal, source_revision_id, source_state FROM episodes WHERE id = ?')
+    .get(link.episode_id) as { namespace: string; owner_principal: string | null; source_revision_id: string | null; source_state: string } | undefined
+  if (managed?.source_revision_id) {
+    const caller = currentCaller()
+    if (managed.owner_principal !== (caller.localOwner ? null : caller.principalId)
+      || authorizeNamespace(caller, managed.namespace, 'read') || authorizeNamespace(caller, managed.namespace, 'write')) {
+      throw new Error('source evidence citation is not authorized for the current caller')
+    }
+    const memory = db.prepare('SELECT COALESCE(namespace, project_path) AS namespace, owner_principal FROM memories WHERE id = ?')
+      .get(link.memory_id) as { namespace: string; owner_principal: string | null } | undefined
+    if (managed.source_state !== 'current' || !memory || memory.namespace !== managed.namespace || memory.owner_principal !== managed.owner_principal) {
+      throw new Error('source evidence citation must be current and owned in the same namespace')
+    }
+  }
   db.prepare(
     `INSERT OR IGNORE INTO memory_episodes (memory_id, episode_id, span_start, span_end, created_at)
      VALUES (?, ?, ?, ?, ?)`
@@ -711,9 +771,11 @@ export function linkTaskEpisodes(
   return db
     .prepare(
       `INSERT OR IGNORE INTO memory_episodes (memory_id, episode_id, span_start, span_end, created_at)
-       SELECT ?, id, NULL, NULL, ? FROM episodes WHERE task_id = ?`
+       SELECT ?, e.id, NULL, NULL, ? FROM episodes e WHERE e.task_id = ? AND ${episodeCurrentClause('e')}
+         AND (e.source_revision_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = ?
+           AND COALESCE(m.namespace, m.project_path) = e.namespace AND m.owner_principal IS e.owner_principal))`
     )
-    .run(memoryId, now, taskId).changes
+    .run(memoryId, now, taskId, memoryId).changes
 }
 
 /**
@@ -734,10 +796,13 @@ export function inheritMemoryEpisodes(
     linked += db
       .prepare(
         `INSERT OR IGNORE INTO memory_episodes (memory_id, episode_id, span_start, span_end, created_at)
-         SELECT ?, episode_id, span_start, span_end, ? FROM memory_episodes
-         WHERE memory_id IN (${placeholders(chunk.length)})`
+         SELECT ?, me.episode_id, me.span_start, me.span_end, ? FROM memory_episodes me
+         JOIN episodes e ON e.id = me.episode_id
+         WHERE me.memory_id IN (${placeholders(chunk.length)}) AND ${episodeCurrentClause('e')}
+           AND (e.source_revision_id IS NULL OR EXISTS (SELECT 1 FROM memories m WHERE m.id = ?
+             AND COALESCE(m.namespace, m.project_path) = e.namespace AND m.owner_principal IS e.owner_principal))`
       )
-      .run(memoryId, now, ...chunk).changes
+      .run(memoryId, now, ...chunk, memoryId).changes
   }
   return linked
 }
@@ -755,16 +820,17 @@ export function episodesForMemory(
     occurred_at: number | null
   }
 > {
+  const scope = episodeNamespaceFilter({}, 'e')
   return db
     .prepare(
       `SELECT me.memory_id, me.episode_id, me.span_start, me.span_end,
               e.source, e.external_id, e.uri, e.session_id, e.occurred_at
        FROM memory_episodes me
        JOIN episodes e ON e.id = me.episode_id
-       WHERE me.memory_id = ?
+       WHERE me.memory_id = ? AND ${scope.sql}
        ORDER BY e.occurred_at ASC, e.id ASC`
     )
-    .all(memoryId) as Array<
+    .all(memoryId, ...scope.params) as Array<
     MemoryEpisodeLink & {
       source: string
       external_id: string

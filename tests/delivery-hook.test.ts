@@ -1,5 +1,5 @@
 import { describe, it, expect, afterEach } from 'vitest'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PROTOCOL_SLIM } from '../src/delivery/protocol.js'
@@ -10,7 +10,7 @@ import {
   runHookProcess,
   toolPaths,
 } from '../src/delivery/hook.js'
-import { cueStatePath, readSeen } from '../src/delivery/cue-state.js'
+import { beginWindow, cueStatePath, markSeen, readSeen } from '../src/delivery/cue-state.js'
 
 const NS = '/work/engram'
 const stateDirs: string[] = []
@@ -198,6 +198,178 @@ describe('pre-tool-use hook', () => {
     )
 
     expect(out).toBe('')
+  })
+})
+
+/** routes the cue and brief reads the way the daemon would, so one fetch serves a lifecycle */
+function routedFetch(): typeof fetch {
+  const cue = {
+    entries: [{ id: 'm-1', type: 'gotcha', content: 'the retry loop double-counts on abort', tags: [] }],
+  }
+  return (async (url: string | URL) => {
+    const path = new URL(String(url)).pathname
+    const payload = path.includes('/delivery/cue')
+      ? cue
+      : path.includes('/delivery/task-brief')
+        ? { briefs: [] }
+        : { entries: [] }
+    return new Response(JSON.stringify(payload), {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+    })
+  }) as unknown as typeof fetch
+}
+
+/** an empty token is no token, so the hook never reaches for a token file */
+const INERT_ENV: NodeJS.ProcessEnv = { ENGRAM_DEFAULT_NAMESPACE: NS, ENGRAM_AUTH_TOKEN: '' }
+const session = { cwd: NS, session_id: 's1' }
+const edit = { ...session, tool_name: 'Edit', tool_input: { file_path: `${NS}/src/delivery/hook.ts` } }
+
+describe('cue window boundaries', () => {
+  it('starts a window that forgets what the previous one showed', () => {
+    const path = cueStatePath('s1', stateDir())
+    markSeen(path, ['a', 'b'])
+
+    expect(beginWindow(path, 'post-compact', 1000, 50)).toEqual({ generation: 1, fresh: true })
+    expect(readSeen(path)).toEqual([])
+  })
+
+  it('joins the other half of the pair rather than clearing what it just delivered', () => {
+    const path = cueStatePath('s1', stateDir())
+    expect(beginWindow(path, 'post-compact', 1000, 30_000)).toEqual({ generation: 1, fresh: true })
+    markSeen(path, ['a'])
+
+    expect(beginWindow(path, 'session-start-compact', 1030, 30_000)).toEqual({
+      generation: 1,
+      fresh: false,
+    })
+    expect(readSeen(path)).toEqual(['a'])
+  })
+
+  it('reopens for a second boundary of a kind this window already absorbed', () => {
+    const path = cueStatePath('s1', stateDir())
+    beginWindow(path, 'post-compact', 1000, 30_000)
+    markSeen(path, ['a'])
+    expect(beginWindow(path, 'session-start-compact', 1030, 30_000).fresh).toBe(false)
+
+    expect(beginWindow(path, 'post-compact', 1060, 30_000)).toEqual({ generation: 2, fresh: true })
+    expect(readSeen(path)).toEqual([])
+  })
+
+  it('reopens for the kind that opened the window once its pair has joined', () => {
+    const path = cueStatePath('s1', stateDir())
+    beginWindow(path, 'session-start-compact', 1000, 30_000)
+    expect(beginWindow(path, 'post-compact', 1010, 30_000).fresh).toBe(false)
+
+    expect(beginWindow(path, 'session-start-compact', 1020, 30_000).fresh).toBe(true)
+  })
+
+  it('starts another window once the pair delay has passed', () => {
+    const path = cueStatePath('s1', stateDir())
+    beginWindow(path, 'post-compact', 1000, 50)
+
+    expect(beginWindow(path, 'session-start-compact', 1060, 50)).toEqual({
+      generation: 2,
+      fresh: true,
+    })
+  })
+
+  it('keeps the window identity across a later mark', () => {
+    const path = cueStatePath('s1', stateDir())
+    beginWindow(path, 'post-compact', 1000, 30_000)
+    markSeen(path, ['a'])
+
+    expect(beginWindow(path, 'session-start-compact', 1030, 30_000)).toEqual({
+      generation: 1,
+      fresh: false,
+    })
+    expect(readSeen(path)).toEqual(['a'])
+  })
+
+  it('reads a state file written before windows existed', () => {
+    const path = join(stateDir(), 'legacy.json')
+    writeFileSync(path, JSON.stringify({ seen: ['a'] }))
+
+    expect(readSeen(path)).toEqual(['a'])
+    expect(beginWindow(path, 'post-compact', 1000, 30_000)).toEqual({ generation: 1, fresh: true })
+    expect(readSeen(path)).toEqual([])
+  })
+
+  it('opens a window over a state file that does not name its boundary kind', () => {
+    const path = join(stateDir(), 'generation-only.json')
+    writeFileSync(path, JSON.stringify({ seen: ['a'], generation: 1, generation_at: 1000 }))
+
+    expect(readSeen(path)).toEqual(['a'])
+    expect(beginWindow(path, 'post-compact', 1030, 30_000).fresh).toBe(true)
+    expect(readSeen(path)).toEqual([])
+  })
+
+  it('survives a state file that is not json at all', () => {
+    const path = join(stateDir(), 'broken.json')
+    writeFileSync(path, 'not json')
+
+    expect(readSeen(path)).toEqual([])
+    expect(beginWindow(path, 'post-compact', 1000, 50).fresh).toBe(true)
+  })
+})
+
+describe('cue delivery across a compaction', () => {
+  /** one state directory per lifecycle, since that is what a host session keeps */
+  function lifecycle() {
+    const dir = stateDir()
+    return (event: string, input: unknown) =>
+      runHookProcess(event, {
+        env: { ...INERT_ENV },
+        stateDir: dir,
+        fetchImpl: routedFetch(),
+        stdin: JSON.stringify(input),
+      })
+  }
+
+  it('re-delivers the cue after the host reports a compaction', async () => {
+    const process = lifecycle()
+
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+    expect(await process('pre-tool-use', edit)).toBe('')
+
+    await process('post-compact', session)
+
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+    expect(await process('pre-tool-use', edit)).toBe('')
+  })
+
+  it('re-delivers the cue when the session is started back up from a compaction', async () => {
+    const process = lifecycle()
+
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+
+    await process('session-start', { ...session, source: 'compact' })
+
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+    expect(await process('pre-tool-use', edit)).toBe('')
+  })
+
+  it('holds the window for a start that is not a compaction', async () => {
+    const process = lifecycle()
+
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+
+    await process('session-start', { ...session, source: 'startup' })
+
+    expect(await process('pre-tool-use', edit)).toBe('')
+  })
+
+  it('re-delivers the cue for a second compaction that closes inside the pair delay', async () => {
+    const process = lifecycle()
+
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+
+    await process('post-compact', session)
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+
+    await process('post-compact', session)
+    expect(await process('pre-tool-use', edit)).toContain('retry loop')
+    expect(await process('pre-tool-use', edit)).toBe('')
   })
 })
 

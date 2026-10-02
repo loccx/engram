@@ -40,6 +40,7 @@
     "eval:contradiction": "tsx eval/run.ts --suite contradiction",
     "eval:budget": "tsx eval/run.ts --suite budget",
     "eval:ab": "tsx eval/run.ts --suite ab",
+    "eval:continuity": "tsx eval/run.ts --suite continuity",
     "eval:longmemeval": "tsx eval/run.ts --suite longmemeval",
     "eval:datasets": "tsx eval/fetch-datasets.ts"
   },

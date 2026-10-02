@@ -4,6 +4,7 @@ import { MemoryStore } from '../src/memory/store.js'
 import { entitySearch, entityQueryTokens } from '../src/memory/search/entity.js'
 import { MEMORY_ENTITY_FTS } from '../src/db/lexical-index.js'
 import { createTestDb } from './helpers.js'
+import type { CallerScope } from '../src/memory/access.js'
 
 const PROJECT = '/work/engram'
 const FOREIGN = '/work/other'
@@ -120,7 +121,8 @@ describe('entity channel', () => {
       `INSERT INTO memory_links (source_id, target_id, similarity, link_type, created_at, confidence, judged_at)
        VALUES (?, ?, 1, 'supersedes', 1, 1, 1)`
     ).run(foreign, graph)
-    expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT }, 10)).toEqual([])
+    // a successor outside the query cannot suppress a row inside it.
+    expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT }, 10).map((r) => r.id)).toEqual([graph])
     expect(
       entitySearch(db, 'traverseGraph', { project_path: PROJECT, include_superseded: true }, 10).map((r) => r.id)
     ).toEqual([graph])
@@ -129,6 +131,29 @@ describe('entity channel', () => {
     expect(
       entitySearch(db, 'traverseGraph', { namespace_subtree: PROJECT, type: 'bug' }, 10).map((r) => r.id)
     ).toEqual([child])
+  })
+
+  it('ignores hidden-owner successors but honours same-scope shared successors', async () => {
+    const graph = await add('graph', 'The `traverseGraph` function walks links')
+    const successor = await add('successor', 'a synthetic replacement fact')
+    db.prepare("UPDATE memories SET owner_principal = 'writer', visibility = 'personal' WHERE id = ?").run(successor)
+    db.prepare(
+      `INSERT INTO memory_links (source_id, target_id, similarity, link_type, created_at, confidence, judged_at)
+       VALUES (?, ?, 1, 'supersedes', 20, 1, 20)`
+    ).run(successor, graph)
+    db.prepare('UPDATE memories SET valid_from = 10 WHERE id IN (?, ?)').run(graph, successor)
+    const caller: CallerScope = {
+      principalId: 'reader', name: 'reader', localOwner: false,
+      grants: [{ prefix: PROJECT, verbs: ['read'] }],
+    }
+    for (const as_of of [undefined, 30]) {
+      expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT, caller, as_of }, 10).map((r) => r.id)).toEqual([graph])
+    }
+    db.prepare("UPDATE memories SET visibility = 'project' WHERE id = ?").run(successor)
+    expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT, caller }, 10)).toEqual([])
+    expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT, caller, as_of: 15 }, 10).map((r) => r.id)).toEqual([graph])
+    expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT, caller, as_of: 30 }, 10)).toEqual([])
+    expect(entitySearch(db, 'traverseGraph', { project_path: PROJECT, caller, include_superseded: true }, 10).map((r) => r.id)).toEqual([graph])
   })
 
   it('is deterministic and returns nothing for an empty query or a missing index', async () => {

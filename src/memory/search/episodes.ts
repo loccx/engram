@@ -230,16 +230,20 @@ export function episodeLexicalHits(
 /** the stored evidence, fetched by rowid so a scoped knn never joins a filtered table */
 function episodesByVecRowids(
   db: Database.Database,
-  rows: Array<{ rowid: number; distance: number }>
+  rows: Array<{ rowid: number; distance: number }>,
+  options: EpisodeSearchOptions,
+  now: number
 ): Array<{ episode: Episode; distance: number }> {
   if (rows.length === 0) return []
   const distanceByRowid = new Map<number, number>()
   for (const row of rows) distanceByRowid.set(row.rowid, row.distance)
   const rowids = [...distanceByRowid.keys()]
   const placeholders = rowids.map(() => '?').join(', ')
+  const predicates = episodePredicates(options, now)
   const found = db
-    .prepare(`SELECT e.* FROM episodes e WHERE e.vec_rowid IN (${placeholders})`)
-    .all(...rowids) as EpisodeRow[]
+    .prepare(`SELECT e.* FROM episodes e WHERE e.vec_rowid IN (${placeholders})
+      ${predicates.sql.length ? `AND ${predicates.sql.join(' AND ')}` : ''}`)
+    .all(...rowids, ...predicates.params) as EpisodeRow[]
   const out: Array<{ episode: Episode; distance: number }> = []
   for (const row of found) {
     const distance = row.vec_rowid === null || row.vec_rowid === undefined ? undefined : distanceByRowid.get(row.vec_rowid)
@@ -291,7 +295,8 @@ export function episodeVectorHits(
         db,
         db
           .prepare('SELECT rowid, distance FROM episode_vectors WHERE embedding MATCH ? LIMIT ?')
-          .all(queryVec, limit) as Array<{ rowid: number; distance: number }>
+          .all(queryVec, limit) as Array<{ rowid: number; distance: number }>,
+        options, now
       )
     }
     if (episodeKnnRowidFilterIsSupported(db, queryVec)) {
@@ -303,7 +308,7 @@ export function episodeVectorHits(
                            WHERE e.vec_rowid IS NOT NULL AND ${predicates.sql.join(' AND ')})`
         )
         .all(queryVec, limit, ...predicates.params) as Array<{ rowid: number; distance: number }>
-      return episodesByVecRowids(db, sortByDistance(rows, limit))
+      return episodesByVecRowids(db, sortByDistance(rows, limit), options, now)
     }
     // a build that rejects the set expression ranks the whole index instead; exact,
     // but a full scan, so it runs second
@@ -328,7 +333,8 @@ export function episodeVectorHits(
       sortByDistance(
         all.filter((row) => ids.has(row.rowid)),
         limit
-      )
+      ),
+      options, now
     )
   } catch {
     options.diagnostics?.degraded.push('episodes-vector')

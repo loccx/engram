@@ -5,7 +5,16 @@
 // only randomness is a seeded prng whose seed is recorded in the report. the numeric
 // distance between two systems is meaningless unless they answered the same question ids
 // under the same judge, so the pairing key is the question id and nothing else.
+//
+// the guard reads three classes of identity. the optional ones (dataset, models, prompts,
+// budget) are checked when both sides declare them and reported as unchecked when not.
+// the required ones — the vector regime, the question set and the code revision — fail
+// closed: an undeclared field cannot be shown to match, so the comparison is withheld with
+// the field named. a deliberate cross-revision comparison is still possible, but it has to
+// say so: the same engine intervention label on both sides turns the revision difference
+// into a recorded intervention.
 import { mean, round3 } from './metrics.js'
+import { unsettledVectorIdentity, unidentifiedEngineRevision } from './run-identity.js'
 
 export const DEFAULT_RESAMPLES = 10_000
 export const DEFAULT_ALPHA = 0.05
@@ -34,6 +43,13 @@ export interface StatsRow {
   judge_prompt?: string
   dataset_sha?: string
   budget_chars?: number
+  /** the vector regime in effect, e.g. `fts` or `cached+fts-fallback` */
+  vectors?: string
+  /** which questions the run asked, and how they were drawn */
+  question_set?: string
+  /** the code revision that produced the row; `git_sha` is the checkpoint's own name */
+  engine_revision?: string
+  git_sha?: string
   [field: string]: unknown
 }
 
@@ -45,6 +61,29 @@ export interface RunIdentity {
   reader_prompt?: string
   judge_prompt?: string
   budget_chars?: number
+  /**
+   * required: the vector regime that was really in effect. an FTS run and a vector run
+   * over the same dataset answer different questions about the same system, and a
+   * `--vectors cached` request that degraded to FTS is a third regime again.
+   */
+  vectors?: string
+  /**
+   * required: the sampled question set. two runs that selected different questions (a
+   * different limit, stride or question_type filter) are not two measurements of one
+   * thing, whatever the dataset sha says.
+   */
+  question_set?: string
+  /**
+   * required: the code revision the rows were produced by. same dataset, models and
+   * budget is not the same engine.
+   */
+  engine_revision?: string
+  /**
+   * the one way past a differing engine revision: declare the *same* non-empty label on
+   * both sides and the difference is reported as an intervention instead of withholding
+   * the comparison. it is never inferred, and the label is printed with the report.
+   */
+  engine_intervention?: string
 }
 
 export interface SystemInput {
@@ -243,33 +282,119 @@ export interface Comparability {
   comparable: boolean
   /** `field: left value vs right value`, for every field both sides declare and disagree on */
   differences: string[]
-  /** fields only one side declares: not a refusal, but the report says it is unchecked */
+  /** optional fields that are not declared on both sides, reported as unchecked */
   unverified: string[]
+  /** deliberate cross-revision comparisons, declared by the same label on both sides */
+  interventions: string[]
 }
 
-const IDENTITY_FIELDS: Array<{ key: keyof RunIdentity; label: string }> = [
+interface IdentityField {
+  key: keyof RunIdentity
+  label: string
+  /** true: a side that does not declare it makes the comparison unprovable, not unchecked */
+  required?: boolean
+}
+
+const IDENTITY_FIELDS: IdentityField[] = [
   { key: 'dataset_sha', label: 'dataset sha' },
   { key: 'reader_model', label: 'reader model' },
   { key: 'judge_model', label: 'judge model' },
   { key: 'reader_prompt', label: 'reader prompt' },
   { key: 'judge_prompt', label: 'judge prompt' },
   { key: 'budget_chars', label: 'budget' },
+  { key: 'vectors', label: 'vectors', required: true },
+  { key: 'question_set', label: 'question set', required: true },
+  { key: 'engine_revision', label: 'engine revision', required: true },
 ]
+
+/** rendering shares the guard's field roster, so new identity fields cannot disappear */
+export const COMPARABILITY_FIELDS = Object.freeze(
+  IDENTITY_FIELDS.map(({ key, label }) => Object.freeze({ key, label }))
+)
+
+/** the identity as a row carries it; `git_sha` is the checkpoint's name for the revision */
+const ROW_IDENTITY_FIELDS: Array<IdentityField & { of: (row: StatsRow) => unknown }> = [
+  { key: 'dataset_sha', label: 'dataset sha', of: (row) => row.dataset_sha },
+  { key: 'reader_model', label: 'reader model', of: (row) => row.reader_model },
+  { key: 'judge_model', label: 'judge model', of: (row) => row.judge_model },
+  { key: 'reader_prompt', label: 'reader prompt', of: (row) => row.reader_prompt },
+  { key: 'judge_prompt', label: 'judge prompt', of: (row) => row.judge_prompt },
+  { key: 'budget_chars', label: 'budget', of: (row) => row.budget_chars },
+  { key: 'vectors', label: 'vectors', of: (row) => row.vectors },
+  { key: 'question_set', label: 'question set', of: (row) => row.question_set },
+  { key: 'engine_revision', label: 'engine revision', of: (row) => row.engine_revision ?? row.git_sha },
+]
+
+/** the mutual, non-empty label that permits a cross-revision comparison, or null */
+function engineIntervention(left: RunIdentity, right: RunIdentity): string | null {
+  const a = left.engine_intervention
+  const b = right.engine_intervention
+  if (typeof a !== 'string' || typeof b !== 'string') return null
+  const label = a.trim()
+  if (label === '' || label !== b.trim()) return null
+  return label
+}
+
+function undeclaredReason(field: IdentityField, a: unknown, b: unknown): string {
+  const reason = `the two sides cannot be shown to match on ${field.label}`
+  if (a === undefined && b === undefined) {
+    return `${field.label}: undeclared on both sides — ${reason}`
+  }
+  const known = a === undefined ? b : a
+  const missing = a === undefined ? 'this side' : 'the other side'
+  return `${field.label}: ${known} vs undeclared (${missing}) — ${reason}`
+}
 
 export function checkComparability(left: RunIdentity, right: RunIdentity): Comparability {
   const differences: string[] = []
   const unverified: string[] = []
-  for (const { key, label } of IDENTITY_FIELDS) {
-    const a = left[key]
-    const b = right[key]
-    if (a === undefined && b === undefined) continue
-    if (a === undefined || b === undefined) {
-      unverified.push(label)
+  const interventions: string[] = []
+  for (const field of IDENTITY_FIELDS) {
+    const a = left[field.key]
+    const b = right[field.key]
+    if (a === undefined && b === undefined) {
+      if (field.required) differences.push(undeclaredReason(field, a, b))
+      else unverified.push(field.label)
       continue
     }
-    if (a !== b) differences.push(`${label}: ${a} vs ${b}`)
+    if (a === undefined || b === undefined) {
+      if (field.required) differences.push(undeclaredReason(field, a, b))
+      else unverified.push(field.label)
+      continue
+    }
+    if (field.key === 'vectors' && (unsettledVectorIdentity(a) || unsettledVectorIdentity(b))) {
+      differences.push(`${field.label}: ${a} vs ${b} — achieved vector regime is unverified`)
+      continue
+    }
+    if (field.key === 'engine_revision' && (unidentifiedEngineRevision(a) || unidentifiedEngineRevision(b))) {
+      differences.push(`${field.label}: ${a} vs ${b} — engine revision is unidentified`)
+      continue
+    }
+    if (a === b) continue
+    if (field.key === 'engine_revision') {
+      const label = engineIntervention(left, right)
+      if (label !== null) {
+        interventions.push(`engine revision: ${a} vs ${b}, under intervention "${label}"`)
+        continue
+      }
+      differences.push(
+        `${field.label}: ${a} vs ${b} — declare the same engine intervention on both sides to ` +
+          'compare across revisions on purpose'
+      )
+      continue
+    }
+    differences.push(`${field.label}: ${a} vs ${b}`)
   }
-  return { comparable: differences.length === 0, differences, unverified }
+  if (
+    left.engine_intervention !== undefined &&
+    right.engine_intervention !== undefined &&
+    left.engine_intervention !== right.engine_intervention
+  ) {
+    differences.push(
+      `engine intervention: ${left.engine_intervention} vs ${right.engine_intervention}`
+    )
+  }
+  return { comparable: differences.length === 0, differences, unverified, interventions }
 }
 
 export interface ContinuousStats {
@@ -344,6 +469,8 @@ export interface ComparisonReport {
   comparable: boolean
   differences: string[]
   unverified: string[]
+  /** deliberate cross-revision comparisons, declared by the same label on both sides */
+  interventions: string[]
   /** questions every system graded */
   n_paired: number
   /** rows a system carries without a boolean verdict */
@@ -372,17 +499,26 @@ export function compareSystems(input: ComparisonInput): ComparisonReport {
   const alpha = input.alpha ?? DEFAULT_ALPHA
   const metrics = input.metrics ?? CONTINUOUS_METRICS
 
-  const identities = systems.map((system) =>
+  const scans = systems.map((system) =>
     rowIdentity(system.rows, { ...input.runIdentity, ...system.identity })
   )
+  const identities = scans.map((scan) => scan.identity)
   const differences: string[] = []
   const unverified = new Set<string>()
+  const interventions = new Set<string>()
+  // a row set that disagrees with itself is not one run, whoever it is compared against
+  systems.forEach((system, i) => {
+    for (const conflict of scans[i].conflicts) {
+      differences.push(`${system.name}: rows disagree on ${conflict}`)
+    }
+  })
   for (let i = 1; i < systems.length; i++) {
     const guard = checkComparability(identities[0], identities[i])
     for (const difference of guard.differences) {
       differences.push(`${systems[i].name} vs ${systems[0].name}: ${difference}`)
     }
     for (const field of guard.unverified) unverified.add(field)
+    for (const intervention of guard.interventions) interventions.add(intervention)
   }
   const comparable = differences.length === 0
 
@@ -482,6 +618,7 @@ export function compareSystems(input: ComparisonInput): ComparisonReport {
     comparable,
     differences,
     unverified: [...unverified].sort(),
+    interventions: [...interventions].sort(),
     n_paired: common.length,
     ungraded,
     cost_axis: costAxis,
@@ -727,17 +864,51 @@ function applyHolm(pairs: PairStats[], alpha: number): void {
   })
 }
 
-function rowIdentity(rows: StatsRow[], fallback: RunIdentity): RunIdentity {
+/** the identity a row set declares, plus any field its own rows disagree about */
+function rowIdentity(
+  rows: StatsRow[],
+  fallback: RunIdentity
+): { identity: RunIdentity; conflicts: string[] } {
   const out: RunIdentity = { ...fallback }
+  /** distinct values per field, keyed by their text form so 32000 and '32000' are one */
+  const seen = new Map<keyof RunIdentity, Map<string, string | number>>()
   for (const row of rows) {
-    out.dataset_sha ??= str(row.dataset_sha)
-    out.reader_model ??= str(row.reader_model)
-    out.judge_model ??= str(row.judge_model)
-    out.reader_prompt ??= str(row.reader_prompt)
-    out.judge_prompt ??= str(row.judge_prompt)
-    out.budget_chars ??= num(row.budget_chars)
+    for (const field of ROW_IDENTITY_FIELDS) {
+      const value = identityValue(field.of(row))
+      if (value === undefined) continue
+      const values = seen.get(field.key) ?? new Map<string, string | number>()
+      values.set(String(value), value)
+      seen.set(field.key, values)
+    }
   }
-  return out
+  const conflicts: string[] = []
+  for (const field of ROW_IDENTITY_FIELDS) {
+    const values = seen.get(field.key)
+    if (!values || values.size === 0) continue
+    if (values.size > 1) {
+      conflicts.push(`${field.label} (${[...values.keys()].sort().join(', ')})`)
+      continue
+    }
+    const fromRows = [...values.values()][0]
+    const declared = out[field.key]
+    if (declared === undefined) {
+      ;(out as Record<string, unknown>)[field.key] = fromRows
+      continue
+    }
+    // a run that declares one regime while its own rows say another is a mixed row set
+    // with extra steps, not a comparison
+    if (String(declared) !== String(fromRows)) {
+      conflicts.push(`${field.label}: declared ${declared}, rows say ${fromRows}`)
+    }
+  }
+  return { identity: out, conflicts }
+}
+
+/** a row value that can enter an identity: a non-empty string or a finite number */
+function identityValue(value: unknown): string | number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value
+  if (typeof value === 'string' && value !== '') return value
+  return undefined
 }
 
 function hasContextTokens(rows: Map<string, StatsRow> | undefined): boolean {

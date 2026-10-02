@@ -6,7 +6,7 @@ import {
   notSupersededAtClause,
   validityAtClause,
 } from '../../contradictions/supersession.js'
-import { visibilityClause, type CallerScope } from '../access.js'
+import { currentCaller, readGrantClause, visibilityClause, type CallerScope } from '../access.js'
 
 export interface NamespaceFilterOptions {
   namespace_subtree?: string
@@ -41,16 +41,35 @@ export function namespaceClause(
   nsExpr: string,
   options: NamespaceFilterOptions
 ): { sql: string; params: unknown[] } {
+  const query = queryNamespaceClause(nsExpr, options)
+  const grants = readGrantClause(nsExpr, options.caller)
+  return {
+    sql: [query.sql, grants.sql].filter(Boolean).join(' AND '),
+    params: [...query.params, ...grants.params],
+  }
+}
+
+function queryNamespaceClause(
+  nsExpr: string,
+  options: NamespaceFilterOptions
+): { sql: string; params: unknown[] } {
   if (options.namespace_subtree) {
     const ns = options.namespace_subtree
     // _ and % are LIKE wildcards: escape them or a namespace matches sibling prefixes
     const esc = ns.replace(/[\\%_]/g, '\\$&')
+    const localOwner = (options.caller ?? currentCaller()).localOwner
+    // the local query retains its historical like semantics; named queries match the
+    // case-sensitive grant boundary instead of widening through sqlite's ascii folding.
     return {
       sql:
         `(${nsExpr} = ?` +
-        ` OR ${nsExpr} LIKE ? ESCAPE '\\'` +
-        ` OR ${nsExpr} LIKE ? ESCAPE '\\')`,
-      params: [ns, `${esc}/%`, `${esc}//%`],
+        (localOwner
+          ? ` OR ${nsExpr} LIKE ? ESCAPE '\\' OR ${nsExpr} LIKE ? ESCAPE '\\')`
+          : ` OR (${nsExpr} LIKE ? ESCAPE '\\' AND instr(${nsExpr}, ?) = 1)` +
+            ` OR (${nsExpr} LIKE ? ESCAPE '\\' AND instr(${nsExpr}, ?) = 1))`),
+      params: localOwner
+        ? [ns, `${esc}/%`, `${esc}//%`]
+        : [ns, `${esc}/%`, `${ns}/`, `${esc}//%`, `${ns}//`],
     }
   }
   if (options.project_path) {
@@ -59,7 +78,7 @@ export function namespaceClause(
   return { sql: '', params: [] }
 }
 
-export interface TemporalFilterOptions {
+export interface TemporalFilterOptions extends NamespaceFilterOptions {
   as_of?: number
   before?: number
   include_superseded?: boolean
@@ -82,18 +101,22 @@ export function temporalFilter(
     params.push(options.before)
   }
   if (!options.include_superseded) {
+    const successor = namespaceFilter('superseder', options)
+    const supersessionOptions = {
+      includeArchived: options.include_archived === true,
+      successorFilter: successor.sql,
+    }
     if (options.as_of !== undefined) {
       clauses.push(
-        notSupersededAtClause(`${alias}.id`, '?', {
-          includeArchived: options.include_archived === true,
-        })
+        notSupersededAtClause(`${alias}.id`, '?', supersessionOptions)
       )
       params.push(options.as_of)
     } else {
       clauses.push(
-        notSupersededClause(`${alias}.id`, { includeArchived: options.include_archived === true })
+        notSupersededClause(`${alias}.id`, supersessionOptions)
       )
     }
+    params.push(...successor.params)
   } else if (!options.include_archived) {
     clauses.push(`${alias}.archived_at IS NULL`)
   }

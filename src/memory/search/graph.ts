@@ -1,19 +1,14 @@
 import type Database from 'better-sqlite3'
 import type { Memory } from '../types.js'
-import {
-  notSupersededClause,
-  notSupersededAtClause,
-  validityAtClause,
-} from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
-import { namespaceFilter } from './scope.js'
+import { namespaceFilter, temporalFilter, type NamespaceFilterOptions } from './scope.js'
 
 export type GraphResult = Memory & { similarity: number; link_type: string; hops: number }
 
 // _autoLink edges are global, so scoping has to filter the walked edges, not
 // just the result rows: `mode: 'graph'` must never surface another project
 // scope is optional, so an existing caller keeps its exact behaviour.
-export interface GraphWalkOptions {
+export interface GraphWalkOptions extends NamespaceFilterOptions {
   include_superseded?: boolean
   as_of?: number
   /** the node itself plus anything under it; wins over project_path */
@@ -44,22 +39,12 @@ export function traverseGraph(
     if (!seed) return []
   }
 
-  const params: unknown[] = [startId, startId, ...scope.params, depth, ...scope.params, startId]
-  let timeFilter = ''
-  if (options.as_of !== undefined) {
-    timeFilter = ` AND ${validityAtClause('m', '?')}`
-    params.push(options.as_of, options.as_of)
-  }
-  let supersededFilter = ''
-  if (!options.include_superseded) {
-    if (options.as_of !== undefined) {
-      supersededFilter = ` AND ${notSupersededAtClause('m.id', '?')}`
-      params.push(options.as_of)
-    } else {
-      supersededFilter = ` AND ${notSupersededClause('m.id')}`
-    }
-  }
-  params.push(limit)
+  const temporal = temporalFilter('m', options)
+  const temporalClause = temporal.sql ? ` AND ${temporal.sql}` : ''
+  const params: unknown[] = [
+    startId, startId, ...scope.params, depth, ...scope.params, startId,
+    ...scope.params, ...temporal.params, limit,
+  ]
 
   const rows = db
     .prepare(
@@ -84,7 +69,7 @@ export function traverseGraph(
          FROM traverse WHERE id != ?
        ) sub
        JOIN memories m ON m.id = sub.id
-       WHERE sub.rn = 1${timeFilter}${supersededFilter}
+       WHERE sub.rn = 1${scopeClause}${temporalClause}
        ORDER BY sub.hops ASC, sub.similarity DESC, m.id ASC
        LIMIT ?`
     )
@@ -255,24 +240,13 @@ export function pprSearch(
   let candidates = reachableIds.filter((id) => !seedSet.has(id))
   if (candidates.length > 0) {
     const placeholders = candidates.map(() => '?').join(',')
-    const filterParams: unknown[] = [...candidates]
-    let validityFilter =
-      options.as_of !== undefined ? ` AND ${validityAtClause('memories', '?')}` : ''
-    if (options.as_of !== undefined) filterParams.push(options.as_of, options.as_of)
-    let supersededFilter = ''
-    if (!options.include_superseded) {
-      if (options.as_of !== undefined) {
-        supersededFilter = ` AND ${notSupersededAtClause('memories.id', '?')}`
-        filterParams.push(options.as_of)
-      } else {
-        supersededFilter = ` AND ${notSupersededClause('memories.id')}`
-      }
-    }
+    const temporal = temporalFilter('m', options)
+    const temporalClause = temporal.sql ? ` AND ${temporal.sql}` : ''
     const validRows = db
       .prepare(
-        `SELECT id FROM memories WHERE id IN (${placeholders})${validityFilter}${supersededFilter}`
+        `SELECT m.id FROM memories m WHERE m.id IN (${placeholders})${scopeClause}${temporalClause}`
       )
-      .all(...filterParams) as Array<{ id: string }>
+      .all(...candidates, ...scope.params, ...temporal.params) as Array<{ id: string }>
     const valid = new Set(validRows.map((r) => r.id))
     candidates = candidates.filter((id) => valid.has(id))
   }
@@ -287,8 +261,8 @@ export function pprSearch(
 
   const placeholders = rankedIds.map(() => '?').join(',')
   const rows = db
-    .prepare(`SELECT * FROM memories WHERE id IN (${placeholders})`)
-    .all(...rankedIds) as MemoryRow[]
+    .prepare(`SELECT m.* FROM memories m WHERE m.id IN (${placeholders})${scopeClause}`)
+    .all(...rankedIds, ...scope.params) as MemoryRow[]
   const byId = new Map(rows.map((r) => [r.id, r]))
 
   return rankedIds

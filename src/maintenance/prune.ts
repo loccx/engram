@@ -8,6 +8,7 @@ import {
 } from '../metrics/eviction-log.js'
 import { logger } from '../utils/logger.js'
 import { inheritMemoryEpisodes } from '../memory/episodes.js'
+import { sourceDerivedMemoryIds } from '../sources/index.js'
 
 // archives near-identical duplicate memories, all but one member of each family.
 // grouping is lexical and deterministic: bucket by (namespace, type, text prefix),
@@ -388,6 +389,10 @@ export function applyDuplicatePrune(
   const keeperNamespaces = new Map<string, string>()
 
   const applyOne = db.transaction((pair: ArchivePair) => {
+    // source-backed rows keep their citation/revision lineage until lifecycle purge.
+    // redirecting their edges would make an archived successor an untracked copy.
+    const protectedIds = new Set(sourceDerivedMemoryIds(db))
+    if (protectedIds.has(pair.redundantId) || protectedIds.has(pair.keeperId)) return
     const stillOpen = readSignals.get(pair.redundantId) as MemorySignalsRow | undefined
     if (!stillOpen || stillOpen.archived_at !== null) return
     const info = archive.run(now, pair.redundantId)
@@ -414,7 +419,7 @@ export function applyDuplicatePrune(
   for (const pair of pairs) {
     if (archived >= maxArchive) break
     try {
-      applyOne(pair)
+      applyOne.immediate(pair)
     } catch (err) {
       logger.warn({ err, memoryId: pair.redundantId }, 'prune: archiving a duplicate failed; continuing')
     }

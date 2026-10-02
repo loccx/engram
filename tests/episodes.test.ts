@@ -136,6 +136,8 @@ describe('migration 019', () => {
       'embedding_model',
       'embedding_dim',
       'owner_principal',
+      'source_revision_id',
+      'source_state',
     ])
 
     const memoryColumns = (

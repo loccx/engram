@@ -121,21 +121,31 @@ describe('holm correction', () => {
   })
 })
 
+/**
+ * the identity a comparison stands on: the required fields are the regime, the question
+ * set and the code revision, so a fixture that omits them is not comparable at all
+ */
+const FULL_IDENTITY: RunIdentity = {
+  dataset_sha: 'a1b2c3',
+  reader_model: 'reader-a',
+  judge_model: 'judge-a',
+  reader_prompt: 'reader-v1',
+  judge_prompt: 'judge-v1',
+  budget_chars: 32_000,
+  vectors: 'fts',
+  question_set: 'all,limit=35,stride=1',
+  engine_revision: 'sha-a',
+}
+
 describe('comparability guard', () => {
-  const identity: RunIdentity = {
-    dataset_sha: 'a1b2c3',
-    reader_model: 'reader-a',
-    judge_model: 'judge-a',
-    reader_prompt: 'reader-v1',
-    judge_prompt: 'judge-v1',
-    budget_chars: 32_000,
-  }
+  const identity = FULL_IDENTITY
 
   it('accepts two identical identities', () => {
     expect(checkComparability(identity, { ...identity })).toMatchObject({
       comparable: true,
       differences: [],
       unverified: [],
+      interventions: [],
     })
   })
 
@@ -150,7 +160,12 @@ describe('comparability guard', () => {
   })
 
   it('reports a field one side does not declare as unchecked, not as equal', () => {
-    const guard = checkComparability(identity, { dataset_sha: 'a1b2c3' })
+    const guard = checkComparability(identity, {
+      dataset_sha: 'a1b2c3',
+      vectors: 'fts',
+      question_set: 'all,limit=35,stride=1',
+      engine_revision: 'sha-a',
+    })
     expect(guard.comparable).toBe(true)
     expect(guard.unverified).toEqual([
       'reader model',
@@ -161,11 +176,142 @@ describe('comparability guard', () => {
     ])
   })
 
+  it('marks optional fields missing from both sides as unchecked', () => {
+    const identity = { vectors: 'fts', question_set: 'q1', engine_revision: 'sha-a' }
+    const guard = checkComparability(identity, { ...identity })
+    expect(guard.comparable).toBe(true)
+    expect(guard.unverified).toEqual([
+      'dataset sha', 'reader model', 'judge model', 'reader prompt', 'judge prompt', 'budget',
+    ])
+  })
+
+  it('refuses a comparison that changes only the vector regime', () => {
+    const guard = checkComparability(identity, { ...identity, vectors: 'cached+vectors' })
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toEqual(['vectors: fts vs cached+vectors'])
+  })
+
+  it('refuses a comparison that changes only the sampled question set', () => {
+    const guard = checkComparability(identity, {
+      ...identity,
+      question_set: 'types=multi-session,limit=60,stride=n/a',
+    })
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toEqual([
+      'question set: all,limit=35,stride=1 vs types=multi-session,limit=60,stride=n/a',
+    ])
+  })
+
+  it('refuses a comparison that changes only the code revision, and points at the intervention', () => {
+    const guard = checkComparability(identity, { ...identity, engine_revision: 'sha-b' })
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toEqual([
+      'engine revision: sha-a vs sha-b — declare the same engine intervention on both sides to ' +
+        'compare across revisions on purpose',
+    ])
+    expect(guard.interventions).toEqual([])
+  })
+
+  it('permits a cross-revision comparison under the same declared intervention', () => {
+    const guard = checkComparability(
+      { ...identity, engine_intervention: 'ab:fts-cache-lane' },
+      { ...identity, engine_revision: 'sha-b', engine_intervention: 'ab:fts-cache-lane' }
+    )
+    expect(guard.comparable).toBe(true)
+    expect(guard.differences).toEqual([])
+    expect(guard.interventions).toEqual([
+      'engine revision: sha-a vs sha-b, under intervention "ab:fts-cache-lane"',
+    ])
+  })
+
+  it('renders deliberate interventions without calling their revision a match', () => {
+    const report = compareSystems({
+      systems: [
+        {
+          name: 'engram',
+          rows: rowsOf([['q1', true]], { engine_revision: 'sha-a' }),
+          identity: { ...identity, engine_intervention: 'controller-ab' },
+        },
+        {
+          name: 'other',
+          rows: rowsOf([['q1', true]], { engine_revision: 'sha-b' }),
+          identity: { ...identity, engine_revision: 'sha-b', engine_intervention: 'controller-ab' },
+        },
+      ],
+      seed: 7,
+    })
+    expect(report.comparable).toBe(true)
+    const markdown = renderComparisonReport(report)
+    expect(markdown).toContain('deliberate interventions:')
+    expect(markdown).toContain('under intervention "controller-ab"')
+    const matched = markdown.split('\n').find((line) => line.startsWith('comparability:'))!
+    expect(matched).toContain('vectors, question set')
+    expect(matched).not.toContain('engine revision')
+    const withheld = renderComparisonReport({
+      ...report, comparable: false, differences: ['vectors: fts vs cached+vectors'],
+    })
+    expect(withheld).toContain('comparison withheld')
+    expect(withheld).toContain('under intervention "controller-ab"')
+    expect(withheld).not.toContain('mcnemar')
+  })
+
+  it('refuses two sides that declare different interventions', () => {
+    const guard = checkComparability(
+      { ...identity, engine_intervention: 'ab:one' },
+      { ...identity, engine_intervention: 'ab:two' }
+    )
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toEqual(['engine intervention: ab:one vs ab:two'])
+  })
+
+  it('does not accept a one-sided intervention', () => {
+    const guard = checkComparability(
+      { ...identity, engine_intervention: 'ab:only-one-side' },
+      { ...identity, engine_revision: 'sha-b' }
+    )
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toHaveLength(1)
+    expect(guard.interventions).toEqual([])
+  })
+
+  it('fails closed when a side does not declare the regime, the sample or the revision', () => {
+    const legacy: RunIdentity = { dataset_sha: 'a1b2c3', reader_model: 'reader-a' }
+    const guard = checkComparability(identity, legacy)
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toEqual([
+      'vectors: fts vs undeclared (the other side) — the two sides cannot be shown to match on vectors',
+      'question set: all,limit=35,stride=1 vs undeclared (the other side) — the two sides cannot be ' +
+        'shown to match on question set',
+      'engine revision: sha-a vs undeclared (the other side) — the two sides cannot be shown to match ' +
+        'on engine revision',
+    ])
+    // the optional fields stay unchecked rather than becoming refusals
+    expect(guard.unverified).toEqual(['judge model', 'reader prompt', 'judge prompt', 'budget'])
+  })
+
+  it('fails closed when neither side declares them', () => {
+    const guard = checkComparability({ dataset_sha: 'a1b2c3' }, { dataset_sha: 'a1b2c3' })
+    expect(guard.comparable).toBe(false)
+    expect(guard.differences).toEqual([
+      'vectors: undeclared on both sides — the two sides cannot be shown to match on vectors',
+      'question set: undeclared on both sides — the two sides cannot be shown to match on question set',
+      'engine revision: undeclared on both sides — the two sides cannot be shown to match on engine revision',
+    ])
+  })
+
   it('makes compareSystems withhold the comparison entirely', () => {
     const report = compareSystems({
       systems: [
-        { name: 'engram', rows: rowsOf([['q1', true]]), identity: { judge_model: 'judge-a' } },
-        { name: 'full-context', rows: rowsOf([['q1', true]]), identity: { judge_model: 'judge-b' } },
+        {
+          name: 'engram',
+          rows: rowsOf([['q1', true]]),
+          identity: { ...FULL_IDENTITY, judge_model: 'judge-a' },
+        },
+        {
+          name: 'full-context',
+          rows: rowsOf([['q1', true]]),
+          identity: { ...FULL_IDENTITY, judge_model: 'judge-b' },
+        },
       ],
       seed: 1,
     })
@@ -173,10 +319,57 @@ describe('comparability guard', () => {
     expect(report.pairs).toEqual([])
     expect(report.pareto).toEqual([])
     expect(report.differences[0]).toBe('full-context vs engram: judge model: judge-a vs judge-b')
+    expect(report.interventions).toEqual([])
     const markdown = renderComparisonReport(report)
     expect(markdown).toContain('comparison withheld')
     expect(markdown).toContain('judge model: judge-a vs judge-b')
     expect(markdown).not.toContain('mcnemar')
+  })
+
+  it('withholds a comparison whose row sets disagree about their own identity', () => {
+    const report = compareSystems({
+      systems: [
+        {
+          name: 'engram',
+          rows: rowsOf(
+            [
+              ['q1', true],
+              ['q2', true],
+            ],
+            { vectors: FULL_IDENTITY.vectors, question_set: FULL_IDENTITY.question_set }
+          ).map((row, i) => ({ ...row, git_sha: i === 0 ? 'sha-a' : 'sha-b' })),
+        },
+        {
+          name: 'full-context',
+          rows: rowsOf([
+            ['q1', true],
+            ['q2', true],
+          ]),
+        },
+      ],
+      runIdentity: FULL_IDENTITY,
+      seed: 1,
+    })
+    expect(report.comparable).toBe(false)
+    expect(report.pairs).toEqual([])
+    expect(report.differences[0]).toBe(
+      'engram: rows disagree on engine revision (sha-a, sha-b)'
+    )
+  })
+
+  it('withholds a comparison whose rows contradict the run identity they are declared under', () => {
+    const report = compareSystems({
+      systems: [
+        { name: 'engram', rows: rowsOf([['q1', true]], { vectors: 'cached+vectors' }) },
+        { name: 'full-context', rows: rowsOf([['q1', true]]) },
+      ],
+      runIdentity: FULL_IDENTITY,
+      seed: 1,
+    })
+    expect(report.comparable).toBe(false)
+    expect(report.differences).toEqual([
+      'engram: rows disagree on vectors: declared fts, rows say cached+vectors',
+    ])
   })
 })
 
@@ -203,7 +396,14 @@ describe('compareSystems', () => {
   const thirty = idsWith('q', 30, 1)
   const five = idsWith('t', 5, 1)
 
-  function twoSystems(): { systems: SystemInput[]; seed: number } {
+  /** the required identity fields, so these comparisons are about the numbers, not the guard */
+  const RUN: RunIdentity = {
+    vectors: 'fts',
+    question_set: 'all,limit=35,stride=1',
+    engine_revision: 'sha-a',
+  }
+
+  function twoSystems(): { systems: SystemInput[]; seed: number; runIdentity: RunIdentity } {
     const typed = (id: string, index: number): string =>
       index < thirty.length ? 'single-session-user' : 'multi-session'
     const left = rowsOf([...thirty, ...five].map(([id], i) => [id, i < 24] as [string, boolean])).map(
@@ -212,12 +412,16 @@ describe('compareSystems', () => {
     const right = rowsOf([...thirty, ...five].map(([id], i) => [id, i < 12] as [string, boolean])).map(
       (row, i) => ({ ...row, question_type: typed(row.question_id, i), context_tokens: 400 })
     )
-    return { systems: [{ name: 'engram', rows: left }, { name: 'other', rows: right }], seed: 7 }
+    return {
+      systems: [{ name: 'engram', rows: left }, { name: 'other', rows: right }],
+      seed: 7,
+      runIdentity: RUN,
+    }
   }
 
   it('pairs on question id, counts b and c, and points the delta the right way', () => {
-    const { systems, seed } = twoSystems()
-    const report = compareSystems({ systems, seed })
+    const { systems, seed, runIdentity } = twoSystems()
+    const report = compareSystems({ systems, seed, runIdentity })
     expect(report.comparable).toBe(true)
     expect(report.pairs).toHaveLength(1)
     const pair = report.pairs[0]
@@ -232,9 +436,9 @@ describe('compareSystems', () => {
   })
 
   it('applies holm once more than one pair is compared', () => {
-    const { systems, seed } = twoSystems()
+    const { systems, seed, runIdentity } = twoSystems()
     const third: SystemInput = { name: 'naive-rag', rows: rowsOf(thirty.map(([id]) => [id, true])) }
-    const report = compareSystems({ systems: [...systems, third], seed })
+    const report = compareSystems({ systems: [...systems, third], seed, runIdentity })
     expect(report.pairs).toHaveLength(3)
     for (const pair of report.pairs) {
       expect(pair.family).toBe(3)
@@ -264,6 +468,7 @@ describe('compareSystems', () => {
           ]),
         },
       ],
+      runIdentity: RUN,
       seed: 3,
     })
     const pair = report.pairs[0]
@@ -283,6 +488,7 @@ describe('compareSystems', () => {
         { name: 'a', rows: [{ question_id: 'q1', correct: true }, { question_id: 'q2' }] },
         { name: 'b', rows: rowsOf([['q1', false]]) },
       ],
+      runIdentity: RUN,
       seed: 2,
     })
     expect(report.ungraded).toEqual({ a: 1, b: 0 })
@@ -290,8 +496,8 @@ describe('compareSystems', () => {
   })
 
   it('flags a per-type bucket under 30 paired questions', () => {
-    const { systems, seed } = twoSystems()
-    const report = compareSystems({ systems, seed })
+    const { systems, seed, runIdentity } = twoSystems()
+    const report = compareSystems({ systems, seed, runIdentity })
     const types = report.by_question_type
     expect(types).toHaveLength(2)
     expect(types.find((row) => row.question_type === 'single-session-user')).toMatchObject({
@@ -319,6 +525,7 @@ describe('compareSystems', () => {
         { name: 'left', rows: withMetrics(1) },
         { name: 'right', rows: withMetrics(0.5) },
       ],
+      runIdentity: RUN,
       seed: 11,
     })
     const metrics = report.pairs[0].continuous.map((stats) => stats.metric)
@@ -331,8 +538,8 @@ describe('compareSystems', () => {
   })
 
   it('marks the frontier and prints the paired sentence', () => {
-    const { systems, seed } = twoSystems()
-    const report = compareSystems({ systems, seed })
+    const { systems, seed, runIdentity } = twoSystems()
+    const report = compareSystems({ systems, seed, runIdentity })
     expect(report.cost_axis).toBe('mean context tokens')
     expect(report.pareto).toEqual([
       expect.objectContaining({ system: 'engram', n: 35, mean_context_tokens: 100, frontier: true }),
@@ -342,6 +549,7 @@ describe('compareSystems', () => {
       latencies: { engram: { p50Ms: 12, p95Ms: 30, n: 35 } },
     })
     expect(markdown).toContain('### paired comparison')
+    expect(markdown).toContain('vectors, question set, engine revision')
     expect(markdown).toContain('bootstrap: seed 7, 10000 resamples')
     expect(markdown).toMatch(
       /engram vs other: \+\d+\.\d pts \(95% ci [+-]\d+\.\d to [+-]\d+\.\d\), mcnemar (p=[\d.]+|p<0\.001) \(b=\d+, c=\d+\) — significant at 0\.05/

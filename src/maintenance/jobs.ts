@@ -21,6 +21,7 @@ import {
   EPISODE_SWEEP_TARGET,
 } from './episode-retention.js'
 import { MODEL_ID } from '../embeddings/pipeline.js'
+import { readSourceGeneration } from '../sources/index.js'
 
 export type MaintenanceJobType =
   | 'digest'
@@ -106,6 +107,8 @@ export interface CompleteOptions {
   result?: unknown
   error?: string
   now?: number
+  /** source generation captured before asynchronous work; stale payloads are redacted */
+  sourceGeneration?: number
 }
 
 /** lease owner for this process: startup and shutdown stay inside one process */
@@ -229,6 +232,8 @@ export function completeMaintenanceJob(
   opts: CompleteOptions
 ): void {
   const now = opts.now ?? Date.now()
+  db.transaction(() => {
+    const stale = opts.sourceGeneration !== undefined && readSourceGeneration(db) !== opts.sourceGeneration
   db.prepare(
     `UPDATE maintenance_jobs
      SET status = ?,
@@ -241,10 +246,11 @@ export function completeMaintenanceJob(
   ).run(
     opts.status,
     now,
-    opts.error ?? null,
-    opts.result === undefined ? null : JSON.stringify(opts.result),
+    stale ? null : opts.error ?? null,
+    stale ? JSON.stringify({ redacted: 'source-lifecycle' }) : opts.result === undefined ? null : JSON.stringify(opts.result),
     id
   )
+  }).immediate()
 }
 
 /** hand back everything this process still holds, on a clean shutdown */
@@ -520,21 +526,25 @@ export async function runPendingMaintenanceJobs(
     const job = claimMaintenanceJob(db, owner, nowFn())
     if (!job) break
     claimed++
+    const sourceGeneration = readSourceGeneration(db)
     try {
       const result = await shadowRun(db, job)
-      completeMaintenanceJob(db, job.id, { status: 'done', result, now: nowFn() })
+      completeMaintenanceJob(db, job.id, { status: 'done', result, now: nowFn(), sourceGeneration })
       done++
       logger.debug({ jobId: job.id, jobType: job.job_type, targetKey: job.target_key }, 'maintenance: shadow job done')
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
+      const message = readSourceGeneration(db) !== sourceGeneration
+        ? 'source changed during maintenance'
+        : err instanceof Error ? err.message : String(err)
       const attemptExhausted = job.attempt + 1 >= job.max_attempts
       completeMaintenanceJob(db, job.id, {
         status: attemptExhausted ? 'dead' : 'failed',
         error: message,
         now: nowFn(),
+        sourceGeneration,
       })
       failed++
-      logger.warn({ err, jobId: job.id, jobType: job.job_type }, 'maintenance: shadow job failed')
+      logger.warn({ err: message, jobId: job.id, jobType: job.job_type }, 'maintenance: shadow job failed')
     }
   }
   return { claimed, done, failed }

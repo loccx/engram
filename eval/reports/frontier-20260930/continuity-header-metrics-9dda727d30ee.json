@@ -1,0 +1,423 @@
+{
+  "header": {
+    "configs": [
+      "baseline"
+    ],
+    "corpusHash": "b6b35e0d9fc8cbae",
+    "corpusHashFull": "b6b35e0d9fc8cbaed41ab18fc3da7854b93166b289083e1a60d34e0921825ffe",
+    "determinism": "Determinism: metrics are a pure function of (corpus, seed, config, git sha); two runs with the same header produce identical metric values. Wall-clock timings are reported separately and are not covered by that guarantee.",
+    "engramVersion": "0.3.0",
+    "featureFlags": {
+      "baseline": "{}"
+    },
+    "gitBranch": "main",
+    "gitSha": "9dda727d30ee229c033ade8eb81e69fc94fa8945",
+    "gitShaShort": "9dda727d30ee",
+    "nodeVersion": "v24.19.0",
+    "now": 1735718400000,
+    "nowIso": "2025-01-01T08:00:00.000Z",
+    "seed": 1234,
+    "suite": "continuity",
+    "tokenizer": "chars/4",
+    "vectorMode": "fts",
+    "vectorsAvailable": false
+  },
+  "metrics": {
+    "arms": {
+      "full": "state slots + memories + raw-episode evidence + task briefs, each under the probe budget",
+      "memory-off": "the same controller over an empty isolated store (negative control)",
+      "single-layer": "the memories layer only (recall_context), under the same budget"
+    },
+    "fixture": {
+      "by_family": {
+        "archive": 1,
+        "budget": 2,
+        "correction": 2,
+        "evidence": 2,
+        "expiry": 1,
+        "namespace": 2,
+        "resume": 2
+      },
+      "checkpoints": [
+        "post-restart",
+        "after-evidence",
+        "after-correction",
+        "after-archive",
+        "after-expiry",
+        "after-close"
+      ],
+      "corpus_hash": "b6b35e0d9fc8cbae",
+      "events": 7,
+      "probes": 12,
+      "restart_after_seq": 2,
+      "seed": 1234
+    },
+    "full": {
+      "archiveRestoreAccuracy": 1,
+      "arm": "full",
+      "budgetAccuracy": 1,
+      "budgetReportedRate": 1,
+      "budgetViolations": 0,
+      "byFamily": {
+        "archive": {
+          "cases": 1,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 1,
+          "passRate": 1,
+          "scored": 1
+        },
+        "budget": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 1,
+          "pass": 1,
+          "passRate": 1,
+          "scored": 1
+        },
+        "correction": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 2,
+          "passRate": 1,
+          "scored": 2
+        },
+        "evidence": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 2,
+          "passRate": 1,
+          "scored": 2
+        },
+        "expiry": {
+          "cases": 1,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 1,
+          "passRate": 1,
+          "scored": 1
+        },
+        "namespace": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 2,
+          "passRate": 1,
+          "scored": 2
+        },
+        "resume": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 2,
+          "passRate": 1,
+          "scored": 2
+        }
+      },
+      "cases": 12,
+      "citationCoverage": 1,
+      "correctionAccuracy": 1,
+      "coverage": 1,
+      "denominators": {
+        "allCases": 12,
+        "allServedItems": 26,
+        "citationCases": 2,
+        "distractorCases": 1,
+        "evidenceCases": 7,
+        "forbiddenCases": 3,
+        "insufficientCases": 1,
+        "scored": 11,
+        "servedItems": 25,
+        "staleItems": 0,
+        "violatingCases": 0
+      },
+      "distractorRate": 0,
+      "evidenceAccuracy": 1,
+      "expiryAccuracy": 1,
+      "fail": 0,
+      "futureLeakRate": 0,
+      "ingestOps": {
+        "episode_items": 8,
+        "link_memory_episode": 1,
+        "prune_apply": 1,
+        "store_memory": 5,
+        "task_checkpoint": 1,
+        "task_close": 1,
+        "task_start": 1,
+        "task_update": 1
+      },
+      "insufficient": 1,
+      "namespaceAccuracy": 1,
+      "namespaceLeakRate": 0,
+      "pass": 11,
+      "passRate": 1,
+      "probeOps": {
+        "episode_sweep": 1,
+        "unarchive": 1
+      },
+      "producerUnderreports": 0,
+      "readOps": {
+        "cited_episodes": 2,
+        "count_episodes": 1,
+        "get_memory": 1,
+        "get_memory(include_archived)": 1,
+        "get_memory_history": 1,
+        "get_state": 2,
+        "list_open_tasks": 2,
+        "list_task_summaries": 1,
+        "recall": 7,
+        "retrieve_episode_context": 4,
+        "search": 2,
+        "task_handoff": 1
+      },
+      "reads": "state slots + memories + raw-episode evidence + task briefs, each under the probe budget",
+      "resumeAccuracy": 1,
+      "safetyViolationRate": 0,
+      "safetyViolations": 0,
+      "scored": 11,
+      "servedChars": 3050,
+      "servedItems": 25,
+      "servedTokens": 767,
+      "staleCaseRate": 0,
+      "staleRate": 0,
+      "tokensPerChar": 0.251
+    },
+    "memory-off": {
+      "archiveRestoreAccuracy": 0,
+      "arm": "memory-off",
+      "budgetAccuracy": 0,
+      "budgetReportedRate": 1,
+      "budgetViolations": 0,
+      "byFamily": {
+        "archive": {
+          "cases": 1,
+          "fail": 1,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 1
+        },
+        "budget": {
+          "cases": 2,
+          "fail": 1,
+          "insufficient": 1,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 1
+        },
+        "correction": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        },
+        "evidence": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        },
+        "expiry": {
+          "cases": 1,
+          "fail": 1,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 1
+        },
+        "namespace": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        },
+        "resume": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        }
+      },
+      "cases": 12,
+      "citationCoverage": 0,
+      "correctionAccuracy": 0,
+      "coverage": 0,
+      "denominators": {
+        "allCases": 12,
+        "allServedItems": 0,
+        "citationCases": 2,
+        "distractorCases": 1,
+        "evidenceCases": 7,
+        "forbiddenCases": 3,
+        "insufficientCases": 1,
+        "scored": 11,
+        "servedItems": 0,
+        "staleItems": 0,
+        "violatingCases": 0
+      },
+      "distractorRate": 0,
+      "evidenceAccuracy": 0,
+      "expiryAccuracy": 0,
+      "fail": 11,
+      "futureLeakRate": 0,
+      "ingestOps": {},
+      "insufficient": 1,
+      "namespaceAccuracy": 0,
+      "namespaceLeakRate": 0,
+      "pass": 0,
+      "passRate": 0,
+      "probeOps": {},
+      "producerUnderreports": 0,
+      "readOps": {
+        "recall": 12
+      },
+      "reads": "the same controller over an empty isolated store (negative control)",
+      "resumeAccuracy": 0,
+      "safetyViolationRate": 0,
+      "safetyViolations": 0,
+      "scored": 11,
+      "servedChars": 0,
+      "servedItems": 0,
+      "servedTokens": 0,
+      "staleCaseRate": 0,
+      "staleRate": 0,
+      "tokensPerChar": 0
+    },
+    "single-layer": {
+      "archiveRestoreAccuracy": 0,
+      "arm": "single-layer",
+      "budgetAccuracy": 1,
+      "budgetReportedRate": 1,
+      "budgetViolations": 0,
+      "byFamily": {
+        "archive": {
+          "cases": 1,
+          "fail": 1,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 1
+        },
+        "budget": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 1,
+          "pass": 1,
+          "passRate": 1,
+          "scored": 1
+        },
+        "correction": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        },
+        "evidence": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        },
+        "expiry": {
+          "cases": 1,
+          "fail": 1,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 1
+        },
+        "namespace": {
+          "cases": 2,
+          "fail": 0,
+          "insufficient": 0,
+          "pass": 2,
+          "passRate": 1,
+          "scored": 2
+        },
+        "resume": {
+          "cases": 2,
+          "fail": 2,
+          "insufficient": 0,
+          "pass": 0,
+          "passRate": 0,
+          "scored": 2
+        }
+      },
+      "cases": 12,
+      "citationCoverage": 0,
+      "correctionAccuracy": 0,
+      "coverage": 0.571,
+      "denominators": {
+        "allCases": 12,
+        "allServedItems": 13,
+        "citationCases": 2,
+        "distractorCases": 1,
+        "evidenceCases": 7,
+        "forbiddenCases": 3,
+        "insufficientCases": 1,
+        "scored": 11,
+        "servedItems": 12,
+        "staleItems": 0,
+        "violatingCases": 0
+      },
+      "distractorRate": 0,
+      "evidenceAccuracy": 0,
+      "expiryAccuracy": 0,
+      "fail": 8,
+      "futureLeakRate": 0,
+      "ingestOps": {
+        "episode_items": 8,
+        "link_memory_episode": 1,
+        "prune_apply": 1,
+        "store_memory": 5,
+        "task_checkpoint": 1,
+        "task_close": 1,
+        "task_start": 1,
+        "task_update": 1
+      },
+      "insufficient": 1,
+      "namespaceAccuracy": 1,
+      "namespaceLeakRate": 0,
+      "pass": 3,
+      "passRate": 0.273,
+      "probeOps": {},
+      "producerUnderreports": 0,
+      "readOps": {
+        "recall": 12
+      },
+      "reads": "the memories layer only (recall_context), under the same budget",
+      "resumeAccuracy": 0,
+      "safetyViolationRate": 0,
+      "safetyViolations": 0,
+      "scored": 11,
+      "servedChars": 1020,
+      "servedItems": 12,
+      "servedTokens": 256,
+      "staleCaseRate": 0,
+      "staleRate": 0,
+      "tokensPerChar": 0.251
+    },
+    "task_success": {
+      "agent": {
+        "protocol": "eval/README.md#continuity",
+        "reason": "offline suite: no gateway, no pinned reader or judge model, so no llm-agent run is claimed",
+        "status": "not_run"
+      },
+      "contract": "fixed controller: the shipped surfaces are scored on whether they served the evidence"
+    }
+  }
+}

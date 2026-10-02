@@ -24,8 +24,11 @@ import { migration022 } from './022_embedding_cache.js'
 import { migration023 } from './023_episode_expiry.js'
 import { migration024 } from './024_eviction_events.js'
 import { migration025 } from './025_principals.js'
+import { migration026 } from './026_bridge.js'
+import { migration027 } from './027_source_lifecycle.js'
+import { migration028 } from './028_assertions.js'
 
-export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012, migration013, migration014, migration015, migration016, migration017, migration018, migration019, migration020, migration021, migration022, migration023, migration024, migration025]
+export const migrations: Migration[] = [migration001, migration002, migration003, migration004, migration005, migration006, migration007, migration008, migration009, migration010, migration011, migration012, migration013, migration014, migration015, migration016, migration017, migration018, migration019, migration020, migration021, migration022, migration023, migration024, migration025, migration026, migration027, migration028]
 
 export { runMigrations } from './runner.js'
 export type { MigrationRunResult } from './runner.js'

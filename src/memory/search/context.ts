@@ -1,12 +1,9 @@
 import type Database from 'better-sqlite3'
 import type { Memory, MemoryCluster } from '../types.js'
-import {
-  notSupersededClause,
-  notSupersededAtClause,
-  validityAtClause,
-} from '../../contradictions/supersession.js'
+import { notSupersededClause } from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
-import { currentCaller, derivedVisible, visibilityClause, type CallerScope } from '../access.js'
+import { currentCaller, derivedVisible, holdsVerb, visibilityClause, type CallerScope } from '../access.js'
+import { namespaceFilter, temporalFilter } from './scope.js'
 
 interface ClusterRow {
   id: number
@@ -30,7 +27,9 @@ export function prepareContextStatements(db: Database.Database): ContextStatemen
     default: db.prepare(
       `SELECT * FROM memories
        WHERE COALESCE(namespace, project_path) = ?
-         AND ${notSupersededClause('memories.id')}
+         AND ${notSupersededClause('memories.id', {
+           successorFilter: `COALESCE(superseder.namespace, superseder.project_path) = ? AND ${visibilityClause('superseder').sql}`,
+         })}
          AND ${visibilityClause('memories').sql}
        ORDER BY
          CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
@@ -61,12 +60,15 @@ export function getContext(
 
   // the caller rides as the visibility parameter, so the prepared statement stays reused
   const caller = options.caller ?? currentCaller()
+  if (!holdsVerb(caller, project_path, 'read')) return []
   const callerParam = visibilityClause('memories', caller).params
 
   // the default latest view needs no time clause at all
   if (!options.include_superseded && options.before === undefined && options.as_of === undefined) {
     const rows = stmts.default.all(
       project_path,
+      project_path,
+      ...callerParam,
       ...callerParam,
       thirtyDaysAgo,
       limit
@@ -74,35 +76,19 @@ export function getContext(
     return rows.map(rowToMemory)
   }
 
-  const params: unknown[] = [project_path]
-  let timeFilter = ''
-  if (options.as_of !== undefined) {
-    timeFilter = ` AND ${validityAtClause('memories', '?')}`
-    params.push(options.as_of, options.as_of)
-  } else if (options.before !== undefined) {
-    timeFilter = ' AND valid_from <= ?'
-    params.push(options.before)
-  }
+  const readOptions = { ...options, caller, project_path }
+  const scope = namespaceFilter('memories', readOptions)
+  const temporal = temporalFilter('memories', readOptions)
+  const temporalClause = temporal.sql ? ` AND ${temporal.sql}` : ''
 
   // as_of uses time-aware supersession; before keeps the legacy present-state
   // filter; include_superseded disables filtering entirely.
-  let supersededFilter = ''
-  if (!options.include_superseded) {
-    if (options.as_of !== undefined) {
-      supersededFilter = ` AND ${notSupersededAtClause('memories.id', '?')}`
-      params.push(options.as_of)
-    } else {
-      supersededFilter = ` AND ${notSupersededClause('memories.id')}`
-    }
-  }
-  params.push(...callerParam)
-  params.push(thirtyDaysAgo, limit)
+  const params: unknown[] = [...scope.params, ...temporal.params, thirtyDaysAgo, limit]
 
   const rows = db
     .prepare(
       `SELECT * FROM memories
-       WHERE COALESCE(namespace, project_path) = ?${timeFilter}${supersededFilter}
-         AND ${visibilityClause('memories', caller).sql}
+       WHERE ${scope.sql}${temporalClause}
         ORDER BY
           CASE WHEN type = 'procedure' AND pinned = 1 THEN 1 ELSE 0 END DESC,
           (importance * 0.5 + CASE WHEN created_at > ? THEN 0.5 ELSE 0 END) DESC,
@@ -125,7 +111,7 @@ export function getClusters(
   if (!derivedVisible(db, projectPath, caller)) return []
   const rows = stmts.clusters.all(projectPath) as ClusterRow[]
 
-  return rows.map((r) => {
+  return rows.flatMap((r) => {
     let memberIds: string[] = []
     try {
       const parsed = JSON.parse(r.member_ids)
@@ -135,7 +121,16 @@ export function getClusters(
     } catch {
       // Malformed cluster JSON is ignored; empty members array is safe
     }
-    return {
+    if (memberIds.length > 0) {
+      const scope = namespaceFilter('m', { project_path: projectPath, caller })
+      const readable = new Set((db.prepare(
+        `SELECT m.id FROM memories m WHERE m.id IN (${memberIds.map(() => '?').join(',')}) AND ${scope.sql}`
+      ).all(...memberIds, ...scope.params) as Array<{ id: string }>).map((row) => row.id))
+      // a stored membership list is not authority to read its foreign members or the
+      // summary they contributed to, even if every row in this namespace is owned.
+      if (memberIds.some((id) => !readable.has(id))) return []
+    }
+    return [{
       id: r.id,
       project_path: r.project_path,
       member_ids: memberIds,
@@ -143,6 +138,6 @@ export function getClusters(
       is_extractive: r.is_extractive === 1,
       created_at: r.created_at,
       updated_at: r.updated_at,
-    }
+    }]
   })
 }

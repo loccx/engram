@@ -1,0 +1,1326 @@
+{
+  "suite": "state",
+  "header": {
+    "suite": "state",
+    "configs": [
+      "baseline"
+    ],
+    "seed": 1234,
+    "gitSha": "9dda727d30ee229c033ade8eb81e69fc94fa8945",
+    "gitShaShort": "9dda727d30ee",
+    "gitBranch": "main",
+    "corpusHash": "806de2f0672480a9",
+    "corpusHashFull": "806de2f0672480a9bf9518e0889876b4f9045f1fc778ac13a54b751741f96d1f",
+    "vectorsAvailable": false,
+    "vectorMode": "fts",
+    "tokenizer": "chars/4",
+    "now": 1738108800000,
+    "nowIso": "2025-01-29T00:00:00.000Z",
+    "engramVersion": "0.3.0",
+    "nodeVersion": "v24.19.0",
+    "featureFlags": {
+      "baseline": "{}"
+    },
+    "determinism": "Determinism: metrics are a pure function of (corpus, seed, config, git sha); two runs with the same header produce identical metric values. Wall-clock timings are reported separately and are not covered by that guarantee."
+  },
+  "metrics": {
+    "baseline/keyed": {
+      "retrieval": {
+        "queries": 26,
+        "hits": 38,
+        "targets": 38,
+        "mrr": 1,
+        "leakRate": 0,
+        "staleRate": 0,
+        "tokensPerChar": 0.258,
+        "servedChars": 10633,
+        "servedTokens": 2745,
+        "tokensPerQuery": 105.577,
+        "recall@1": 0.846,
+        "precision@1": 1,
+        "ndcg@1": 1,
+        "recall@5": 1,
+        "precision@5": 0.292,
+        "ndcg@5": 0.991,
+        "recall@10": 1,
+        "precision@10": 0.146,
+        "ndcg@10": 0.991
+      },
+      "byKind": {
+        "as-of": {
+          "queries": 8,
+          "hits": 8,
+          "targets": 8,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.259,
+          "servedChars": 3209,
+          "servedTokens": 832,
+          "tokensPerQuery": 104,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "current": {
+          "queries": 12,
+          "hits": 12,
+          "targets": 12,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.258,
+          "servedChars": 4953,
+          "servedTokens": 1277,
+          "tokensPerQuery": 106.417,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "trajectory": {
+          "queries": 6,
+          "hits": 18,
+          "targets": 18,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.257,
+          "servedChars": 2471,
+          "servedTokens": 636,
+          "tokensPerQuery": 106,
+          "recall@1": 0.333,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.6,
+          "ndcg@5": 0.963,
+          "recall@10": 1,
+          "precision@10": 0.3,
+          "ndcg@10": 0.963
+        }
+      },
+      "state": {
+        "currentAccuracy": 1,
+        "priorAccuracy": 1,
+        "asOfAccuracy": 1,
+        "asOfLeakRate": 0,
+        "slotCoverage": 1,
+        "meanVersions": 3,
+        "facts": 12
+      },
+      "latestAt1": 1,
+      "probes": 12
+    },
+    "baseline/chained": {
+      "retrieval": {
+        "queries": 26,
+        "hits": 38,
+        "targets": 38,
+        "mrr": 1,
+        "leakRate": 0,
+        "staleRate": 0,
+        "tokensPerChar": 0.258,
+        "servedChars": 10633,
+        "servedTokens": 2745,
+        "tokensPerQuery": 105.577,
+        "recall@1": 0.846,
+        "precision@1": 1,
+        "ndcg@1": 1,
+        "recall@5": 1,
+        "precision@5": 0.292,
+        "ndcg@5": 0.991,
+        "recall@10": 1,
+        "precision@10": 0.146,
+        "ndcg@10": 0.991
+      },
+      "byKind": {
+        "as-of": {
+          "queries": 8,
+          "hits": 8,
+          "targets": 8,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.259,
+          "servedChars": 3209,
+          "servedTokens": 832,
+          "tokensPerQuery": 104,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "current": {
+          "queries": 12,
+          "hits": 12,
+          "targets": 12,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.258,
+          "servedChars": 4953,
+          "servedTokens": 1277,
+          "tokensPerQuery": 106.417,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "trajectory": {
+          "queries": 6,
+          "hits": 18,
+          "targets": 18,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.257,
+          "servedChars": 2471,
+          "servedTokens": 636,
+          "tokensPerQuery": 106,
+          "recall@1": 0.333,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.6,
+          "ndcg@5": 0.963,
+          "recall@10": 1,
+          "precision@10": 0.3,
+          "ndcg@10": 0.963
+        }
+      },
+      "state": {
+        "currentAccuracy": 1,
+        "priorAccuracy": 1,
+        "asOfAccuracy": 1,
+        "asOfLeakRate": 0,
+        "slotCoverage": 1,
+        "meanVersions": 3,
+        "facts": 12
+      },
+      "latestAt1": 1,
+      "probes": 12
+    },
+    "baseline/unlinked": {
+      "retrieval": {
+        "queries": 26,
+        "hits": 38,
+        "targets": 38,
+        "mrr": 1,
+        "leakRate": 0,
+        "staleRate": 0.108,
+        "tokensPerChar": 0.258,
+        "servedChars": 10589,
+        "servedTokens": 2734,
+        "tokensPerQuery": 105.154,
+        "recall@1": 0.846,
+        "precision@1": 1,
+        "ndcg@1": 1,
+        "recall@5": 1,
+        "precision@5": 0.292,
+        "ndcg@5": 0.991,
+        "recall@10": 1,
+        "precision@10": 0.146,
+        "ndcg@10": 0.991
+      },
+      "byKind": {
+        "as-of": {
+          "queries": 8,
+          "hits": 8,
+          "targets": 8,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0.05,
+          "tokensPerChar": 0.26,
+          "servedChars": 3198,
+          "servedTokens": 830,
+          "tokensPerQuery": 103.75,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "current": {
+          "queries": 12,
+          "hits": 12,
+          "targets": 12,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0.2,
+          "tokensPerChar": 0.258,
+          "servedChars": 4920,
+          "servedTokens": 1268,
+          "tokensPerQuery": 105.667,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "trajectory": {
+          "queries": 6,
+          "hits": 18,
+          "targets": 18,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.257,
+          "servedChars": 2471,
+          "servedTokens": 636,
+          "tokensPerQuery": 106,
+          "recall@1": 0.333,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.6,
+          "ndcg@5": 0.963,
+          "recall@10": 1,
+          "precision@10": 0.3,
+          "ndcg@10": 0.963
+        }
+      },
+      "state": {
+        "currentAccuracy": 0,
+        "priorAccuracy": 0,
+        "asOfAccuracy": 0.083,
+        "asOfLeakRate": 0,
+        "slotCoverage": 0,
+        "meanVersions": 0,
+        "facts": 12
+      },
+      "latestAt1": 1,
+      "probes": 12
+    }
+  },
+  "timings": {
+    "baseline/all-queries": {
+      "count": 78,
+      "minMs": 0.254,
+      "p50Ms": 0.354,
+      "p90Ms": 0.504,
+      "p95Ms": 0.66,
+      "p99Ms": 1.719,
+      "maxMs": 1.719,
+      "meanMs": 0.405
+    }
+  },
+  "details": [
+    {
+      "config": "baseline",
+      "arm": "keyed",
+      "queries": [
+        {
+          "id": "state-current-f0",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f0",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f0",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f1",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f1",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f1",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f2",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f2",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f2",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f3",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f3",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f3",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f4",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f4",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f4",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f5",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f5",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f5",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f6",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f6",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f7",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f7",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f8",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f9",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f10",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f11",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        }
+      ],
+      "state": {
+        "currentAccuracy": 1,
+        "priorAccuracy": 1,
+        "asOfAccuracy": 1,
+        "asOfLeakRate": 0,
+        "slotCoverage": 1,
+        "meanVersions": 3,
+        "facts": 12
+      }
+    },
+    {
+      "config": "baseline",
+      "arm": "chained",
+      "queries": [
+        {
+          "id": "state-current-f0",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f0",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f0",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f1",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f1",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f1",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f2",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f2",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f2",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f3",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f3",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f3",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f4",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f4",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f4",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f5",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f5",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f5",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f6",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f6",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f7",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f7",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f8",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f9",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f10",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f11",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": 1
+        }
+      ],
+      "state": {
+        "currentAccuracy": 1,
+        "priorAccuracy": 1,
+        "asOfAccuracy": 1,
+        "asOfLeakRate": 0,
+        "slotCoverage": 1,
+        "meanVersions": 3,
+        "facts": 12
+      }
+    },
+    {
+      "config": "baseline",
+      "arm": "unlinked",
+      "queries": [
+        {
+          "id": "state-current-f0",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f0",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.1,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f0",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f1",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f1",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.1,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f1",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f2",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f2",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.1,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f2",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f3",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f3",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.1,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f3",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f4",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f4",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f4",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f5",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f5",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-trajectory-f5",
+          "kind": "trajectory",
+          "recall": {
+            "recall@1": 0.333,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f6",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f6",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f7",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-asof-f7",
+          "kind": "as-of",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0,
+          "latestTargetRank": null
+        },
+        {
+          "id": "state-current-f8",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f9",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f10",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        },
+        {
+          "id": "state-current-f11",
+          "kind": "current",
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "mrr": 1,
+          "staleRate": 0.2,
+          "latestTargetRank": 1
+        }
+      ],
+      "state": {
+        "currentAccuracy": 0,
+        "priorAccuracy": 0,
+        "asOfAccuracy": 0.083,
+        "asOfLeakRate": 0,
+        "slotCoverage": 0,
+        "meanVersions": 0,
+        "facts": 12
+      }
+    }
+  ],
+  "notes": [
+    "keyed: 36 memories (36 via store_memory), 26 probes, placement verified=true",
+    "chained: 12 existing chains named by the backfill (36 rows)",
+    "chained: 36 memories (36 via store_memory), 26 probes, placement verified=true",
+    "unlinked: 36 memories (36 via store_memory), 26 probes, placement verified=true"
+  ]
+}

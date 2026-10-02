@@ -9,6 +9,7 @@ import { tools } from '../src/mcp/tools.js'
 import { validateForImport, exportBrain, type BrainManifest } from '../src/brains/snapshot.js'
 import { listLocalBrains } from '../src/brains/mcp.js'
 import { DatabaseManager } from '../src/db/init.js'
+import { seedClusterMembers } from './helpers.js'
 
 const TEST_PROJECT = '/home/user/compat-project'
 
@@ -125,6 +126,7 @@ describe('compat: get_context roster blanket + query-path full defaults', () => 
 
   it('blanket path summarizes topics by default; full_topics opts back in', async () => {
     const memberIds = Array.from({ length: 300 }, (_, i) => `mem-${i}`)
+    seedClusterMembers(getDatabase().db, TEST_PROJECT, memberIds)
     getDatabase().db
       .prepare(
         `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)
@@ -147,6 +149,7 @@ describe('compat: get_context roster blanket + query-path full defaults', () => 
 
   it('query path: topics summarized by default, full_topics forces membership', async () => {
     const memberIds = Array.from({ length: 300 }, (_, i) => `mem-${i}`)
+    seedClusterMembers(getDatabase().db, TEST_PROJECT, memberIds)
     getDatabase().db
       .prepare(
         `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)

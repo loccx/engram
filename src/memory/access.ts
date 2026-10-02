@@ -84,6 +84,24 @@ export function holdsVerb(caller: CallerScope, namespace: string, verb: Verb): b
   )
 }
 
+/** the sql counterpart of holdsVerb for reads; query scope is intersected separately. */
+export function readGrantClause(
+  namespaceExpr: string,
+  caller: CallerScope = currentCaller()
+): { sql: string; params: unknown[] } {
+  if (caller.localOwner) return { sql: '', params: [] }
+  const prefixes = [...new Set(grantedPrefixes(caller, 'read').map((p) => p.replace(/\/+$/, '')))]
+  if (prefixes.includes('')) return { sql: '', params: [] }
+  if (prefixes.length === 0) return { sql: '0', params: [] }
+  const params: unknown[] = []
+  const clauses = prefixes.map((prefix) => {
+    const escaped = prefix.replace(/[\\%_]/g, '\\$&')
+    params.push(prefix, `${escaped}/%`, `${prefix}/`)
+    return `(${namespaceExpr} = ? OR (${namespaceExpr} LIKE ? ESCAPE '\\' AND instr(${namespaceExpr}, ?) = 1))`
+  })
+  return { sql: `(${clauses.join(' OR ')})`, params }
+}
+
 // the refusal names only the namespace the caller supplied, never the rows behind it, so
 // it cannot be probed for data
 export function authorizeNamespace(
@@ -171,7 +189,7 @@ export function derivedVisible(
   namespace: string,
   caller: CallerScope = currentCaller()
 ): boolean {
-  return derivedOwners(db, namespace).every((owner) =>
+  return holdsVerb(caller, namespace, 'read') && derivedOwners(db, namespace).every((owner) =>
     caller.localOwner ? owner === null : owner === caller.principalId
   )
 }
@@ -277,6 +295,7 @@ const TOOL_VERBS: Record<string, ToolAccess> = {
   get_memory: 'read',
   get_memory_history: 'read',
   get_state: 'read',
+  query_assertions: 'read',
   list_memories: 'read',
   list_sessions: 'read',
   recall_context: 'read',

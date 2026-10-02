@@ -63,6 +63,22 @@ const GATED_METRICS = [
   'slotCoverage',
   'latestAt1',
   'asOfLeakRate',
+  // continuity suite: lifecycle pass rate, per-case evidence/citation coverage and the
+  // rates that must not move (a namespace leak or a future event is a bug, not a
+  // regression). family accuracies stay in the report, not in this gate.
+  'passRate',
+  'coverage',
+  'citationCoverage',
+  'namespaceLeakRate',
+  'staleCaseRate',
+  'distractorRate',
+  'futureLeakRate',
+  'budgetReportedRate',
+  // safety counters: a payload over its cap or a producer that under-reported is a bug,
+  // so they gate from above with no margin, like leakRate
+  'safetyViolations',
+  'producerUnderreports',
+  'budgetViolations',
 ]
 
 /**
@@ -70,10 +86,24 @@ const GATED_METRICS = [
  * one moves. leakRate is the namespace isolation guarantee — a corpus that leaks is a
  * bug, not a regression.
  */
-const INVARIANT_METRICS = new Set(['leakRate'])
+const INVARIANT_METRICS = new Set([
+  'leakRate', 'namespaceLeakRate', 'futureLeakRate', 'asOfLeakRate',
+  'safetyViolations', 'producerUnderreports', 'budgetViolations',
+])
 
 /** smaller is better here, so they gate from above */
-const LOWER_IS_BETTER = new Set(['leakRate', 'staleRate', 'asOfLeakRate', 'budgetViolations'])
+const LOWER_IS_BETTER = new Set([
+  'leakRate',
+  'staleRate',
+  'asOfLeakRate',
+  'budgetViolations',
+  'namespaceLeakRate',
+  'staleCaseRate',
+  'distractorRate',
+  'futureLeakRate',
+  'safetyViolations',
+  'producerUnderreports',
+])
 
 export function loadThresholds(path: string = THRESHOLDS_PATH): ThresholdFile | null {
   try {
@@ -132,8 +162,9 @@ export function buildThresholds(input: ThresholdBuildInput): ThresholdFile {
   const out: ThresholdFile = {
     note:
       'Generated from a baseline run: each value is (measured - margin), floored at 0. ' +
-      'Lower-is-better metrics (leakRate, staleRate) are recorded as measured + margin ' +
-      'instead, and gate from above. Regenerate with `npx tsx eval/run.ts --suite all ' +
+      'Non-invariant lower-is-better metrics are recorded as measured + margin and gate ' +
+      'from above; safety invariants are recorded exactly, with no margin. Regenerate ' +
+      'with `npx tsx eval/run.ts --suite all ' +
       '--write-thresholds`; see eval/README.md.',
     margin,
     generated_at_sha: input.gitSha,

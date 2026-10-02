@@ -41,6 +41,7 @@ import {
   DEFAULT_RECIPE_NAME,
 } from '../memory/assemble.js'
 import { currentState, getState, normalizeStateKey } from '../memory/state.js'
+import { queryAssertions, type QueryAssertionsInput } from '../memory/assertions/index.js'
 import {
   citedEpisodes,
   countMatchingEpisodes,
@@ -410,6 +411,20 @@ function authorizeMemory(
   if (!mayReach(row, verb)) throw new Error(notFound(currentTool(), id))
 }
 
+/** a mutation returns canonical prose only within the caller's current read authority. */
+function readableMutationMemory(db: import('better-sqlite3').Database, store: MemoryStore, id: string) {
+  return db.transaction(() => {
+    const row = memoryAccess(db, id)
+    if (!row || !mayReach(row, 'read')) return null
+    const memory = store.getById(id)
+    if (!memory) return null
+    const namespace = trimNamespace(row.namespace)
+    auditCrossOwnerRead(db, { tool: currentTool(), namespace, ids: [id], channel: 'by-id' })
+    const scope = currentCaller().localOwner ? {} : { namespace_subtree: namespace }
+    return enrichMemories(db, [memory], Date.now(), scope)[0] ?? null
+  }).deferred()
+}
+
 /** the same check for a task, whose row carries its own namespace and ownership */
 function authorizeTask(task: AccessRow, verb: 'read' | 'write'): void {
   if (!mayReach(task, verb)) throw new Error(notFound(currentTool(), task.id))
@@ -763,7 +778,7 @@ async function runTool(
           const packed = packWithinBudget({
             budget_chars: budgetChars,
             digest: null,
-            memories: enrichSearchResults(db, results, breakdown),
+            memories: enrichSearchResults(db, results, breakdown, Date.now(), { project_path }),
             topics: [],
           })
           response.results = packed.memories
@@ -772,7 +787,7 @@ async function runTool(
           response.truncated = packed.truncated
           budgetAccounting = asBudgetAccounting(packed)
         } else {
-          response.results = enrichSearchResults(db, results, breakdown)
+          response.results = enrichSearchResults(db, results, breakdown, Date.now(), { project_path })
         }
 
         // cold rows in the served set are faults: the caller reached into the archive.
@@ -921,7 +936,7 @@ async function runTool(
             }
           }
 
-          const enrichedResults = enrichSearchResults(db, results, breakdown)
+          const enrichedResults = enrichSearchResults(db, results, breakdown, Date.now(), searchOptions)
           // the same packer as recall_context (digest → memories → topics), so a
           // small budget starves nothing silently; without budget_chars the shape is
           // unchanged
@@ -1116,7 +1131,7 @@ async function runTool(
           ids: results.map((r) => r.id),
           channel: 'entity',
         })
-        return ok({ namespace: project_path, results: enrichMemories(db, results) })
+        return ok({ namespace: project_path, results: enrichMemories(db, results, Date.now(), { project_path }) })
       }
 
       case 'get_related': {
@@ -1137,13 +1152,13 @@ async function runTool(
         const walkScope = currentCaller().localOwner
           ? {}
           : { namespace_subtree: trimNamespace(memory.namespace ?? memory.project_path) }
-        const [enrichedMemory] = enrichMemories(db, [memory])
+        const [enrichedMemory] = enrichMemories(db, [memory], Date.now(), walkScope)
         if (depth <= 1) {
-          const related = store.getLinked(memory_id, limit, { include_superseded })
+          const related = store.getLinked(memory_id, limit, { include_superseded, ...walkScope })
           metrics.recordRelated(related, memory.project_path)
           return ok({
             memory: enrichedMemory,
-            related: enrichMemories(db, related).map(
+            related: enrichMemories(db, related, Date.now(), walkScope).map(
               (m, i) => ({ ...m, similarity: related[i].similarity, link_type: related[i].link_type })
             ),
           })
@@ -1152,7 +1167,7 @@ async function runTool(
         metrics.recordRelated(related, memory.project_path)
         return ok({
           memory: enrichedMemory,
-          related: enrichMemories(db, related).map(
+          related: enrichMemories(db, related, Date.now(), walkScope).map(
             (m, i) => ({
               ...m,
               similarity: related[i].similarity,
@@ -1263,7 +1278,7 @@ async function runTool(
           ids: memories.map((m) => m.id),
           channel: 'list',
         })
-        return ok({ namespace: project_path, memories: enrichMemories(db, memories) })
+        return ok({ namespace: project_path, memories: enrichMemories(db, memories, Date.now(), { project_path }) })
       }
 
       case 'forget_memory': {
@@ -1314,7 +1329,8 @@ async function runTool(
         // revision. search paths deliberately do not stamp: that would feed the
         // ranker its own output.
         if (recordsAccessOnExplicitFetch()) store.recordAccess(memory.id)
-        const [enriched] = enrichMemories(db, [memory])
+        const [enriched] = enrichMemories(db, [memory], Date.now(), currentCaller().localOwner
+          ? {} : { namespace_subtree: trimNamespace(memory.namespace ?? memory.project_path) })
         // the evidence this fact was distilled from, when a distillation path cited it
         return ok({ ...enriched, episodes: citedEpisodes(db, memory.id) })
       }
@@ -1334,9 +1350,8 @@ async function runTool(
             reason: store.getById(id) ? 'not archived' : 'not found',
           })
         }
-        const restored = store.getById(id)
-        const [enriched] = restored ? enrichMemories(db, [restored]) : []
-        return ok({ success: true, id, memory: enriched ?? null })
+        const memory = readableMutationMemory(db, store, id)
+        return ok(memory ? { success: true, id, memory } : { success: true, id })
       }
 
       case 'update_memory': {
@@ -1358,9 +1373,8 @@ async function runTool(
                 : undefined,
         }
         const updated = store.update(id, patch)
-        const refreshed = store.getById(id)!
-        const [enriched] = enrichMemories(db, [refreshed])
-        return ok({ success: updated, memory: enriched })
+        const memory = readableMutationMemory(db, store, id)
+        return ok(memory ? { success: updated, memory } : { success: updated, id })
       }
 
       case 'revise_memory': {
@@ -1399,13 +1413,34 @@ async function runTool(
           logger.debug({ err: e, id: result.id }, 'digest: background refresh failed')
         })
         metrics.recordStore(result.memory.content, result.memory.project_path)
-        const [enriched] = enrichMemories(db, [result.memory])
+        const memory = readableMutationMemory(db, store, result.id)
+        if (!memory) return ok({ id: result.id, previous_id: result.previous_id })
         return ok({
           id: result.id,
           previous_id: result.previous_id,
           version: result.version,
-          memory: enriched,
+          memory,
         })
+      }
+
+      case 'query_assertions': {
+        const namespace = await resolveProjectPath(args, ctx)
+        const input: QueryAssertionsInput = {
+          namespace,
+          subject: args.subject as string | undefined,
+          predicate: args.predicate as string | undefined,
+          schema_id: args.schema_id as string | undefined,
+          as_of: args.as_of as number | undefined,
+          valid_at: args.valid_at as number | undefined,
+          observed_before: args.observed_before as number | undefined,
+          include_superseded: args.include_superseded as boolean | undefined,
+          include_archived: args.include_archived as boolean | undefined,
+          limit: args.limit as number | undefined,
+        }
+        if (Object.prototype.hasOwnProperty.call(args, 'value')) {
+          input.value = args.value as QueryAssertionsInput['value']
+        }
+        return ok(queryAssertions(db, input))
       }
 
       case 'get_state': {
@@ -1451,16 +1486,19 @@ async function runTool(
         const authored = store.getById(id)
         if (!authored) return err(notFound(name, id))
         authorizeMemory(db, id, 'read')
+        const historyScope = currentCaller().localOwner
+          ? {} : { namespace_subtree: trimNamespace(authored.namespace ?? authored.project_path) }
         const history = store.getHistory(id, {
           as_of: asOfFromArgs(args),
           limit: typeof args.limit === 'number' ? args.limit : undefined,
+          ...historyScope,
         })
         if (!history) return err(notFound(name, id))
         return ok({
           id: history.id,
           // each version carries the episodes it cites, so a revision chain shows
           // where every step of it came from
-          versions: enrichMemories(db, history.versions).map((version) => ({
+          versions: enrichMemories(db, history.versions, Date.now(), historyScope).map((version) => ({
             ...version,
             episodes: citedEpisodes(db, version.id),
           })),
@@ -1592,9 +1630,8 @@ async function runTool(
         void refreshDigest(db, digestNamespace).catch((e) => {
           logger.debug({ err: e, id }, 'digest: background refresh failed')
         })
-        const refreshed = store.getById(id)!
-        const [enriched] = enrichMemories(db, [refreshed])
-        return ok({ success: updated, memory: enriched })
+        const refreshed = readableMutationMemory(db, store, id)
+        return ok(refreshed ? { success: updated, memory: refreshed } : { success: updated, id })
       }
 
       case 'list_brains': {

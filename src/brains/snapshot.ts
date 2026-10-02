@@ -21,8 +21,21 @@ const HOME_PATH_PATTERNS: Array<[RegExp, string]> = [
  * notes, preconditions and entities mention the owner's paths too, so the prefix
  * is redacted everywhere it appears, not only in metadata columns
  */
-export function scrubHomePaths(value: string): string {
+export function scrubHomePaths(value: string, home: string = homedir()): string {
   let out = value
+  // custom homes (containers, service accounts and relocated profiles) need the same
+  // protection as /Users and /home. Match the directory, never a sibling prefix.
+  // regex case folding is conservative; it does not normalize unicode or cover every
+  // locale-specific expansion of a path component.
+  const root = home.replace(/[/\\]+$/, '')
+  if (root.length > 1 && !/^[A-Za-z]:$/.test(root)) {
+    const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    const ownerPath = new RegExp(
+      '(?<![\\w/\\\\.-])' + escaped + '(?=$|[/\\\\\\s"\'`\\]\\)}]|[.,;:!?](?=$|[\\s"\'`\\]\\)}]))',
+      'gi'
+    )
+    out = out.replace(ownerPath, '~')
+  }
   for (const [re, to] of HOME_PATH_PATTERNS) out = out.replace(re, to)
   return out
 }

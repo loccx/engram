@@ -811,6 +811,34 @@ export const engramTurnsAggregateSystem: SystemFactory = turnSystemFactory('engr
   reserveTopHits: AGGREGATION_RESERVED_HITS,
 })
 
+/** query-only negative control: the reader gets no history, even when the shared db is seeded */
+export const noMemorySystem: SystemFactory = {
+  name: 'no-memory',
+  describe: 'no history or retrieved memory; the query-only negative control',
+  lexicalOnly: true,
+  create() {
+    return {
+      name: 'no-memory',
+      describe: noMemorySystem.describe,
+      adapter: BUILTIN,
+      lexicalOnly: true,
+      async reset() {},
+      async ingest() {},
+      async retrieve() {
+        return {
+          context: '',
+          blocks: [],
+          items: [],
+          retrievalMs: 0,
+          note: 'memory disabled; no history supplied',
+        }
+      },
+      cost: () => ({ writeCalls: 0, writeTokens: 0 }),
+      async close() {},
+    }
+  },
+}
+
 export const fullContextSystem: SystemFactory = {
   name: 'full-context',
   describe: 'every session in the haystack, no retrieval and no budget (the ceiling)',
@@ -903,6 +931,7 @@ export const SYSTEMS: SystemFactory[] = [
   engramEpisodesBreadthReserveSystem,
   engramEpisodesStatementsSystem,
   engramEpisodesRoutedSystem,
+  noMemorySystem,
   fullContextSystem,
   naiveRagSystem,
 ]

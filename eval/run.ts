@@ -27,6 +27,7 @@ import {
   writeThresholds,
 } from './lib/thresholds.js'
 import { redactSecrets } from './lib/llm.js'
+import { engineRevisionIdentity } from './lib/run-identity.js'
 import { DEFAULT_SPLIT } from './suites/longmemeval.js'
 import { SUITES, suiteNames } from './suites/index.js'
 import { defaultSystemNames, systemNames, systemSpecSlug } from './lib/systems.js'
@@ -158,7 +159,7 @@ async function main(): Promise<number> {
     yes: options.yes === true,
     costCeilingCalls,
     contextBudgetChars,
-    gitSha: git.sha,
+    gitSha: engineRevisionIdentity(git),
     outDir: outputDir,
     buildHeader: (input) => buildHeader({ ...input, git }),
   }

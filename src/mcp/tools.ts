@@ -34,6 +34,42 @@ const includeArchivedField = {
 
 export const tools = [
   {
+    name: 'query_assertions',
+    description:
+      'Read schema-validated typed representations of canonical memories. Subject, predicate, schema and whole JSON value use exact equality, never semantic matching. valid_at/as_of checks canonical validity; observed_before independently limits when the revision was observed. Representation metadata and evidence links are current projections, not historical snapshots. Only a trusted host may register schemas or attach representations; this tool does not write or elevate authority.',
+    inputSchema: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        namespace: namespaceField,
+        project_path: projectPathField,
+        subject: { type: 'string', minLength: 1, maxLength: 512 },
+        predicate: { type: 'string', minLength: 1, maxLength: 512 },
+        schema_id: { type: 'string', minLength: 1, maxLength: 512 },
+        value: {
+          description: 'Type-sensitive whole-value JSON equality; object key order is irrelevant.',
+          anyOf: [
+            { type: 'null' }, { type: 'boolean' }, { type: 'number' },
+            { type: 'string' }, { type: 'array', items: {} }, { type: 'object' },
+          ],
+        },
+        as_of: { type: 'integer', description: 'Canonical validity at this Unix millisecond.' },
+        valid_at: { type: 'integer', description: 'Alias of as_of; conflicting values are rejected.' },
+        observed_before: { type: 'integer', description: 'Inclusive revision observation cutoff in Unix milliseconds.' },
+        include_superseded: includeSupersededField,
+        include_archived: includeArchivedField,
+        limit: { type: 'integer', minimum: 1, maximum: 100, default: 20 },
+      },
+    },
+    annotations: {
+      title: 'Query assertions',
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+      openWorldHint: false,
+    },
+  },
+  {
     name: 'store_memory',
     description:
       'One durable fact: the why, and where it applies. Worth saving: a decision with its reason, a convention, a gotcha, a value that will not change next week. Not worth saving: session narration, what was NOT found ("no issues", "nothing new"), a secret or credential value, a pasted file, or a near-identical second row. If something changed, call revise_memory on the existing memory instead of adding another. Answers with status stored | deduplicated | rejected: a rejection carries reason and hint, and warnings/conflicts ride along on an accepted write.',

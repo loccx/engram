@@ -14,6 +14,7 @@ npm run eval:retrieval          # recall@k, precision@k, MRR, nDCG@k, leak, toke
 npm run eval:contradiction      # candidate stage + adjudication threshold sweep
 npm run eval:budget             # recall_context under a strict character budget
 npm run eval:ab                 # config sweep on one fixed corpus
+npm run eval:continuity         # sequential lifecycle: restart, resume, correction, evidence, expiry
 npm run eval:longmemeval        # LongMemEval retrieval metrics (needs a dataset)
 npm run eval:datasets           # fetch the longmemeval oracle split + verify its schema  (network)
 npm run eval:datasets -- --full # the 277 MB split instead of the 15 MB oracle split
@@ -46,7 +47,7 @@ npx tsx eval/run.ts --suite retrieval --configs baseline,rerank-blend \
 
 | flag | meaning |
 | --- | --- |
-| `--suite <name>` | `retrieval` \| `contradiction` \| `budget` \| `ab` \| `state` \| `longmemeval` \| `locomo` \| `memoryagentbench` \| `all` |
+| `--suite <name>` | `retrieval` \| `contradiction` \| `budget` \| `ab` \| `state` \| `continuity` \| `longmemeval` \| `locomo` \| `memoryagentbench` \| `all` |
 | `--configs <list>` | config names from `eval/configs/` (default `baseline`); unknown names fail loudly |
 | `--seed <n>` | corpus seed; same seed → same corpus hash → same metrics |
 | `--limit <n>` | per-query result limit (for `longmemeval`: questions, `locomo`: conversations, `memoryagentbench`: pools) |
@@ -173,7 +174,7 @@ the report ends with a paired block over the questions every reader graded (`eva
 - **the delta, with its noise**: exact two-sided mcnemar on the discordant pairs (`b` = one reader correct and the other wrong, `c` = the reverse) plus a paired percentile-95% bootstrap ci (10,000 resamples over question ids, the seed is printed in the report); holm step-down as soon as more than one pair is in the family;
 - **per `question_type`**: the same paired stats, with a bucket under 30 paired questions flagged `low n`;
 - **cost next to accuracy**: mean context tokens, mean reader input tokens, write-time llm calls/tokens when a row records them, and p50/p95 latency (retrieval + reader call) per reader, with the frontier on (accuracy up, tokens down) marked;
-- **a guard, not a wink**: the comparison is withheld and the differing field is printed when the sides disagree on dataset sha, reader model, judge model, reader prompt, judge prompt or budget. question ids missing on one side are listed and excluded from the paired stats — never folded in as a wrong answer.
+- **a guard, not a wink**: the comparison checks declared dataset/model/prompt/budget identity and requires a stable vector regime, effective question selection and identified engine revision. missing required fields or differences withhold it. a shared, explicit engine intervention permits a deliberate comparison across known revisions and is disclosed; it cannot make an unknown or dirty source tree identified. optional fields absent on either side are reported as unchecked. question ids missing on one side are listed and excluded from the paired stats — never folded in as a wrong answer.
 
 so a line reads `engram vs full-context: -3.4 pts (95% ci -8.1 to +1.2), mcnemar p=0.19 (b=25, c=41) — not significant at 0.05`, and a report that cannot say that says so instead.
 
@@ -181,7 +182,7 @@ safety rails for a paid run:
 
 - the gateway is checked before any work, and `--reader-model` / `--judge-model` are required — the model that graded an answer is pinned per run and written on every row, so two accuracy numbers from different judges are never merged;
 - a cost estimate (calls plus reader/judge input tokens, extrapolated from the first question) is printed before the first call; above `--cost-ceiling-calls` the run stops and needs `--yes`;
-- every answered (question, reader) row is appended to a jsonl checkpoint before aggregation, and a rerun skips rows whose key matches (split, dataset sha256, readers, both models, both prompt versions, budget, top-k). a different key is never reused, and the report warns when resumed rows span more than one git sha.
+- every answered (question, reader) row is appended to a jsonl checkpoint before aggregation. longmemeval binds split, dataset sha256, systems/adapters, reader/judge models and prompts, budget, top-k, vector regime/readiness, effective question selection and engine revision. locomo and memoryagentbench bind their scorer/prompt, effective sample selection, vector regime, revision and seed too. foreign or legacy keys are retained and diagnosed, never reused. incomplete-model regimes, unidentified revisions and dirty trees cannot resume even a matching key, and cannot be paired as matched evidence. a dirty suffix distinguishes it from a clean revision but cannot identify two different sets of edits, so both are refused rather than silently mixed. legacy checkpoints therefore cost a fresh run; the existing call ceiling and `--yes` gate still apply.
 
 ## metrics
 
@@ -199,6 +200,12 @@ safety rails for a paid run:
 | `currentAccuracy` / `priorAccuracy` / `asOfAccuracy` | state suite: `get_state` reports the newest value, the value it replaced, and the value true at the as-of instant |
 | `asOfLeakRate` | state suite: share of as-of reads that served a value which did not exist yet at that instant |
 | `slotCoverage` | state suite: share of facts with any slot at all |
+| `passRate` | continuity suite: scored cases whose required checks all held; an insufficient-budget case is in neither numerator nor denominator |
+| `coverage` / `citationCoverage` | continuity suite: share of scored evidence-carrying cases whose gold evidence was served, and of citation-carrying cases whose citation names the right source and external id |
+| `namespaceLeakRate` / `futureLeakRate` | continuity suite: share of served rows outside the probe namespace, and written after the probe's checkpoint |
+| `staleRate` / `staleCaseRate` | continuity suite: share of served rows carrying a forbidden value, and share of forbidden-carrying cases that served one |
+| `distractorRate` | continuity suite: share of distractor-sensitive cases served the twin namespace's value |
+| `budgetReportedRate` | continuity suite: share of insufficient-budget cases whose own packer accounting reported the cut |
 
 `gpt-tokenizer` is optional and not installed by default: when one of `gpt-tokenizer`, `js-tiktoken` or `@dqbd/tiktoken` happens to be importable the header names the exact tokenizer, otherwise it says `tokenizer: chars/4`, and that fallback is what runs by default.
 
@@ -234,6 +241,78 @@ run it with `npx tsx eval/run.ts --suite state` (offline, fts-only, ~1s). thresh
 
 on longmemeval, `latestServed`/`latestAt1` give the real-dataset version of the same question (retrieval-only, no gateway): on `longmemeval_s_cleaned` (120 questions, fts-only) the newest evidence session is served in 1.0 of knowledge-update questions but ranked first in only 0.684 — the older session that first stated the value outranks the update in about a third of them. nothing in that path writes a `state_key` and no adjudicator runs offline, so this lane's mechanism does not move that number; the number is the diagnostic for whatever does.
 
+## continuity
+
+what it measures: one synthetic agent workflow — a release-train cutover — whose seven events are streamed **in chronological order** and probed at six checkpoints (twelve probes), so a row written after a checkpoint is a leak the scorer can see. this is a **contract suite, not an agentic benchmark**: it never claims task success by an agent, and nothing here should be cited as one. the shapes the other suites cannot express sit here: a session restart that disposes the harness and reopens the same database, a working task resumed by the next session and closed into one cited summary, a deploy window corrected after it was written (with its replaced value still readable as history), evidence that exists only as episodes and is cited from the memory distilled out of it, a sibling namespace holding a twin of the same fact, a prune that archives a redundant row that then has to come back, and an episode whose ttl expires while a durable one stays.
+
+the fixture (`eval/lib/continuity-corpus.ts`) is a pure function of the seed and splits in two: `fixture` (events, probe questions, checkpoints, budgets) goes to the controller, `gold` (answers, evidence ids, forbidden values, the checks each case requires) goes only to the scorer. the controller (`eval/lib/continuity-runner.ts`) is fixed and scripted; it never receives a label and never reads a checkpoint it has not streamed.
+
+the controller is supplied the read surface, state keys, structured writes and citations to consult. it does not learn extraction, routing or action policy. some checks require a particular API payload, so a memories-only arm can fail the contract even if a model could infer the answer from another representation. the restart disposes and reopens the harness/database in the same process; it is not a daemon crash experiment.
+
+one probe is one payload with **one cap**: a read that composes surfaces packs every surface into what the budgeted read left, so a composed payload can never deliver more content than the probe was given. the delivered size is what the scorer measures — it recounts the context itself rather than trusting the producer's `used_chars`, and any gap between the two is reported (`reported_used_chars`, `gap`, `producerUnderreports`).
+
+three arms answer the same probes under the same character budgets, each replaying the fixture into its **own isolated database** (a probe that mutates its store — the archive restore, the expiry sweep — cannot change what another arm reads; a test runs the arms in both orders and byte-compares the per-arm results):
+
+| arm | what it consults |
+| --- | --- |
+| `full` | state slots + `recall_context` + `retrieveEpisodeContext` + task briefs, all charged against the probe budget |
+| `single-layer` | `recall_context` only — the degraded ablation, same budget |
+| `memory-off` | the same controller over an empty isolated store — the negative control |
+
+`ingestOps` is each arm's own seeding cost; `probeOps` is what the arm itself did on top of it (`unarchive`, `episode_sweep`), kept separate so a mutating probe is never read as ingest.
+
+what the numbers mean, and what they stand on:
+
+| metric | denominator |
+| --- | --- |
+| `passRate` | scored cases (an insufficient-budget case is reported and excluded from both sides) |
+| `coverage` / `citationCoverage` | scored cases carrying an evidence gold / a citation gold |
+| `namespaceLeakRate` / `futureLeakRate` | served rows across **every** case, scored or insufficient |
+| `staleRate` / `staleCaseRate` | served rows / cases carrying a forbidden value, scored or insufficient |
+| `distractorRate` | distractor-sensitive cases |
+| `budgetViolations` / `safetyViolations` | payloads over their cap / cases with any safety finding, over every case |
+| `producerUnderreports` | cases where the producer's own section exceeded the budget it claimed |
+| `budgetReportedRate` | insufficient-budget cases |
+
+usefulness rates stand on the scored cases; **safety rates stand on all of them**, so a budget overflow, a served future row, a namespace leak or an under-reporting producer inside an insufficient-budget case is still counted rather than excluded with the usefulness verdict. every violation is also listed per case (`violations`, `safety_failed`) and shown as a column in the per-case table.
+
+an operation a probe cannot answer is recorded as **unavailable**, never as a pass: a check whose gold names no answer, no forbidden value or no citation is `null`, and a **required** `null` fails the case, so an arm that did not read the surface cannot collect a point for it. the budget check is not in that category: it is always computable from the delivered context, even when the read carried no producer budget record (the archive read), and `budget_report.accounted` says whether a producer claim was present to compare against.
+
+families: `resume` (restart and the resumed task's handoff, then the close summary), `correction` (current value, its prior and its chain), `evidence` (episode-only evidence and citations), `namespace` (the twin and its non-vacuous control), `budget` (one sufficient probe and one whose budget cannot reach the answer offset), `archive` (prune, hidden by id and by search, restore) and `expiry` (ttl sweep).
+
+exact repeat command (offline, fts-only, ~1s, no gateway, no dataset):
+
+```bash
+npx tsx eval/run.ts --suite continuity                 # writes eval/reports/continuity-baseline-<sha>.{md,json}
+npx tsx eval/run.ts --suite continuity --seed 1234 --vectors fts --json --assert
+```
+
+two runs with the same header produce an identical `metrics` block (a test runs the suite twice in-process and byte-compares it); `latency_ms` inside `details` and everything in `timings` is wall clock and varies.
+
+thresholds: the suite emits `thresholds` keys per arm (`baseline/full`, `baseline/single-layer`, `baseline/memory-off`) and `eval/lib/thresholds.ts` knows the continuity metric names, so a future `--suite all --write-thresholds` records them. **no continuity entry is written to `eval/thresholds.json` by this change**: a gate generated from the same run it would gate is not a gate, and `--suite continuity --write-thresholds` on its own would replace the file with continuity-only entries and silently drop every other suite. `--assert --suite continuity` therefore checks 0 thresholds today and exits 0.
+
+what it does not measure:
+
+- the controller is fixed and scripted, so these are **contract** results: whether the shipped surfaces served the evidence a task needs. it is not task success by an llm agent, and the report says so (`metrics.task_success.agent.status = not_run`). a verbose or overgeneralized recalled text can still degrade a real agent that this suite scores as a pass.
+- `full` passing its own fixture is a baseline, not a quality claim. the fixture is built from facts the layer is supposed to serve, so its value is as a regression gate — break state tracking, the episode layer, the task resume or the cold tier and a family drops to 0 — and the `single-layer` ablation and the `memory-off` control are the evidence that the instrument discriminates.
+- twelve probes is a small sample: a family with one or two cases moves in whole points, and the family accuracies are directional. one probe is one payload, so the two halves of a case (the task survives the restart and the brief carries the work; the close is not re-opened and the summary cites the evidence) are checked in the same case rather than split into near-duplicates.
+- the cap is enforced by the composer, not by the producer: `recall_context` and `retrieveEpisodeContext` still pack their own sections, and the runner adds the state/history/summary/citation surfaces into the room they left. a payload that would have exceeded its cap is therefore *truncated and reported* (`composed.dropped`, `composed.truncated`), and the case fails on the missing content rather than on an overflow — the regression that matters is a payload that quietly delivers more than the cap, which the scorer catches independently (a unit test drives a producer that claims 76 characters while delivering 316).
+- the archive case exercises `planDuplicatePrune`/`applyDuplicatePrune` and `unarchiveMemory` on a dedicated namespace; it does not measure the maintenance scheduler.
+- episode ttl is the ingest call's, so a mixed-retention batch is two ingests; the suite never relies on the background sweeper.
+- reads are scored from the shipped functions with an injected clock; the mcp transport itself is covered by the handler and adapter suites, not here.
+
+### integration protocol: task-level suites (MemoryArena, DolphinBench, future task benchmarks)
+
+the interchange is the fixture/gold split, and it is deliberately small: `events` (seq, at, session, actions), `probes` (checkpoint, `after_seq`, query, namespace, budget) and `gold` (answer, evidence ids, forbidden values, required checks). to put a task-level benchmark behind it:
+
+1. adapt the benchmark: its episodes or turns become `events` in their own order (one event = one session or one tool step), its questions or checkpoints become `probes` with `after_seq` set to the last event that may be visible, and its labels become `gold` and travel no further than the scorer;
+2. run the fixed controller for contract numbers: offline, deterministic, no gateway, no reader. a task benchmark whose steps are tool calls maps directly — a step is an event, a graded task is a probe;
+3. run the agent/reader arm separately and label it as such: the same fixture, a pinned reader (and judge) model recorded on every row, the cost ceiling and `--yes`, and the checkpoint the paid suites already use, so contract and agent numbers are never merged;
+4. report utility next to cost: `writeOps`/`readOps`, served chars/tokens, `timings`, and the harmful-memory rate (`staleRate`, `distractorRate`) — retrieval coverage alone cannot certify usable memory;
+5. vary only memory: same fixture, same budgets, same order, same models across systems, which is what `--systems` does for longmemeval and what the arms do here.
+
+do not fold a contract pass into an agent score: the two answer different questions ("could the evidence be served" vs "did the agent use it"), and a benchmark that reports one number for both cannot tell a memory-layer regression from a reader regression.
+
 ## determinism
 
 reproducing a run byte-for-byte requires the same header: git sha, seed, corpus hash, `vectorsAvailable`, tokenizer, config list, scoring clock.
@@ -261,7 +340,7 @@ per-run reports are gitignored because they are regenerated constantly; `--basel
 
 ## thresholds and `--assert`
 
-`eval/thresholds.json` is generated from a measured run (`--write-thresholds`). most values are the measured number minus a 10% margin; lower-is-better metrics (`leakRate`, `staleRate`) are recorded as measured plus the margin and gate from above. `leakRate` is an invariant: no margin applies, so any namespace leak fails `--assert` outright — a leak is a bug, not a regression. the file is a regression gate, not a quality claim, so a low baseline passes its own gate by construction.
+`eval/thresholds.json` is generated from a measured run (`--write-thresholds`). most values are the measured number minus a 10% margin; non-invariant lower-is-better metrics are recorded as measured plus the margin and gate from above. generated gates for `leakRate`, `namespaceLeakRate`, `futureLeakRate`, `asOfLeakRate`, `safetyViolations`, `producerUnderreports` and `budgetViolations` have no margin: these are faults rather than noisy quality scores. the existing file has no continuity block, so `--assert --suite continuity` currently checks **0 thresholds**; passing it is not a continuity gate. its existing state `asOfLeakRate` thresholds still have the older 0.1 slack; this iteration leaves that file byte-identical rather than regenerating it from its own run. tests enforce the new contracts. the file is a regression gate, not a quality claim, so a low baseline passes its own gate by construction.
 
 ## adding an improvement config
 

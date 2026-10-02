@@ -55,7 +55,9 @@ import {
   qaKey,
   qaTimings,
   runQa,
+  vectorIdentity,
   type CostEstimate,
+  type QaForeignKey,
   type QaQuestion,
   type QaRow,
   type ReaderAggregate,
@@ -316,6 +318,24 @@ export function defaultQuestionLimit(splitName: string): number {
   return splitName.includes('_s_cleaned') || splitName.includes('_m_cleaned') ? 20 : 50
 }
 
+// which questions a run asks, and how they were drawn. the dataset sha covers the bytes,
+// not the selection: a 60-question slice of a 500-question file and the whole file are
+// different runs, and neither resumes the other. a type filter keeps every match in file
+// order, so the stride does not apply to it.
+export function questionSetIdentity(input: {
+  questionTypes: string[]
+  limit: number
+  stride: number
+}): string {
+  const scope =
+    input.questionTypes.length === 0
+      ? 'all'
+      : `types=${[...input.questionTypes].sort().join(',')}`
+  const limit = Number.isFinite(input.limit) ? `limit=${input.limit}` : 'limit=all'
+  const stride = input.questionTypes.length === 0 ? `stride=${input.stride}` : 'stride=n/a'
+  return `${scope},${limit},${stride}`
+}
+
 /** the default checkpoint: one file per split and system set */
 export function defaultCheckpointPath(splitName: string, systems: string[]): string {
   const slug = systems.map((name) => name.replace(/[^a-zA-Z0-9._-]+/g, '-')).join('+')
@@ -448,6 +468,18 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
     const checkpoint = new JsonlCheckpoint<QaRow>(
       ctx.checkpointPath ?? defaultCheckpointPath(splitName, systems.map((system) => system.name))
     )
+    // the regime that is really in effect, not the flag that was typed: a `cached`
+    // request on a machine without the model runs FTS, and resuming it as if it were a
+    // vector run would mix two regimes into one number
+    const vectorRegime = vectorIdentity(harness.vectorMode, {
+      vectorsAvailable: harness.vectorsAvailable,
+      modelCacheReady: harness.modelCacheReady,
+    })
+    const questionSetId = questionSetIdentity({
+      questionTypes,
+      limit: questionCount,
+      stride,
+    })
     const key = qaKey({
       split: splitName,
       datasetSha: fileSha256,
@@ -456,6 +488,9 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
       judgeModel,
       budgetChars: contextBudgetChars,
       topK: READER_TOP_K,
+      vectors: vectorRegime,
+      questionSet: questionSetId,
+      engineRevision: ctx.gitSha ?? '',
     })
 
     async function* streamQuestions(): AsyncGenerator<QaQuestion> {
@@ -585,6 +620,8 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
         confirmed: ctx.yes === true,
         totalQuestions: Number.isFinite(questionCount) ? questionCount : totalRecords,
         gitSha: ctx.gitSha ?? '',
+        vectors: vectorRegime,
+        questionSet: questionSetId,
         tokenizer,
         log: ctx.log,
       })
@@ -621,6 +658,11 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
           reader_prompt: READER_PROMPT_VERSION,
           judge_prompt: ANSCHECK_PROMPT_VERSION,
           budget_chars: contextBudgetChars,
+          vectors: vectorRegime,
+          question_set: questionSetId,
+          // an unidentified checkout cannot prove two row sets came from the same code,
+          // so it stays undeclared and the guard withholds the comparison with that reason
+          ...(ctx.gitSha ? { engine_revision: ctx.gitSha } : {}),
         },
         seed: ctx.seed,
       })
@@ -634,6 +676,23 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
           `${qaBlock.comparison.resamples}-resample paired bootstrap (seed ${qaBlock.comparison.seed}); ` +
           `comparable: ${qaBlock.comparison.comparable}`
       )
+      notes.push(
+        'qa comparison identity: the rows were measured under one vector regime, one question ' +
+          `set and one code revision — vectors=${vectorRegime}, questions=${questionSetId}, ` +
+          `engine=${ctx.gitSha || 'unknown'}`
+      )
+      if (qaBlock.comparison.interventions.length > 0) {
+        notes.push(
+          `qa comparison intervention: a cross-revision comparison was declared — ` +
+            qaBlock.comparison.interventions.join('; ')
+        )
+      }
+      if (!qaBlock.comparison.comparable) {
+        notes.push(
+          `qa comparison withheld: ${qaBlock.comparison.differences.join('; ')} — no delta is ` +
+            'printed for rows that disagree on the fields a comparison stands on'
+        )
+      }
     }
     if (qaOutput && qaOutput.rows.length > 0) {
       notes.push(
@@ -645,6 +704,15 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
         `qa resume: checkpoint ${checkpoint.path} (resumed ${qaBlock.resumed_questions} question(s), ` +
           `${qaBlock.resumed_rows} row(s))`
       )
+      if ((qaBlock.foreign_keys?.length ?? 0) > 0) {
+        const kept = qaBlock.foreign_keys!.reduce((sum, entry) => sum + entry.rows, 0)
+        notes.push(
+        `qa resume: ${kept} checkpoint row(s) have an unverified or different identity and were ` +
+            `NOT reused (${qaBlock.foreign_keys!
+              .map((entry) => entry.differences.join('; ') || entry.key)
+              .join(' | ')}); they are kept, and this run appends its own rows under the current key`
+        )
+      }
       if ((qaBlock.failures?.length ?? 0) > 0) {
         notes.push(`qa failures: ${qaBlock.failures?.length} (see details.qa.failures)`)
       }
@@ -685,7 +753,8 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
     const systemAggregates = aggregateSystems({ systems, scores: systemScores, ks })
     if (systems.length > 0) {
       notes.push(
-        `vectors: --vectors ${ctx.vectors} (model ready: ${harness.vectorsAvailable}) — stored/rows per ` +
+        `vectors: --vectors ${ctx.vectors} -> ${vectorRegime} (model cache ready: ` +
+          `${harness.modelCacheReady}) — stored/rows per ` +
           `system: ${systems
             .map((system) => `${system.name} ${storedVectorsCell(systemAggregates[system.name])}`)
             .join('; ')}`
@@ -888,6 +957,8 @@ export interface QaReportBlock {
   resumed_rows?: number
   estimated_rows?: number
   fallback_judge_rows?: number
+  /** checkpoint rows under another run identity: kept, never reused */
+  foreign_keys?: QaForeignKey[]
   git_shas?: string[]
   mixed_git_sha?: boolean
   estimate?: CostEstimate | null
@@ -924,6 +995,7 @@ export function describeQa(
     resumed_rows: rows.filter((r) => r.resumed).length,
     estimated_rows: rows.filter((r) => r.token_source === 'estimated').length,
     fallback_judge_rows: rows.filter((r) => r.judge_template === 'generic-fallback').length,
+    foreign_keys: output.foreignKeys,
     git_shas: shas,
     mixed_git_sha: shas.length > 1,
     estimate: output.estimate,
@@ -1219,6 +1291,13 @@ function statsRow(row: QaRow): StatsRow {
     reader_model: row.reader_model,
     judge_model: row.judge_model,
   }
+  // the identity travels with the row, so a row set that disagrees with itself about the
+  // regime, the sample or the code revision is refused instead of compared
+  if (typeof row.vectors === 'string' && row.vectors !== '') out.vectors = row.vectors
+  if (typeof row.question_set === 'string' && row.question_set !== '') {
+    out.question_set = row.question_set
+  }
+  if (typeof row.git_sha === 'string' && row.git_sha !== '') out.engine_revision = row.git_sha
   // write-time cost lands on the row only when the suite that owns ingest measures it
   if (typeof row.write_llm_calls === 'number') out.write_llm_calls = row.write_llm_calls
   if (typeof row.write_llm_tokens === 'number') out.write_llm_tokens = row.write_llm_tokens

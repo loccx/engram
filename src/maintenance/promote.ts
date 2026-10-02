@@ -7,6 +7,7 @@ import { notSupersededClause } from '../contradictions/supersession.js'
 import { logger } from '../utils/logger.js'
 import { normalizeIdentifiers } from '../db/lexical-index.js'
 import { inheritMemoryEpisodes } from '../memory/episodes.js'
+import { readSourceGeneration, sourceDerivedMemoryIds } from '../sources/index.js'
 
 /**
  * pattern promotion: distills a synthetic leaf scope's repeated memories into one
@@ -42,26 +43,26 @@ Rules:
 - The output MUST be at most 480 characters.`
 
 function countMemories(db: Database.Database, scopePath: string): number {
-  const row = db
-    .prepare(
-      `SELECT COUNT(*) AS n FROM memories
-       WHERE COALESCE(namespace, project_path) = ?
-         AND ${notSupersededClause('memories.id')}`
-    )
-    .get(scopePath) as { n: number }
-  return row.n
+  const excluded = new Set(sourceDerivedMemoryIds(db))
+  const rows = db.prepare(
+    `SELECT id FROM memories
+     WHERE COALESCE(namespace, project_path) = ?
+       AND ${notSupersededClause('memories.id')}`
+  ).all(scopePath) as Array<{ id: string }>
+  return rows.filter((row) => !excluded.has(row.id)).length
 }
 
 function loadTopMemories(db: Database.Database, scopePath: string, limit: number): ScopeMemory[] {
-  return db
+  const excluded = new Set(sourceDerivedMemoryIds(db))
+  return (db
     .prepare(
       `SELECT id, content, importance FROM memories
        WHERE COALESCE(namespace, project_path) = ?
          AND ${notSupersededClause('memories.id')}
-       ORDER BY importance DESC, created_at DESC
-       LIMIT ?`
+       ORDER BY importance DESC, created_at DESC`
     )
-    .all(scopePath, limit) as ScopeMemory[]
+    .all(scopePath) as ScopeMemory[]
+  ).filter((row) => !excluded.has(row.id)).slice(0, limit)
 }
 
 function alreadyPromoted(db: Database.Database, parentPath: string, token: string): boolean {
@@ -208,6 +209,7 @@ export async function promoteScopePatterns(
       continue
     }
 
+    const sourceGeneration = readSourceGeneration(db)
     const memories = loadTopMemories(db, leaf.path, TOP_MEMORIES)
     const distilled = await distill(leaf.path, memories)
     if (distilled === null) {
@@ -215,11 +217,24 @@ export async function promoteScopePatterns(
       report.reasons[token] = 'no_llm'
       continue
     }
-    const patternId = insertPattern(db, parentPath, token, distilled)
-    linkSources(db, patternId, memories)
-    // the distilled pattern stands in for memories that may each cite evidence, so it
-    // cites the union of theirs: a reader of the pattern can still reach the raw turns
-    inheritMemoryEpisodes(db, patternId, memories.map((memory) => memory.id))
+    // source-backed facts stay in their granted scope. do not create an
+    // uncited parent copy, including when sources change during distillation.
+    const promoted = db.transaction(() => {
+      const excluded = new Set(sourceDerivedMemoryIds(db))
+      if (readSourceGeneration(db) !== sourceGeneration ||
+          memories.some((memory) => excluded.has(memory.id))) return false
+      const patternId = insertPattern(db, parentPath, token, distilled)
+      linkSources(db, patternId, memories)
+      // the distilled pattern stands in for memories that may each cite evidence, so it
+      // cites the union of theirs: a reader of the pattern can still reach the raw turns
+      inheritMemoryEpisodes(db, patternId, memories.map((memory) => memory.id))
+      return true
+    }).immediate()
+    if (!promoted) {
+      report.skipped.push(token)
+      report.reasons[token] = 'source_changed'
+      continue
+    }
     report.promoted.push(token)
   }
 

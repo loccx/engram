@@ -4,7 +4,7 @@
 // non-commercial. the stub llm replaces the network call only: gateway presence, model
 // pinning, the official f1 scorer, the checkpoint and the cost gate all run for real.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -369,6 +369,214 @@ describe('locomo suite run', () => {
   })
 })
 
+describe('locomo run identity (stub llm)', () => {
+  const IDENTITY_READERS = ['engram', 'full-context']
+
+  /** one --qa run over the fixture, with a stub reader that records what it was asked */
+  async function qaRun(opts: {
+    dir: string
+    checkpoint: string
+    overrides?: Partial<SuiteContext>
+  }): Promise<{ metrics: LocomoSuiteMetrics; notes: string[]; rows: Array<Record<string, unknown>>; requests: LlmCall[] }> {
+    useGateway()
+    const requests: LlmCall[] = []
+    setLlmTransport(async (call: LlmCall): Promise<ChatResult> => {
+      requests.push(call)
+      const text = call.messages.map((message) => message.content).join('\n')
+      return { content: text.includes('Maine Coon') ? 'Maine Coon' : "I don't know", model: call.model }
+    })
+    const path = writeFixture(opts.dir)
+    const output = await runLocomoSuite(
+      suiteContext(opts.dir, {
+        qa: true,
+        datasetPath: path,
+        readers: IDENTITY_READERS,
+        readerModel: 'stub-reader',
+        checkpointPath: opts.checkpoint,
+        envFile: join(opts.dir, 'no-such-env'),
+        yes: true,
+        concurrency: 2,
+        contextBudgetChars: 4000,
+        ...opts.overrides,
+      })
+    )
+    const metrics = (output.result.metrics as Record<string, LocomoSuiteMetrics>).baseline
+    const details = output.result.details as Array<{ qa?: { rows: Array<Record<string, unknown>> } }>
+    return {
+      metrics,
+      notes: output.result.notes ?? [],
+      rows: details.find((detail) => detail.qa !== undefined)?.qa?.rows ?? [],
+      requests,
+    }
+  }
+
+  it('stamps the identity on every row and resumes an unchanged run', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    const first = await qaRun({ dir, checkpoint })
+    expect(first.metrics.qa.calls).toBe(8 * IDENTITY_READERS.length)
+    expect(first.rows).toHaveLength(8 * IDENTITY_READERS.length)
+    for (const row of first.rows) {
+      // this fixture is seeded on the fts path, over both conversations, at the test seed
+      expect(row.vectors).toBe('fts')
+      expect(row.selection).toBe('samples=2/2')
+      expect(row.git_sha).toBe('testsha')
+      const key = String(row.key)
+      expect(key).toContain('vectors=fts')
+      expect(key).toContain('selection=samples=2/2')
+      expect(key).toContain('engine=testsha')
+      expect(key).toContain('seed=7')
+    }
+    expect(first.notes.some((note) => note.includes('qa identity: vectors=fts'))).toBe(true)
+
+    const second = await qaRun({ dir, checkpoint })
+    expect(second.metrics.qa.calls).toBe(0)
+    expect(second.metrics.qa.resumed_questions).toBe(8)
+    expect(second.metrics.qa.readers!.engram.score).toBe(first.metrics.qa.readers!.engram.score)
+  }, 120_000)
+
+  it('never resumes a lexical checkpoint as a vector run', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint, overrides: { vectors: 'fts' } })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { vectors: 'cached' } })
+    expect(second.metrics.qa.calls).toBe(8 * IDENTITY_READERS.length)
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(
+      second.notes.some((note) => /vectors: cached(\+vectors|\+fts-fallback) vs fts/.test(note))
+    ).toBe(true)
+    // the regime that was really in effect, not the flag that was typed
+    for (const row of second.rows) expect(row.vectors).not.toBe('fts')
+    // the old rows are kept: two identities in one file, nothing deleted
+    const keys = new Set(
+      readFileSync(checkpoint, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).key as string)
+    )
+    expect(keys.size).toBe(2)
+  }, 120_000)
+
+  it('resumes the identity it returns to, not the rows written in between', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    const first = await qaRun({ dir, checkpoint, overrides: { vectors: 'fts' } })
+    const middle = await qaRun({ dir, checkpoint, overrides: { vectors: 'cached' } })
+    expect(middle.metrics.qa.resumed_questions).toBe(0)
+
+    // back to the first regime: the lexical rows are the ones that match, and the vector
+    // rows written in between stay where they are
+    const third = await qaRun({ dir, checkpoint, overrides: { vectors: 'fts' } })
+    expect(third.metrics.qa.calls).toBe(0)
+    expect(third.metrics.qa.resumed_questions).toBe(8)
+    expect(third.metrics.qa.readers!.engram.score).toBe(first.metrics.qa.readers!.engram.score)
+    expect(third.metrics.qa.foreign_keys?.[0].rows).toBe(middle.rows.length)
+    const keys = new Set(
+      readFileSync(checkpoint, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).key as string)
+    )
+    expect(keys.size).toBe(2)
+  }, 120_000)
+
+  it('never resumes a checkpoint that sampled other conversations', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { limit: 1 } })
+    // conv-alpha holds five of the eight questions
+    expect(second.metrics.qa.calls).toBe(5 * IDENTITY_READERS.length)
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(
+      second.notes.some((note) => note.includes('selection: samples=1/2 vs samples=2/2'))
+    ).toBe(true)
+    for (const row of second.rows) expect(row.selection).toBe('samples=1/2')
+  }, 120_000)
+
+  it('never resumes across a code revision', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint, overrides: { gitSha: 'sha-a' } })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { gitSha: 'sha-b' } })
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(second.metrics.qa.calls).toBe(8 * IDENTITY_READERS.length)
+    expect(second.notes.some((note) => note.includes('engine: sha-b vs sha-a'))).toBe(true)
+  }, 120_000)
+
+  it('treats a limit above the file size as the same selection', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint })
+
+    // both conversations are on offer, so asking for more than two is the same run
+    const second = await qaRun({ dir, checkpoint, overrides: { limit: 5 } })
+    expect(second.metrics.qa.calls).toBe(0)
+    expect(second.metrics.qa.resumed_questions).toBe(8)
+    for (const row of second.rows) expect(row.selection).toBe('samples=2/2')
+  }, 120_000)
+
+  it('fails closed on a checkpoint written before the identity parts existed', async () => {
+    const dir = tempDir()
+    const current = join(dir, 'run.jsonl')
+    const first = await qaRun({ dir, checkpoint: current })
+
+    // the key this run would have written before vectors, engine, selection and seed
+    // were part of it: the same rows, the same question ids, no identity
+    const legacyKey = String(first.rows[0].key)
+      .split('|')
+      .filter((part) => !/^(vectors|engine|selection|seed)=/.test(part))
+      .join('|')
+    const legacy = join(dir, 'legacy.jsonl')
+    writeFileSync(
+      legacy,
+      first.rows
+        .map((row) => JSON.stringify({ ...row, key: legacyKey, resumed: false }))
+        .join('\n') + '\n',
+      'utf8'
+    )
+
+    const second = await qaRun({ dir, checkpoint: legacy })
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(second.metrics.qa.calls).toBe(8 * IDENTITY_READERS.length)
+    const note = second.notes.find((entry) => entry.includes('NOT reused')) ?? ''
+    expect(note).toContain('vectors: fts vs (absent)')
+    expect(note).toContain('engine: testsha vs (absent)')
+    expect(note).toContain('selection: samples=2/2 vs (absent)')
+    expect(note).toContain('seed: 7 vs (absent)')
+    // nothing else is blamed: the parts the old key did carry still match
+    expect(note).not.toContain('dataset:')
+    expect(second.metrics.qa.foreign_keys?.[0].rows).toBe(first.rows.length)
+    // the old rows are still there, and the new ones were appended beside them
+    expect(readFileSync(legacy, 'utf8').trim().split('\n')).toHaveLength(2 * first.rows.length)
+  }, 120_000)
+
+  it('never resumes across a seed, which decides the adversarial option order', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    const first = await qaRun({ dir, checkpoint, overrides: { seed: 7 } })
+    const second = await qaRun({ dir, checkpoint, overrides: { seed: 8 } })
+
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(second.metrics.qa.calls).toBe(8 * IDENTITY_READERS.length)
+    expect(second.notes.some((note) => note.includes('seed: 8 vs 7'))).toBe(true)
+    // the flip is not cosmetic: it decides which option is (a) in the question asked
+    const adversarial = (requests: LlmCall[]): string =>
+      requests
+        .map((call) => call.messages.map((message) => message.content).join('\n'))
+        .find((text) => text.includes('favourite opera')) ?? ''
+    expect(adversarial(first.requests)).toContain(
+      '(a) La Traviata (b) Not mentioned in the conversation'
+    )
+    expect(adversarial(second.requests)).toContain(
+      '(a) Not mentioned in the conversation (b) La Traviata'
+    )
+  }, 120_000)
+})
+
 interface LocomoSuiteMetrics {
   evidence: Record<string, number>
   byCategory: Record<string, Record<string, number>>
@@ -380,6 +588,7 @@ interface LocomoSuiteMetrics {
     resumed_questions?: number
     reader_model?: string
     scorer?: string
+    foreign_keys?: Array<{ rows: number; differences: string[] }>
     readers?: Record<string, { score: number; graded: number }>
   }
 }

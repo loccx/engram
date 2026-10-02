@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3'
 import { chat, isLlmConfigured } from '../llm/client.js'
 import { logger } from '../utils/logger.js'
 import { currentCaller, derivedVisible, type CallerScope } from './access.js'
+import { readSourceGeneration } from '../sources/index.js'
 
 export const DEFAULT_DIGEST_BUDGET_CHARS = 2000
 
@@ -65,6 +66,7 @@ export async function refreshDigest(
       .get(namespace) as DigestRow | undefined
     cached = existing?.content ?? ''
 
+    const sourceGeneration = readSourceGeneration(db)
     const pinned = db
       .prepare(
         `SELECT id, content, type FROM memories
@@ -90,22 +92,30 @@ export async function refreshDigest(
       content = truncateWithMarker(lines, budget)
     }
 
-    db.prepare(
-      `INSERT INTO project_digests (namespace, content, source_hash, updated_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(namespace) DO UPDATE SET
-         content = excluded.content,
-         source_hash = excluded.source_hash,
-         updated_at = excluded.updated_at`
-    ).run(namespace, content, hash, Math.floor(Date.now() / 1000))
-
-    return { content, changed: content !== cached }
+    // a source may be revoked while consolidation awaits the model. fence the
+    // cache write in the same transaction as the freshness check, including
+    // mutations made by a different process against this SQLite database.
+    return db.transaction(() => {
+      if (readSourceGeneration(db) !== sourceGeneration) {
+        return { content: '', changed: false }
+      }
+      db.prepare(
+        `INSERT INTO project_digests (namespace, content, source_hash, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(namespace) DO UPDATE SET
+           content = excluded.content,
+           source_hash = excluded.source_hash,
+           updated_at = excluded.updated_at`
+      ).run(namespace, content, hash, Math.floor(Date.now() / 1000))
+      return { content, changed: content !== cached }
+    }).immediate()
   } catch (e) {
     logger.warn(
       { err: e instanceof Error ? e.message : String(e), namespace },
       'digest: refresh failed; serving previous digest'
     )
-    return { content: cached, changed: false }
+    // read the live cache: a retained pre-await copy may contain revoked text.
+    return { content: getDigest(db, namespace), changed: false }
   }
 }
 

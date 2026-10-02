@@ -15,7 +15,8 @@ import type {
   HistoryLink,
 } from './types.js'
 import { rowToMemory, type MemoryRow } from './row.js'
-import { currentCaller, visibilityClause, visibilityOf, type CallerScope } from './access.js'
+import { currentCaller, visibilityOf, type CallerScope } from './access.js'
+import { namespaceFilter, temporalFilter, type NamespaceFilterOptions } from './search/scope.js'
 import {
   getEmbedding,
   LINK_DISTANCE_THRESHOLD,
@@ -29,7 +30,6 @@ import { findContradictionCandidates } from '../contradictions/candidates.js'
 import { admit, isAgentWrite, type AdmissionWarning } from './admission.js'
 import {
   notSupersededClause,
-  notSupersededAtClause,
   validityAtClause,
 } from '../contradictions/supersession.js'
 import type { BackgroundJobQueue } from '../queue/background-queue.js'
@@ -37,6 +37,7 @@ import { extractEntities } from './entities.js'
 import { advanceStateHead, normalizeStateKey } from './state.js'
 import { normalizeIdentifiers } from '../db/lexical-index.js'
 import { logger } from '../utils/logger.js'
+import { forgetSourcesForMemory } from '../sources/lifecycle.js'
 
 const ADJUDICATE_SYNC_TIMEOUT_MS = 2000
 const CONFLICT_LIMIT = 3
@@ -512,18 +513,20 @@ export class MemoryStore {
     namespace: string,
     type: MemoryType
   ): MemoryRow | null {
+    const scope = namespaceFilter('memories', { project_path: namespace })
+    const successor = namespaceFilter('superseder', { project_path: namespace })
     const row = this.db
       .prepare(
         `SELECT * FROM memories
          WHERE content = ?
            AND COALESCE(namespace, project_path) = ?
            AND type = ?
-           AND ${notSupersededClause('memories.id')}
-           AND ${visibilityClause('memories').sql}
+           AND ${notSupersededClause('memories.id', { successorFilter: successor.sql })}
+           AND ${scope.sql}
          ORDER BY created_at ASC, id ASC
          LIMIT 1`
       )
-      .get(content, namespace, type, ...visibilityClause('memories').params) as MemoryRow | undefined
+      .get(content, namespace, type, ...successor.params, ...scope.params) as MemoryRow | undefined
     return row ?? null
   }
 
@@ -532,6 +535,7 @@ export class MemoryStore {
    * they can never disagree about what the neighbourhood is
    */
   private _knnNeighbours(embedding: Float32Array): KnnNeighbour[] {
+    const scope = namespaceFilter('m', {})
     return this.db
       .prepare(
         `SELECT knn.rowid, knn.distance, m.id, m.type, m.created_at, m.content,
@@ -539,9 +543,9 @@ export class MemoryStore {
                 COALESCE(m.namespace, m.project_path) AS namespace
          FROM (SELECT rowid, distance FROM memory_vectors WHERE embedding MATCH ? LIMIT 20) knn
          JOIN memories m ON m.vec_rowid = knn.rowid
-         WHERE ${visibilityClause('m').sql}`
+         WHERE ${scope.sql}`
       )
-      .all(Buffer.from(embedding.buffer), ...visibilityClause('m').params) as KnnNeighbour[]
+      .all(Buffer.from(embedding.buffer), ...scope.params) as KnnNeighbour[]
   }
 
   /**
@@ -708,23 +712,30 @@ export class MemoryStore {
    * only once judged (COALESCE(judged_at, created_at) <= asOf), so an adjudicated
    * supersession never makes a foreign row look like this id's row.
    */
-  getByIdAt(id: string, asOf: number): Memory | null {
-    if (!this.getById(id)) return null
+  getByIdAt(id: string, asOf: number, options: NamespaceFilterOptions = {}): Memory | null {
+    const readScope = this.anchorReadScope(id, options)
+    if (!readScope) return null
+    const sourceScope = namespaceFilter('source', readScope)
+    const targetScope = namespaceFilter('target', readScope)
+    const resultScope = namespaceFilter('memories', readScope)
 
     // walk manual revision edges in both directions, so any chain member can be the
     // entry point (chainVersion itself walks successor → predecessor)
     const visited = new Set<string>()
     const frontier: string[] = [id]
     const neighborStmt = this.db.prepare(
-      `SELECT source_id, target_id, judged_at, created_at FROM memory_links
-       WHERE link_type = 'supersedes' AND revision > 0 AND (source_id = ? OR target_id = ?)`
+      `SELECT ml.source_id, ml.target_id, ml.judged_at, ml.created_at FROM memory_links ml
+       JOIN memories source ON source.id = ml.source_id
+       JOIN memories target ON target.id = ml.target_id
+       WHERE ml.link_type = 'supersedes' AND ml.revision > 0 AND (ml.source_id = ? OR ml.target_id = ?)
+         AND ${sourceScope.sql} AND ${targetScope.sql}`
     )
     const MAX_NODES = 500
     while (frontier.length > 0 && visited.size < MAX_NODES) {
       const cur = frontier.shift()!
       if (visited.has(cur)) continue
       visited.add(cur)
-      const neighbors = neighborStmt.all(cur, cur) as Array<{
+      const neighbors = neighborStmt.all(cur, cur, ...sourceScope.params, ...targetScope.params) as Array<{
         source_id: string
         target_id: string
         judged_at: number | null
@@ -743,10 +754,10 @@ export class MemoryStore {
     const rows = this.db
       .prepare(
         `SELECT * FROM memories
-         WHERE id IN (${placeholders}) AND ${validityAtClause('memories', '?')}
+         WHERE id IN (${placeholders}) AND ${resultScope.sql} AND ${validityAtClause('memories', '?')}
          ORDER BY valid_from DESC, created_at DESC, id DESC LIMIT 1`
       )
-      .all(...ids, asOf, asOf) as MemoryRow[]
+      .all(...ids, ...resultScope.params, asOf, asOf) as MemoryRow[]
     return rows.length > 0 ? rowToMemory(rows[0]) : null
   }
 
@@ -758,6 +769,13 @@ export class MemoryStore {
     // cascade, the fts table is wiped by the after-delete trigger, but memory_vectors
     // (vec0) and memory_clusters.member_ids have no fk and are cleaned by hand
     const tx = this.db.transaction((memoryId: string, vecRowid: number | null) => {
+      // preserve source identity before cascading away its citations. A source purge
+      // can remove this row and its legitimate revisions itself.
+      const sourceSchema = this.db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'source_revisions'").get()
+      if (sourceSchema) {
+        forgetSourcesForMemory(this.db, memoryId)
+        if (!this.db.prepare('SELECT 1 FROM memories WHERE id = ?').get(memoryId)) return true
+      }
       // the audit row goes in inside the transaction, before the memory disappears;
       // memory_events has no fk, so the trail outlives the row
       const deletedPayload = {
@@ -828,46 +846,25 @@ export class MemoryStore {
       return result.changes > 0
     })
 
-    return tx(id, mem.vec_rowid) as boolean
+    return tx.immediate(mem.id, mem.vec_rowid) as boolean
   }
 
   list(filters: ListMemoriesFilter = {}): Memory[] {
     const conditions: string[] = []
     const values: unknown[] = []
 
-    if (filters.project_path) {
-      conditions.push('COALESCE(namespace, project_path) = ?')
-      values.push(filters.project_path)
-    }
-    const visibility = visibilityClause('memories', filters.caller)
-    conditions.push(visibility.sql)
-    values.push(...visibility.params)
+    const scope = namespaceFilter('memories', filters)
+    conditions.push(scope.sql)
+    values.push(...scope.params)
     if (filters.type) {
       conditions.push('type = ?')
       values.push(filters.type)
     }
-    if (filters.as_of !== undefined) {
-      conditions.push(validityAtClause('memories', '?'))
-      values.push(filters.as_of, filters.as_of)
-    }
-    if (!filters.include_superseded) {
-      if (filters.as_of !== undefined) {
-        conditions.push(
-          notSupersededAtClause('memories.id', '?', {
-            includeArchived: filters.include_archived === true,
-          })
-        )
-        values.push(filters.as_of)
-      } else {
-        conditions.push(
-          notSupersededClause('memories.id', { includeArchived: filters.include_archived === true })
-        )
-      }
-    } else if (!filters.include_archived) {
-      // archived is not superseded: asking for superseded rows is an audit request,
-      // never a request to resurrect a retired row. include_archived opts in.
-      conditions.push('memories.archived_at IS NULL')
-    }
+    // archived is not superseded: asking for superseded rows is an audit request,
+    // never a request to resurrect a retired row. include_archived opts in.
+    const temporal = temporalFilter('memories', filters)
+    if (temporal.sql) conditions.push(temporal.sql)
+    values.push(...temporal.params)
 
     const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : ''
     const limit = filters.limit ?? 20
@@ -1010,25 +1007,12 @@ export class MemoryStore {
   ): Memory[] {
     const conditions = ['me.entity_text = ? COLLATE NOCASE']
     const values: unknown[] = [entityText]
-    if (options.as_of !== undefined) {
-      conditions.push(validityAtClause('m', '?'))
-      values.push(options.as_of, options.as_of)
-    }
-    if (!options.include_superseded) {
-      if (options.as_of !== undefined) {
-        conditions.push(notSupersededAtClause('m.id', '?'))
-        values.push(options.as_of)
-      } else {
-        conditions.push(notSupersededClause('m.id'))
-      }
-    }
-    if (projectPath) {
-      conditions.push('COALESCE(m.namespace, m.project_path) = ?')
-      values.push(projectPath)
-    }
-    const visibility = visibilityClause('m', options.caller)
-    conditions.push(visibility.sql)
-    values.push(...visibility.params)
+    const readOptions = { ...options, project_path: projectPath }
+    const scope = namespaceFilter('m', readOptions)
+    const temporal = temporalFilter('m', readOptions)
+    conditions.push(scope.sql)
+    if (temporal.sql) conditions.push(temporal.sql)
+    values.push(...scope.params, ...temporal.params)
     values.push(limit)
     const rows = this.db
       .prepare(
@@ -1043,35 +1027,46 @@ export class MemoryStore {
     return rows.map(rowToMemory)
   }
 
+  /**
+   * named by-id walks stay under the anchor unless the caller supplies a narrower scope;
+   * the local owner's no-query walk retains its historical store-wide behaviour.
+   */
+  private anchorReadScope(id: string, options: NamespaceFilterOptions): NamespaceFilterOptions | null {
+    const row = this.stmtGetById.get(id) as MemoryRow | undefined
+    if (!row) return null
+    const caller = options.caller ?? currentCaller()
+    const scopeOptions: NamespaceFilterOptions = {
+      ...options,
+      caller,
+      ...(!caller.localOwner && !options.project_path && !options.namespace_subtree
+        ? { namespace_subtree: row.namespace ?? row.project_path }
+        : {}),
+    }
+    const scope = namespaceFilter('m', scopeOptions)
+    const seed = this.db.prepare(`SELECT 1 FROM memories m WHERE m.id = ? AND ${scope.sql}`)
+      .get(id, ...scope.params)
+    return seed ? scopeOptions : null
+  }
+
   /** linked memories, strongest similarity first */
   getLinked(
     id: string,
     limit: number = 10,
-    options: { include_superseded?: boolean; as_of?: number; caller?: CallerScope } = {}
+    options: NamespaceFilterOptions & { include_superseded?: boolean; as_of?: number } = {}
   ): Array<Memory & { similarity: number; link_type: LinkType }> {
-    const params: unknown[] = [id]
-    const timeFilter =
-      options.as_of !== undefined ? ` AND ${validityAtClause('m', '?')}` : ''
-    if (options.as_of !== undefined) params.push(options.as_of, options.as_of)
-
-    const supersededFilter = options.include_superseded
-      ? ''
-      : options.as_of !== undefined
-        ? ` AND ${notSupersededAtClause('m.id', '?')}`
-        : ` AND ${notSupersededClause('m.id')}`
-    if (options.as_of !== undefined && !options.include_superseded) {
-      params.push(options.as_of)
-    }
-    params.push(...visibilityClause('m', options.caller).params)
-    params.push(limit)
+    const readScope = this.anchorReadScope(id, options)
+    if (!readScope) return []
+    const scope = namespaceFilter('m', readScope)
+    const temporal = temporalFilter('m', { ...options, ...readScope })
+    const temporalClause = temporal.sql ? ` AND ${temporal.sql}` : ''
+    const params: unknown[] = [id, ...scope.params, ...temporal.params, limit]
 
     const rows = this.db
       .prepare(
         `SELECT m.*, ml.similarity, ml.link_type
          FROM memory_links ml
          JOIN memories m ON m.id = ml.target_id
-         WHERE ml.source_id = ?${timeFilter}${supersededFilter}
-           AND ${visibilityClause('m', options.caller).sql}
+         WHERE ml.source_id = ? AND ${scope.sql}${temporalClause}
          ORDER BY ml.similarity DESC
          LIMIT ?`
       )
@@ -1307,21 +1302,32 @@ export class MemoryStore {
    * is audit, not recall. members come back oldest-first, plus the links between
    * them. as_of filters to the historical view.
    */
-  getHistory(id: string, options: { as_of?: number; limit?: number } = {}): MemoryHistory | null {
-    if (!this.getById(id)) return null
+  getHistory(
+    id: string,
+    options: NamespaceFilterOptions & { as_of?: number; limit?: number } = {}
+  ): MemoryHistory | null {
+    const readScope = this.anchorReadScope(id, options)
+    if (!readScope) return null
+    const sourceScope = namespaceFilter('source', readScope)
+    const targetScope = namespaceFilter('target', readScope)
+    const resultScope = namespaceFilter('memories', readScope)
     const limit = Math.max(1, Math.min(options.limit ?? 50, 500))
 
     const visited = new Set<string>()
     const frontier: string[] = [id]
     const neighborStmt = this.db.prepare(
-      "SELECT source_id, target_id FROM memory_links WHERE link_type = 'supersedes' AND (source_id = ? OR target_id = ?)"
+      `SELECT ml.source_id, ml.target_id FROM memory_links ml
+       JOIN memories source ON source.id = ml.source_id
+       JOIN memories target ON target.id = ml.target_id
+       WHERE ml.link_type = 'supersedes' AND (ml.source_id = ? OR ml.target_id = ?)
+         AND ${sourceScope.sql} AND ${targetScope.sql}`
     )
     const MAX_NODES = 500
     while (frontier.length > 0 && visited.size < MAX_NODES) {
       const cur = frontier.shift()!
       if (visited.has(cur)) continue
       visited.add(cur)
-      const neighbors = neighborStmt.all(cur, cur) as Array<{
+      const neighbors = neighborStmt.all(cur, cur, ...sourceScope.params, ...targetScope.params) as Array<{
         source_id: string
         target_id: string
       }>
@@ -1338,27 +1344,31 @@ export class MemoryStore {
       rows = this.db
         .prepare(
           `SELECT * FROM memories
-           WHERE id IN (${placeholders}) AND ${validityAtClause('memories', '?')}
+           WHERE id IN (${placeholders}) AND ${resultScope.sql} AND ${validityAtClause('memories', '?')}
            ORDER BY created_at ASC, id ASC`
         )
-        .all(...ids, options.as_of, options.as_of) as MemoryRow[]
+        .all(...ids, ...resultScope.params, options.as_of, options.as_of) as MemoryRow[]
     } else {
       rows = this.db
         .prepare(
-          `SELECT * FROM memories WHERE id IN (${placeholders}) ORDER BY created_at ASC, id ASC`
+          `SELECT * FROM memories WHERE id IN (${placeholders}) AND ${resultScope.sql} ORDER BY created_at ASC, id ASC`
         )
-        .all(...ids) as MemoryRow[]
+        .all(...ids, ...resultScope.params) as MemoryRow[]
     }
 
-    const linkRows = this.db
+    rows = rows.slice(0, limit)
+    const emittedIds = rows.map((row) => row.id)
+    const emittedPlaceholders = emittedIds.map(() => '?').join(',')
+    const linkRows = emittedIds.length === 0 ? [] : this.db
       .prepare(
         `SELECT * FROM memory_links
          WHERE link_type = 'supersedes'
-           AND source_id IN (${placeholders})
-           AND target_id IN (${placeholders})
+           AND source_id IN (${emittedPlaceholders})
+           AND target_id IN (${emittedPlaceholders})
+           ${options.as_of !== undefined ? 'AND COALESCE(judged_at, created_at) <= ?' : ''}
          ORDER BY COALESCE(judged_at, created_at) ASC, source_id ASC, target_id ASC`
       )
-      .all(...ids, ...ids) as Array<Record<string, unknown>>
+      .all(...emittedIds, ...emittedIds, ...(options.as_of !== undefined ? [options.as_of] : [])) as Array<Record<string, unknown>>
 
     const links: HistoryLink[] = linkRows.map((l) => ({
       source_id: l.source_id as string,
@@ -1374,6 +1384,6 @@ export class MemoryStore {
       revision: (l.revision as number | undefined) ?? 0,
     }))
 
-    return { id, versions: rows.map(rowToMemory).slice(0, limit), links }
+    return { id, versions: rows.map(rowToMemory), links }
   }
 }

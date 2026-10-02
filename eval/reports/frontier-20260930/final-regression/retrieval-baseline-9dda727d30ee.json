@@ -1,0 +1,4933 @@
+{
+  "suite": "retrieval",
+  "header": {
+    "suite": "retrieval",
+    "configs": [
+      "baseline"
+    ],
+    "seed": 1234,
+    "gitSha": "9dda727d30ee229c033ade8eb81e69fc94fa8945",
+    "gitShaShort": "9dda727d30ee",
+    "gitBranch": "main",
+    "corpusHash": "1b2ab47fc91d3365",
+    "corpusHashFull": "1b2ab47fc91d336559192a14365bc188bd0471179840f3298894293f421ad690",
+    "vectorsAvailable": false,
+    "vectorMode": "fts",
+    "tokenizer": "chars/4",
+    "now": 1735689600000,
+    "nowIso": "2025-01-01T00:00:00.000Z",
+    "engramVersion": "0.3.0",
+    "nodeVersion": "v24.19.0",
+    "featureFlags": {
+      "baseline": "{}"
+    },
+    "determinism": "Determinism: metrics are a pure function of (corpus, seed, config, git sha); two runs with the same header produce identical metric values. Wall-clock timings are reported separately and are not covered by that guarantee."
+  },
+  "metrics": {
+    "baseline": {
+      "overall": {
+        "queries": 64,
+        "hits": 64,
+        "targets": 78,
+        "mrr": 0.561,
+        "leakRate": 0,
+        "staleRate": 0.038,
+        "tokensPerChar": 0.255,
+        "servedChars": 23857,
+        "servedTokens": 6081,
+        "tokensPerQuery": 95.016,
+        "recall@1": 0.401,
+        "precision@1": 0.469,
+        "ndcg@1": 0.469,
+        "recall@5": 0.713,
+        "precision@5": 0.178,
+        "ndcg@5": 0.593,
+        "recall@10": 0.781,
+        "precision@10": 0.1,
+        "ndcg@10": 0.615
+      },
+      "byCorpus": {
+        "cross-notation": {
+          "queries": 10,
+          "hits": 2,
+          "targets": 10,
+          "mrr": 0.117,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.253,
+          "servedChars": 2300,
+          "servedTokens": 581,
+          "tokensPerQuery": 58.1,
+          "recall@1": 0.1,
+          "precision@1": 0.1,
+          "ndcg@1": 0.1,
+          "recall@5": 0.1,
+          "precision@5": 0.02,
+          "ndcg@5": 0.1,
+          "recall@10": 0.2,
+          "precision@10": 0.02,
+          "ndcg@10": 0.136
+        },
+        "paraphrase": {
+          "queries": 10,
+          "hits": 4,
+          "targets": 10,
+          "mrr": 0.283,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 4162,
+          "servedTokens": 1063,
+          "tokensPerQuery": 106.3,
+          "recall@1": 0.2,
+          "precision@1": 0.2,
+          "ndcg@1": 0.2,
+          "recall@5": 0.4,
+          "precision@5": 0.08,
+          "ndcg@5": 0.313,
+          "recall@10": 0.4,
+          "precision@10": 0.04,
+          "ndcg@10": 0.313
+        },
+        "distractor": {
+          "queries": 8,
+          "hits": 8,
+          "targets": 8,
+          "mrr": 0.479,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "tokensPerChar": 0.255,
+          "servedChars": 5567,
+          "servedTokens": 1421,
+          "tokensPerQuery": 177.625,
+          "recall@1": 0.25,
+          "precision@1": 0.25,
+          "ndcg@1": 0.25,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 0.608,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 0.608
+        },
+        "temporal-update": {
+          "queries": 12,
+          "hits": 12,
+          "targets": 12,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 1945,
+          "servedTokens": 496,
+          "tokensPerQuery": 41.333,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "cross-namespace": {
+          "queries": 8,
+          "hits": 22,
+          "targets": 22,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.253,
+          "servedChars": 1835,
+          "servedTokens": 464,
+          "tokensPerQuery": 58,
+          "recall@1": 0.453,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 0.953,
+          "precision@5": 0.475,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.275,
+          "ndcg@10": 1
+        },
+        "long-horizon": {
+          "queries": 16,
+          "hits": 16,
+          "targets": 16,
+          "mrr": 0.505,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 8048,
+          "servedTokens": 2056,
+          "tokensPerQuery": 128.5,
+          "recall@1": 0.313,
+          "precision@1": 0.313,
+          "ndcg@1": 0.313,
+          "recall@5": 0.813,
+          "precision@5": 0.163,
+          "ndcg@5": 0.56,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 0.623
+        }
+      },
+      "byKind": {
+        "cross-notation:camel-to-snake": {
+          "queries": 2,
+          "hits": 0,
+          "targets": 2,
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "tokensPerQuery": 0,
+          "recall@1": 0,
+          "precision@1": 0,
+          "ndcg@1": 0,
+          "recall@5": 0,
+          "precision@5": 0,
+          "ndcg@5": 0,
+          "recall@10": 0,
+          "precision@10": 0,
+          "ndcg@10": 0
+        },
+        "cross-notation:camel-to-spaced": {
+          "queries": 3,
+          "hits": 0,
+          "targets": 3,
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.252,
+          "servedChars": 425,
+          "servedTokens": 107,
+          "tokensPerQuery": 35.667,
+          "recall@1": 0,
+          "precision@1": 0,
+          "ndcg@1": 0,
+          "recall@5": 0,
+          "precision@5": 0,
+          "ndcg@5": 0,
+          "recall@10": 0,
+          "precision@10": 0,
+          "ndcg@10": 0
+        },
+        "cross-notation:prose-notation": {
+          "queries": 2,
+          "hits": 2,
+          "targets": 2,
+          "mrr": 0.584,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.253,
+          "servedChars": 1875,
+          "servedTokens": 474,
+          "tokensPerQuery": 237,
+          "recall@1": 0.5,
+          "precision@1": 0.5,
+          "ndcg@1": 0.5,
+          "recall@5": 0.5,
+          "precision@5": 0.1,
+          "ndcg@5": 0.5,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 0.678
+        },
+        "cross-notation:snake-to-camel": {
+          "queries": 3,
+          "hits": 0,
+          "targets": 3,
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "tokensPerQuery": 0,
+          "recall@1": 0,
+          "precision@1": 0,
+          "ndcg@1": 0,
+          "recall@5": 0,
+          "precision@5": 0,
+          "ndcg@5": 0,
+          "recall@10": 0,
+          "precision@10": 0,
+          "ndcg@10": 0
+        },
+        "paraphrase:paraphrase": {
+          "queries": 10,
+          "hits": 4,
+          "targets": 10,
+          "mrr": 0.283,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 4162,
+          "servedTokens": 1063,
+          "tokensPerQuery": 106.3,
+          "recall@1": 0.2,
+          "precision@1": 0.2,
+          "ndcg@1": 0.2,
+          "recall@5": 0.4,
+          "precision@5": 0.08,
+          "ndcg@5": 0.313,
+          "recall@10": 0.4,
+          "precision@10": 0.04,
+          "ndcg@10": 0.313
+        },
+        "distractor:context-clue": {
+          "queries": 2,
+          "hits": 2,
+          "targets": 2,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "tokensPerChar": 0.254,
+          "servedChars": 1542,
+          "servedTokens": 392,
+          "tokensPerQuery": 196,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "distractor:near-duplicate-decoys": {
+          "queries": 6,
+          "hits": 6,
+          "targets": 6,
+          "mrr": 0.305,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "tokensPerChar": 0.256,
+          "servedChars": 4025,
+          "servedTokens": 1029,
+          "tokensPerQuery": 171.5,
+          "recall@1": 0,
+          "precision@1": 0,
+          "ndcg@1": 0,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 0.477,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 0.477
+        },
+        "temporal-update:historical": {
+          "queries": 6,
+          "hits": 6,
+          "targets": 6,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 1073,
+          "servedTokens": 274,
+          "tokensPerQuery": 45.667,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "temporal-update:present-state": {
+          "queries": 6,
+          "hits": 6,
+          "targets": 6,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 872,
+          "servedTokens": 222,
+          "tokensPerQuery": 37,
+          "recall@1": 1,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 1
+        },
+        "cross-namespace:cross-negative": {
+          "queries": 1,
+          "hits": 2,
+          "targets": 2,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.252,
+          "servedChars": 151,
+          "servedTokens": 38,
+          "tokensPerQuery": 38,
+          "recall@1": 0.5,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.4,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.2,
+          "ndcg@10": 1
+        },
+        "cross-namespace:strict-scope": {
+          "queries": 5,
+          "hits": 10,
+          "targets": 10,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.253,
+          "servedChars": 853,
+          "servedTokens": 216,
+          "tokensPerQuery": 43.2,
+          "recall@1": 0.5,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 1,
+          "precision@5": 0.4,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.2,
+          "ndcg@10": 1
+        },
+        "cross-namespace:subtree": {
+          "queries": 2,
+          "hits": 10,
+          "targets": 10,
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.253,
+          "servedChars": 831,
+          "servedTokens": 210,
+          "tokensPerQuery": 105,
+          "recall@1": 0.313,
+          "precision@1": 1,
+          "ndcg@1": 1,
+          "recall@5": 0.813,
+          "precision@5": 0.7,
+          "ndcg@5": 1,
+          "recall@10": 1,
+          "precision@10": 0.5,
+          "ndcg@10": 1
+        },
+        "long-horizon:historical": {
+          "queries": 8,
+          "hits": 8,
+          "targets": 8,
+          "mrr": 0.671,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.255,
+          "servedChars": 4360,
+          "servedTokens": 1112,
+          "tokensPerQuery": 139,
+          "recall@1": 0.5,
+          "precision@1": 0.5,
+          "ndcg@1": 0.5,
+          "recall@5": 1,
+          "precision@5": 0.2,
+          "ndcg@5": 0.752,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 0.752
+        },
+        "long-horizon:revised-fact": {
+          "queries": 8,
+          "hits": 8,
+          "targets": 8,
+          "mrr": 0.34,
+          "leakRate": 0,
+          "staleRate": 0,
+          "tokensPerChar": 0.256,
+          "servedChars": 3688,
+          "servedTokens": 944,
+          "tokensPerQuery": 118,
+          "recall@1": 0.125,
+          "precision@1": 0.125,
+          "ndcg@1": 0.125,
+          "recall@5": 0.625,
+          "precision@5": 0.125,
+          "ndcg@5": 0.369,
+          "recall@10": 1,
+          "precision@10": 0.1,
+          "ndcg@10": 0.494
+        }
+      }
+    }
+  },
+  "timings": {
+    "baseline/all-queries": {
+      "count": 64,
+      "minMs": 0.15,
+      "p50Ms": 0.392,
+      "p90Ms": 0.796,
+      "p95Ms": 0.99,
+      "p99Ms": 1.131,
+      "maxMs": 1.131,
+      "meanMs": 0.473
+    }
+  },
+  "details": [
+    {
+      "config": "baseline",
+      "queries": [
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-fuse",
+          "kind": "camel-to-snake",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-fuse"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.985,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-knn",
+          "kind": "camel-to-spaced",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-knn"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.651,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-ident-table",
+          "kind": "snake-to-camel",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-ident-table"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.187,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-write-gate",
+          "kind": "prose-notation",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-write-gate"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-knn-decoy",
+              "namespace": "/home/dev/notation",
+              "score": 0.516
+            },
+            {
+              "rank": 2,
+              "id": "xn-retention-decoy",
+              "namespace": "/home/dev/notation",
+              "score": 0.516
+            },
+            {
+              "rank": 3,
+              "id": "xn-rerank-alpha",
+              "namespace": "/home/dev/notation",
+              "score": 0.423
+            },
+            {
+              "rank": 4,
+              "id": "xn-fuse",
+              "namespace": "/home/dev/notation",
+              "score": 0.423
+            },
+            {
+              "rank": 5,
+              "id": "xn-knn",
+              "namespace": "/home/dev/notation",
+              "score": 0.423
+            },
+            {
+              "rank": 6,
+              "id": "xn-write-gate",
+              "namespace": "/home/dev/notation",
+              "score": 0.422
+            },
+            {
+              "rank": 7,
+              "id": "xn-ident-table",
+              "namespace": "/home/dev/notation",
+              "score": 0.422
+            },
+            {
+              "rank": 8,
+              "id": "xn-backfill",
+              "namespace": "/home/dev/notation",
+              "score": 0.421
+            },
+            {
+              "rank": 9,
+              "id": "xn-probe",
+              "namespace": "/home/dev/notation",
+              "score": 0.421
+            },
+            {
+              "rank": 10,
+              "id": "xn-retention",
+              "namespace": "/home/dev/notation",
+              "score": 0.42
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0.356
+          },
+          "mrr": 0.167,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 1056,
+          "servedTokens": 267,
+          "latencyMs": 1.04,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-backfill",
+          "kind": "camel-to-spaced",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-backfill"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-fuse",
+              "namespace": "/home/dev/notation",
+              "score": 0.587
+            },
+            {
+              "rank": 2,
+              "id": "xn-knn-decoy",
+              "namespace": "/home/dev/notation",
+              "score": 0.565
+            },
+            {
+              "rank": 3,
+              "id": "xn-knn",
+              "namespace": "/home/dev/notation",
+              "score": 0.562
+            },
+            {
+              "rank": 4,
+              "id": "xn-probe",
+              "namespace": "/home/dev/notation",
+              "score": 0.56
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 425,
+          "servedTokens": 107,
+          "latencyMs": 0.337,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-archive",
+          "kind": "snake-to-camel",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-archive"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.199,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-retention",
+          "kind": "camel-to-snake",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-retention"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.18,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-entity-table",
+          "kind": "snake-to-camel",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-entity-table"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.15,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-rerank-alpha",
+          "kind": "camel-to-spaced",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-rerank-alpha"
+          ],
+          "must_not_retrieve": [],
+          "results": [],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 0,
+          "servedTokens": 0,
+          "latencyMs": 0.343,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-notation",
+          "id": "q-xn-probe",
+          "kind": "prose-notation",
+          "namespace": "/home/dev/notation",
+          "targets": [
+            "xn-probe"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-probe",
+              "namespace": "/home/dev/notation",
+              "score": 0.538
+            },
+            {
+              "rank": 2,
+              "id": "xn-ident-table",
+              "namespace": "/home/dev/notation",
+              "score": 0.53
+            },
+            {
+              "rank": 3,
+              "id": "xn-retention",
+              "namespace": "/home/dev/notation",
+              "score": 0.505
+            },
+            {
+              "rank": 4,
+              "id": "xn-write-gate",
+              "namespace": "/home/dev/notation",
+              "score": 0.492
+            },
+            {
+              "rank": 5,
+              "id": "xn-archive",
+              "namespace": "/home/dev/notation",
+              "score": 0.435
+            },
+            {
+              "rank": 6,
+              "id": "xn-fuse-decoy",
+              "namespace": "/home/dev/notation",
+              "score": 0.434
+            },
+            {
+              "rank": 7,
+              "id": "xn-retention-decoy",
+              "namespace": "/home/dev/notation",
+              "score": 0.434
+            },
+            {
+              "rank": 8,
+              "id": "xn-backfill",
+              "namespace": "/home/dev/notation",
+              "score": 0.431
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 819,
+          "servedTokens": 207,
+          "latencyMs": 0.541,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-rollback",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-rollback"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.495
+            },
+            {
+              "rank": 2,
+              "id": "para-threshold",
+              "namespace": "/home/dev/atlas",
+              "score": 0.495
+            },
+            {
+              "rank": 3,
+              "id": "para-flag",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 4,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.427
+            },
+            {
+              "rank": 5,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.427
+            },
+            {
+              "rank": 6,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.426
+            },
+            {
+              "rank": 7,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.426
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 514,
+          "servedTokens": 131,
+          "latencyMs": 0.583,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-pool",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-pool"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.467
+            },
+            {
+              "rank": 2,
+              "id": "para-quota",
+              "namespace": "/home/dev/atlas",
+              "score": 0.466
+            },
+            {
+              "rank": 3,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.466
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 210,
+          "servedTokens": 54,
+          "latencyMs": 0.401,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-threshold",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-threshold"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.478
+            },
+            {
+              "rank": 2,
+              "id": "para-quota",
+              "namespace": "/home/dev/atlas",
+              "score": 0.466
+            },
+            {
+              "rank": 3,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.466
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 217,
+          "servedTokens": 55,
+          "latencyMs": 0.451,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-keyrotation",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-keyrotation"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-flag",
+              "namespace": "/home/dev/atlas",
+              "score": 0.253
+            },
+            {
+              "rank": 2,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.252
+            },
+            {
+              "rank": 3,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.252
+            },
+            {
+              "rank": 4,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.252
+            },
+            {
+              "rank": 5,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.252
+            },
+            {
+              "rank": 6,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.252
+            },
+            {
+              "rank": 7,
+              "id": "para-threshold",
+              "namespace": "/home/dev/atlas",
+              "score": 0.252
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 514,
+          "servedTokens": 131,
+          "latencyMs": 0.451,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-cache",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-cache"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-retention",
+              "namespace": "/home/dev/atlas",
+              "score": 0.468
+            },
+            {
+              "rank": 2,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.466
+            },
+            {
+              "rank": 3,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.457
+            },
+            {
+              "rank": 4,
+              "id": "para-quota",
+              "namespace": "/home/dev/atlas",
+              "score": 0.457
+            },
+            {
+              "rank": 5,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.456
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 321,
+          "servedTokens": 83,
+          "latencyMs": 0.444,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-quota",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-quota"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-flag",
+              "namespace": "/home/dev/atlas",
+              "score": 0.502
+            },
+            {
+              "rank": 2,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 3,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 4,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 5,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 6,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 7,
+              "id": "para-threshold",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 514,
+          "servedTokens": 131,
+          "latencyMs": 0.484,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-timeout",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-timeout"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-flag",
+              "namespace": "/home/dev/atlas",
+              "score": 0.431
+            },
+            {
+              "rank": 2,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 3,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 4,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 5,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 6,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            },
+            {
+              "rank": 7,
+              "id": "para-threshold",
+              "namespace": "/home/dev/atlas",
+              "score": 0.429
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 514,
+          "servedTokens": 131,
+          "latencyMs": 0.361,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-batch",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-batch"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-retention",
+              "namespace": "/home/dev/atlas",
+              "score": 0.485
+            },
+            {
+              "rank": 2,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.483
+            },
+            {
+              "rank": 3,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.482
+            },
+            {
+              "rank": 4,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.482
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 263,
+          "servedTokens": 68,
+          "latencyMs": 0.39,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-flag",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-flag"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-threshold",
+              "namespace": "/home/dev/atlas",
+              "score": 0.513
+            },
+            {
+              "rank": 2,
+              "id": "para-flag",
+              "namespace": "/home/dev/atlas",
+              "score": 0.438
+            },
+            {
+              "rank": 3,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.436
+            },
+            {
+              "rank": 4,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.436
+            },
+            {
+              "rank": 5,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.436
+            },
+            {
+              "rank": 6,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.436
+            },
+            {
+              "rank": 7,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.435
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.631,
+            "ndcg@10": 0.631
+          },
+          "mrr": 0.5,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 514,
+          "servedTokens": 131,
+          "latencyMs": 0.429,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "paraphrase",
+          "id": "q-para-retention",
+          "kind": "paraphrase",
+          "namespace": "/home/dev/atlas",
+          "targets": [
+            "para-retention"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "para-batch",
+              "namespace": "/home/dev/atlas",
+              "score": 0.497
+            },
+            {
+              "rank": 2,
+              "id": "para-quota",
+              "namespace": "/home/dev/atlas",
+              "score": 0.471
+            },
+            {
+              "rank": 3,
+              "id": "para-flag",
+              "namespace": "/home/dev/atlas",
+              "score": 0.435
+            },
+            {
+              "rank": 4,
+              "id": "para-pool",
+              "namespace": "/home/dev/atlas",
+              "score": 0.433
+            },
+            {
+              "rank": 5,
+              "id": "para-keyrotation",
+              "namespace": "/home/dev/atlas",
+              "score": 0.432
+            },
+            {
+              "rank": 6,
+              "id": "para-cache",
+              "namespace": "/home/dev/atlas",
+              "score": 0.432
+            },
+            {
+              "rank": 7,
+              "id": "para-rollback",
+              "namespace": "/home/dev/atlas",
+              "score": 0.432
+            },
+            {
+              "rank": 8,
+              "id": "para-threshold",
+              "namespace": "/home/dev/atlas",
+              "score": 0.432
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 0
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0
+          },
+          "mrr": 0,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 581,
+          "servedTokens": 148,
+          "latencyMs": 0.347,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-retention",
+          "kind": "near-duplicate-decoys",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-retention"
+          ],
+          "must_not_retrieve": [
+            "dist-retention-decoy-1",
+            "dist-retention-decoy-2",
+            "dist-retention-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-retention-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.601
+            },
+            {
+              "rank": 2,
+              "id": "dist-retention-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.59
+            },
+            {
+              "rank": 3,
+              "id": "dist-retention",
+              "namespace": "/home/dev/beacon",
+              "score": 0.59
+            },
+            {
+              "rank": 4,
+              "id": "dist-retention-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.568
+            },
+            {
+              "rank": 5,
+              "id": "dist-clue-2-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.492
+            },
+            {
+              "rank": 6,
+              "id": "dist-ratelimit-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.462
+            },
+            {
+              "rank": 7,
+              "id": "dist-clue-2-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.461
+            },
+            {
+              "rank": 8,
+              "id": "dist-clue-2-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.46
+            },
+            {
+              "rank": 9,
+              "id": "dist-clue-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.459
+            },
+            {
+              "rank": 10,
+              "id": "dist-clue-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.456
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 800,
+          "servedTokens": 204,
+          "latencyMs": 0.623,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-timeout",
+          "kind": "near-duplicate-decoys",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-timeout"
+          ],
+          "must_not_retrieve": [
+            "dist-timeout-decoy-1",
+            "dist-timeout-decoy-2",
+            "dist-timeout-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-timeout-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.604
+            },
+            {
+              "rank": 2,
+              "id": "dist-timeout-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.603
+            },
+            {
+              "rank": 3,
+              "id": "dist-timeout",
+              "namespace": "/home/dev/beacon",
+              "score": 0.603
+            },
+            {
+              "rank": 4,
+              "id": "dist-timeout-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.582
+            },
+            {
+              "rank": 5,
+              "id": "dist-clue-2-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.466
+            },
+            {
+              "rank": 6,
+              "id": "dist-window-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.461
+            },
+            {
+              "rank": 7,
+              "id": "dist-filler-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.448
+            },
+            {
+              "rank": 8,
+              "id": "dist-filler-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.448
+            },
+            {
+              "rank": 9,
+              "id": "dist-filler-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.448
+            },
+            {
+              "rank": 10,
+              "id": "dist-clue-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.4
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 624,
+          "servedTokens": 160,
+          "latencyMs": 0.523,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-shards",
+          "kind": "near-duplicate-decoys",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-shards"
+          ],
+          "must_not_retrieve": [
+            "dist-shards-decoy-1",
+            "dist-shards-decoy-2",
+            "dist-shards-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-shards-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.594
+            },
+            {
+              "rank": 2,
+              "id": "dist-shards-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.594
+            },
+            {
+              "rank": 3,
+              "id": "dist-shards",
+              "namespace": "/home/dev/beacon",
+              "score": 0.593
+            },
+            {
+              "rank": 4,
+              "id": "dist-shards-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.58
+            },
+            {
+              "rank": 5,
+              "id": "dist-ratelimit-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.454
+            },
+            {
+              "rank": 6,
+              "id": "dist-ratelimit-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.445
+            },
+            {
+              "rank": 7,
+              "id": "dist-ratelimit-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.444
+            },
+            {
+              "rank": 8,
+              "id": "dist-ratelimit",
+              "namespace": "/home/dev/beacon",
+              "score": 0.443
+            },
+            {
+              "rank": 9,
+              "id": "dist-timeout-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.4
+            },
+            {
+              "rank": 10,
+              "id": "dist-clue-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.4
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 596,
+          "servedTokens": 153,
+          "latencyMs": 0.535,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-ratelimit",
+          "kind": "near-duplicate-decoys",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-ratelimit"
+          ],
+          "must_not_retrieve": [
+            "dist-ratelimit-decoy-1",
+            "dist-ratelimit-decoy-2",
+            "dist-ratelimit-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-ratelimit-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.6
+            },
+            {
+              "rank": 2,
+              "id": "dist-ratelimit-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.579
+            },
+            {
+              "rank": 3,
+              "id": "dist-ratelimit-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.578
+            },
+            {
+              "rank": 4,
+              "id": "dist-ratelimit",
+              "namespace": "/home/dev/beacon",
+              "score": 0.577
+            },
+            {
+              "rank": 5,
+              "id": "dist-shards-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.443
+            },
+            {
+              "rank": 6,
+              "id": "dist-shards-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.443
+            },
+            {
+              "rank": 7,
+              "id": "dist-shards-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.442
+            },
+            {
+              "rank": 8,
+              "id": "dist-shards",
+              "namespace": "/home/dev/beacon",
+              "score": 0.441
+            },
+            {
+              "rank": 9,
+              "id": "dist-timeout-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.4
+            },
+            {
+              "rank": 10,
+              "id": "dist-clue-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.4
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.431,
+            "ndcg@10": 0.431
+          },
+          "mrr": 0.25,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 596,
+          "servedTokens": 153,
+          "latencyMs": 0.519,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-window",
+          "kind": "near-duplicate-decoys",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-window"
+          ],
+          "must_not_retrieve": [
+            "dist-window-decoy-1",
+            "dist-window-decoy-2",
+            "dist-window-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-window-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.583
+            },
+            {
+              "rank": 2,
+              "id": "dist-window-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.582
+            },
+            {
+              "rank": 3,
+              "id": "dist-window",
+              "namespace": "/home/dev/beacon",
+              "score": 0.582
+            },
+            {
+              "rank": 4,
+              "id": "dist-window-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.571
+            },
+            {
+              "rank": 5,
+              "id": "dist-retention-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.505
+            },
+            {
+              "rank": 6,
+              "id": "dist-ratelimit-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.485
+            },
+            {
+              "rank": 7,
+              "id": "dist-burst-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.452
+            },
+            {
+              "rank": 8,
+              "id": "dist-burst-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.452
+            },
+            {
+              "rank": 9,
+              "id": "dist-burst",
+              "namespace": "/home/dev/beacon",
+              "score": 0.451
+            },
+            {
+              "rank": 10,
+              "id": "dist-clue-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.431
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 671,
+          "servedTokens": 171,
+          "latencyMs": 0.508,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-burst",
+          "kind": "near-duplicate-decoys",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-burst"
+          ],
+          "must_not_retrieve": [
+            "dist-burst-decoy-1",
+            "dist-burst-decoy-2",
+            "dist-burst-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-burst-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.572
+            },
+            {
+              "rank": 2,
+              "id": "dist-burst-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.554
+            },
+            {
+              "rank": 3,
+              "id": "dist-burst-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.554
+            },
+            {
+              "rank": 4,
+              "id": "dist-burst",
+              "namespace": "/home/dev/beacon",
+              "score": 0.553
+            },
+            {
+              "rank": 5,
+              "id": "dist-clue-2-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.468
+            },
+            {
+              "rank": 6,
+              "id": "dist-clue-2-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.467
+            },
+            {
+              "rank": 7,
+              "id": "dist-clue-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.466
+            },
+            {
+              "rank": 8,
+              "id": "dist-clue-2-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.461
+            },
+            {
+              "rank": 9,
+              "id": "dist-retention-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.452
+            },
+            {
+              "rank": 10,
+              "id": "dist-window-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.444
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.431,
+            "ndcg@10": 0.431
+          },
+          "mrr": 0.25,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 738,
+          "servedTokens": 188,
+          "latencyMs": 0.566,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-clue",
+          "kind": "context-clue",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-clue"
+          ],
+          "must_not_retrieve": [
+            "dist-clue-decoy-1",
+            "dist-clue-decoy-2",
+            "dist-clue-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-clue",
+              "namespace": "/home/dev/beacon",
+              "score": 0.6
+            },
+            {
+              "rank": 2,
+              "id": "dist-clue-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.57
+            },
+            {
+              "rank": 3,
+              "id": "dist-clue-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.569
+            },
+            {
+              "rank": 4,
+              "id": "dist-clue-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.568
+            },
+            {
+              "rank": 5,
+              "id": "dist-retention",
+              "namespace": "/home/dev/beacon",
+              "score": 0.515
+            },
+            {
+              "rank": 6,
+              "id": "dist-retention-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.481
+            },
+            {
+              "rank": 7,
+              "id": "dist-clue-2-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.476
+            },
+            {
+              "rank": 8,
+              "id": "dist-timeout-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.461
+            },
+            {
+              "rank": 9,
+              "id": "dist-retention-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.459
+            },
+            {
+              "rank": 10,
+              "id": "dist-shards-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.455
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 765,
+          "servedTokens": 194,
+          "latencyMs": 0.585,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "distractor",
+          "id": "q-dist-clue-2",
+          "kind": "context-clue",
+          "namespace": "/home/dev/beacon",
+          "targets": [
+            "dist-clue-2"
+          ],
+          "must_not_retrieve": [
+            "dist-clue-2-decoy-1",
+            "dist-clue-2-decoy-2",
+            "dist-clue-2-decoy-3"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "dist-clue-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.595
+            },
+            {
+              "rank": 2,
+              "id": "dist-clue-2-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.583
+            },
+            {
+              "rank": 3,
+              "id": "dist-clue-2-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.582
+            },
+            {
+              "rank": 4,
+              "id": "dist-clue-2-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.582
+            },
+            {
+              "rank": 5,
+              "id": "dist-retention",
+              "namespace": "/home/dev/beacon",
+              "score": 0.487
+            },
+            {
+              "rank": 6,
+              "id": "dist-clue",
+              "namespace": "/home/dev/beacon",
+              "score": 0.479
+            },
+            {
+              "rank": 7,
+              "id": "dist-timeout-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.457
+            },
+            {
+              "rank": 8,
+              "id": "dist-retention-decoy-2",
+              "namespace": "/home/dev/beacon",
+              "score": 0.456
+            },
+            {
+              "rank": 9,
+              "id": "dist-shards-decoy-3",
+              "namespace": "/home/dev/beacon",
+              "score": 0.451
+            },
+            {
+              "rank": 10,
+              "id": "dist-retention-decoy-1",
+              "namespace": "/home/dev/beacon",
+              "score": 0.444
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0.3,
+          "servedChars": 777,
+          "servedTokens": 198,
+          "latencyMs": 0.498,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-deploy-window-present",
+          "kind": "present-state",
+          "namespace": "/home/dev/cinder",
+          "targets": [
+            "tmp-deploy-window-v2"
+          ],
+          "must_not_retrieve": [
+            "tmp-deploy-window-v1"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-deploy-window-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.472
+            },
+            {
+              "rank": 2,
+              "id": "tmp-quorum-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.317
+            },
+            {
+              "rank": 3,
+              "id": "tmp-region-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.317
+            },
+            {
+              "rank": 4,
+              "id": "tmp-retries-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.316
+            },
+            {
+              "rank": 5,
+              "id": "tmp-license-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.278
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.392,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-deploy-window-history",
+          "kind": "historical",
+          "namespace": "/home/dev/cinder",
+          "as_of": 1738281600000,
+          "targets": [
+            "tmp-deploy-window-v1"
+          ],
+          "must_not_retrieve": [
+            "tmp-deploy-window-v2"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-deploy-window-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.583
+            },
+            {
+              "rank": 2,
+              "id": "tmp-license-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 3,
+              "id": "tmp-quorum-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 4,
+              "id": "tmp-region-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 5,
+              "id": "tmp-retries-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.569,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-retries-present",
+          "kind": "present-state",
+          "namespace": "/home/dev/cinder",
+          "targets": [
+            "tmp-retries-v2"
+          ],
+          "must_not_retrieve": [
+            "tmp-retries-v1"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-retries-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.472
+            },
+            {
+              "rank": 2,
+              "id": "tmp-quorum-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.317
+            },
+            {
+              "rank": 3,
+              "id": "tmp-region-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.317
+            },
+            {
+              "rank": 4,
+              "id": "tmp-deploy-window-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.316
+            },
+            {
+              "rank": 5,
+              "id": "tmp-license-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.278
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.339,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-retries-history",
+          "kind": "historical",
+          "namespace": "/home/dev/cinder",
+          "as_of": 1738281600000,
+          "targets": [
+            "tmp-retries-v1"
+          ],
+          "must_not_retrieve": [
+            "tmp-retries-v2"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-retries-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.591
+            },
+            {
+              "rank": 2,
+              "id": "tmp-license-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.406
+            },
+            {
+              "rank": 3,
+              "id": "tmp-quorum-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.406
+            },
+            {
+              "rank": 4,
+              "id": "tmp-region-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.406
+            },
+            {
+              "rank": 5,
+              "id": "tmp-deploy-window-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.406
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.453,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-region-present",
+          "kind": "present-state",
+          "namespace": "/home/dev/cinder",
+          "targets": [
+            "tmp-region-v2"
+          ],
+          "must_not_retrieve": [
+            "tmp-region-v1"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-region-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.454
+            },
+            {
+              "rank": 2,
+              "id": "tmp-quorum-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.299
+            },
+            {
+              "rank": 3,
+              "id": "tmp-deploy-window-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.298
+            },
+            {
+              "rank": 4,
+              "id": "tmp-retries-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.298
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 168,
+          "servedTokens": 43,
+          "latencyMs": 0.352,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-region-history",
+          "kind": "historical",
+          "namespace": "/home/dev/cinder",
+          "as_of": 1738281600000,
+          "targets": [
+            "tmp-region-v1"
+          ],
+          "must_not_retrieve": [
+            "tmp-region-v2"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-region-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.564
+            },
+            {
+              "rank": 2,
+              "id": "tmp-license-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 3,
+              "id": "tmp-quorum-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 4,
+              "id": "tmp-deploy-window-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 5,
+              "id": "tmp-retries-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.431,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-quorum-present",
+          "kind": "present-state",
+          "namespace": "/home/dev/cinder",
+          "targets": [
+            "tmp-quorum-v2"
+          ],
+          "must_not_retrieve": [
+            "tmp-quorum-v1"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-quorum-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.468
+            },
+            {
+              "rank": 2,
+              "id": "tmp-region-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.325
+            },
+            {
+              "rank": 3,
+              "id": "tmp-deploy-window-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.324
+            },
+            {
+              "rank": 4,
+              "id": "tmp-retries-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.324
+            },
+            {
+              "rank": 5,
+              "id": "tmp-license-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.281
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.297,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-quorum-history",
+          "kind": "historical",
+          "namespace": "/home/dev/cinder",
+          "as_of": 1738281600000,
+          "targets": [
+            "tmp-quorum-v1"
+          ],
+          "must_not_retrieve": [
+            "tmp-quorum-v2"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-quorum-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.747
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 33,
+          "servedTokens": 9,
+          "latencyMs": 0.354,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-license-present",
+          "kind": "present-state",
+          "namespace": "/home/dev/cinder",
+          "targets": [
+            "tmp-license-v2"
+          ],
+          "must_not_retrieve": [
+            "tmp-license-v1"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-license-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 93.438
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 32,
+          "servedTokens": 8,
+          "latencyMs": 0.338,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-license-history",
+          "kind": "historical",
+          "namespace": "/home/dev/cinder",
+          "as_of": 1738281600000,
+          "targets": [
+            "tmp-license-v1"
+          ],
+          "must_not_retrieve": [
+            "tmp-license-v2"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-license-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.535
+            },
+            {
+              "rank": 2,
+              "id": "tmp-quorum-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 3,
+              "id": "tmp-region-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 4,
+              "id": "tmp-deploy-window-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            },
+            {
+              "rank": 5,
+              "id": "tmp-retries-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.404
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 200,
+          "servedTokens": 51,
+          "latencyMs": 0.39,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-backup-present",
+          "kind": "present-state",
+          "namespace": "/home/dev/cinder",
+          "targets": [
+            "tmp-backup-v2"
+          ],
+          "must_not_retrieve": [
+            "tmp-backup-v1"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-backup-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 47.663
+            },
+            {
+              "rank": 2,
+              "id": "tmp-license-v2",
+              "namespace": "/home/dev/cinder",
+              "score": 47.618
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 72,
+          "servedTokens": 18,
+          "latencyMs": 0.302,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "temporal-update",
+          "id": "q-tmp-backup-history",
+          "kind": "historical",
+          "namespace": "/home/dev/cinder",
+          "as_of": 1738281600000,
+          "targets": [
+            "tmp-backup-v1"
+          ],
+          "must_not_retrieve": [
+            "tmp-backup-v2"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "tmp-backup-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.496
+            },
+            {
+              "rank": 2,
+              "id": "tmp-license-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.409
+            },
+            {
+              "rank": 3,
+              "id": "tmp-quorum-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.409
+            },
+            {
+              "rank": 4,
+              "id": "tmp-region-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.409
+            },
+            {
+              "rank": 5,
+              "id": "tmp-deploy-window-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.409
+            },
+            {
+              "rank": 6,
+              "id": "tmp-retries-v1",
+              "namespace": "/home/dev/cinder",
+              "score": 0.409
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 240,
+          "servedTokens": 61,
+          "latencyMs": 0.337,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-xn-root-strict",
+          "kind": "strict-scope",
+          "namespace": "/home/dev/grid",
+          "targets": [
+            "xn-root",
+            "xn-root-variant"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-root-variant",
+              "namespace": "/home/dev/grid",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-root",
+              "namespace": "/home/dev/grid",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 165,
+          "servedTokens": 42,
+          "latencyMs": 0.796,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-xn-auth-strict",
+          "kind": "strict-scope",
+          "namespace": "/home/dev/grid//authsvc",
+          "targets": [
+            "xn-auth",
+            "xn-auth-variant"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-auth-variant",
+              "namespace": "/home/dev/grid//authsvc",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-auth",
+              "namespace": "/home/dev/grid//authsvc",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 151,
+          "servedTokens": 38,
+          "latencyMs": 0.784,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-xn-billing-strict",
+          "kind": "strict-scope",
+          "namespace": "/home/dev/grid//billingsvc",
+          "targets": [
+            "xn-billing",
+            "xn-billing-variant"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-billing-variant",
+              "namespace": "/home/dev/grid//billingsvc",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-billing",
+              "namespace": "/home/dev/grid//billingsvc",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 181,
+          "servedTokens": 46,
+          "latencyMs": 0.758,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-xn-reports-strict",
+          "kind": "strict-scope",
+          "namespace": "/home/dev/grid/reports",
+          "targets": [
+            "xn-reports",
+            "xn-reports-variant"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-reports-variant",
+              "namespace": "/home/dev/grid/reports",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-reports",
+              "namespace": "/home/dev/grid/reports",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 167,
+          "servedTokens": 42,
+          "latencyMs": 0.765,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-xn-other-strict",
+          "kind": "strict-scope",
+          "namespace": "/home/dev/other",
+          "targets": [
+            "xn-other",
+            "xn-other-variant"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-other-variant",
+              "namespace": "/home/dev/other",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-other",
+              "namespace": "/home/dev/other",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 189,
+          "servedTokens": 48,
+          "latencyMs": 0.816,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-subtree-root",
+          "kind": "subtree",
+          "namespace": "/home/dev/grid",
+          "targets": [
+            "xn-root",
+            "xn-root-variant",
+            "xn-auth",
+            "xn-auth-variant",
+            "xn-billing",
+            "xn-billing-variant",
+            "xn-reports",
+            "xn-reports-variant"
+          ],
+          "must_not_retrieve": [
+            "xn-other",
+            "xn-other-variant"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-auth-variant",
+              "namespace": "/home/dev/grid//authsvc",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-root-variant",
+              "namespace": "/home/dev/grid",
+              "score": 0.606
+            },
+            {
+              "rank": 3,
+              "id": "xn-reports-variant",
+              "namespace": "/home/dev/grid/reports",
+              "score": 0.606
+            },
+            {
+              "rank": 4,
+              "id": "xn-billing-variant",
+              "namespace": "/home/dev/grid//billingsvc",
+              "score": 0.606
+            },
+            {
+              "rank": 5,
+              "id": "xn-auth",
+              "namespace": "/home/dev/grid//authsvc",
+              "score": 0.59
+            },
+            {
+              "rank": 6,
+              "id": "xn-root",
+              "namespace": "/home/dev/grid",
+              "score": 0.59
+            },
+            {
+              "rank": 7,
+              "id": "xn-reports",
+              "namespace": "/home/dev/grid/reports",
+              "score": 0.59
+            },
+            {
+              "rank": 8,
+              "id": "xn-billing",
+              "namespace": "/home/dev/grid//billingsvc",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.125,
+            "recall@5": 0.625,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 1,
+            "precision@10": 0.8
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 664,
+          "servedTokens": 168,
+          "latencyMs": 1.131,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-subtree-reports",
+          "kind": "subtree",
+          "namespace": "/home/dev/grid/reports",
+          "targets": [
+            "xn-reports",
+            "xn-reports-variant"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-reports-variant",
+              "namespace": "/home/dev/grid/reports",
+              "score": 0.606
+            },
+            {
+              "rank": 2,
+              "id": "xn-reports",
+              "namespace": "/home/dev/grid/reports",
+              "score": 0.59
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 167,
+          "servedTokens": 42,
+          "latencyMs": 0.99,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "cross-namespace",
+          "id": "q-cross-auth-to-billing",
+          "kind": "cross-negative",
+          "namespace": "/home/dev/grid//authsvc",
+          "targets": [
+            "xn-auth",
+            "xn-auth-variant"
+          ],
+          "must_not_retrieve": [
+            "xn-billing",
+            "xn-billing-variant"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "xn-auth-variant",
+              "namespace": "/home/dev/grid//authsvc",
+              "score": 0.571
+            },
+            {
+              "rank": 2,
+              "id": "xn-auth",
+              "namespace": "/home/dev/grid//authsvc",
+              "score": 0.556
+            }
+          ],
+          "recall": {
+            "recall@1": 0.5,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.4,
+            "precision@10": 0.2
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 151,
+          "servedTokens": 38,
+          "latencyMs": 0.992,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-region",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-region-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-region-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.445
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.149
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.936
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.804
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.743
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.75
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.821
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.003
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0.315
+          },
+          "mrr": 0.125,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.416,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-region-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-region-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.675
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.65
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.626
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.605
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.602
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.584
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.563
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.546
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.387,
+            "ndcg@10": 0.387
+          },
+          "mrr": 0.2,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.547,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-budget",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-budget-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-budget-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.434
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.138
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.925
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.793
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.731
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.739
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.875
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.942
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0.333
+          },
+          "mrr": 0.143,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.323,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-budget-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-budget-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.668
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.642
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.63
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.618
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.597
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.576
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.556
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.521
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.345,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-contact",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-contact-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-contact-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.445
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.149
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.936
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.804
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.743
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.799
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.821
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.953
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 0,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0,
+            "ndcg@10": 0.356
+          },
+          "mrr": 0.167,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.261,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-contact-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-contact-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.675
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.65
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.636
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.626
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.605
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.584
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.546
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.529
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.34,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-vendor",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-vendor-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-vendor-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.445
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.149
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.936
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.804
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.792
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.75
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.821
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.953
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.387,
+            "ndcg@10": 0.387
+          },
+          "mrr": 0.2,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.275,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-vendor-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-vendor-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.675
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.657
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.65
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.626
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.605
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.563
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.546
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.529
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.631,
+            "ndcg@10": 0.631
+          },
+          "mrr": 0.5,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.314,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-domain",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-domain-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-domain-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.445
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.149
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.936
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.853
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.743
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.75
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.821
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.953
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.431,
+            "ndcg@10": 0.431
+          },
+          "mrr": 0.25,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.283,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-domain-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-domain-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.679
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.675
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.65
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.626
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.584
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.563
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.546
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.529
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.323,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-schedule",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-schedule-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-schedule-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.445
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.149
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.987
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.804
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.743
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.75
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.821
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.953
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.5,
+            "ndcg@10": 0.5
+          },
+          "mrr": 0.333,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.287,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-schedule-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-schedule-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.7
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.675
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.65
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.605
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.584
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.563
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.546
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.529
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.351,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-threshold",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-threshold-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-threshold-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.434
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.203
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.925
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.793
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.731
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.739
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.81
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.942
+            }
+          ],
+          "recall": {
+            "recall@1": 0,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 0,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 0,
+            "ndcg@5": 0.631,
+            "ndcg@10": 0.631
+          },
+          "mrr": 0.5,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.323,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-threshold-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-threshold-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.734
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.668
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.618
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.597
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.576
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.556
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.538
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.521
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.354,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-seat",
+          "kind": "revised-fact",
+          "namespace": "/home/dev/harbor",
+          "targets": [
+            "lh-lh-seat-late"
+          ],
+          "must_not_retrieve": [
+            "lh-lh-seat-early"
+          ],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-late",
+              "namespace": "/home/dev/harbor",
+              "score": 20.499
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-late",
+              "namespace": "/home/dev/harbor",
+              "score": 19.138
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-late",
+              "namespace": "/home/dev/harbor",
+              "score": 17.925
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-late",
+              "namespace": "/home/dev/harbor",
+              "score": 16.793
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-late",
+              "namespace": "/home/dev/harbor",
+              "score": 15.731
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-late",
+              "namespace": "/home/dev/harbor",
+              "score": 14.739
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-late",
+              "namespace": "/home/dev/harbor",
+              "score": 13.81
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-late",
+              "namespace": "/home/dev/harbor",
+              "score": 12.942
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 461,
+          "servedTokens": 118,
+          "latencyMs": 0.291,
+          "latestTargetRank": null
+        },
+        {
+          "corpus": "long-horizon",
+          "id": "q-lh-seat-history",
+          "kind": "historical",
+          "namespace": "/home/dev/harbor",
+          "as_of": 1738281600000,
+          "targets": [
+            "lh-lh-seat-early"
+          ],
+          "must_not_retrieve": [],
+          "results": [
+            {
+              "rank": 1,
+              "id": "lh-lh-seat-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.76
+            },
+            {
+              "rank": 2,
+              "id": "lh-lh-threshold-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.642
+            },
+            {
+              "rank": 3,
+              "id": "lh-lh-schedule-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.618
+            },
+            {
+              "rank": 4,
+              "id": "lh-lh-domain-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.597
+            },
+            {
+              "rank": 5,
+              "id": "lh-lh-vendor-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.576
+            },
+            {
+              "rank": 6,
+              "id": "lh-lh-contact-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.556
+            },
+            {
+              "rank": 7,
+              "id": "lh-lh-budget-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.538
+            },
+            {
+              "rank": 8,
+              "id": "lh-lh-region-early",
+              "namespace": "/home/dev/harbor",
+              "score": 0.521
+            }
+          ],
+          "recall": {
+            "recall@1": 1,
+            "recall@5": 1,
+            "recall@10": 1
+          },
+          "precision": {
+            "precision@1": 1,
+            "precision@5": 0.2,
+            "precision@10": 0.1
+          },
+          "ndcg": {
+            "ndcg@1": 1,
+            "ndcg@5": 1,
+            "ndcg@10": 1
+          },
+          "mrr": 1,
+          "leakRate": 0,
+          "staleRate": 0,
+          "servedChars": 545,
+          "servedTokens": 139,
+          "latencyMs": 0.351,
+          "latestTargetRank": null
+        }
+      ]
+    }
+  ],
+  "notes": [
+    "cross-notation: 34 memories seeded (34 via store_memory, 0 raw-insert), 10 queries, placement verified=true",
+    "paraphrase: 30 memories seeded (30 via store_memory, 0 raw-insert), 10 queries, placement verified=true",
+    "distractor: 37 memories seeded (37 via store_memory, 0 raw-insert), 8 queries, placement verified=true",
+    "temporal-update: 18 memories seeded (18 via store_memory, 0 raw-insert), 12 queries, placement verified=true",
+    "cross-namespace: 10 memories seeded (10 via store_memory, 0 raw-insert), 8 queries, placement verified=true",
+    "long-horizon: 72 memories seeded (0 via store_memory, 72 raw-insert), 16 queries, placement verified=true",
+    "harness: isolated db /tmp/engram-eval-1234-Klffpf/engram.db; 201 memories, 0 pinned, 0 clusters, digests for 0 namespace(s), 0 rows with vectors",
+    "baseline: Shipped defaults: no reranker, no access-count stamping, no feature flags. search={\"use_reranker\":false,\"touch\":false}"
+  ]
+}

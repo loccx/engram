@@ -3,6 +3,14 @@
 // pool so a long run is not serial; every row lands in the checkpoint before it is
 // aggregated, and both models are pinned per run and recorded on each row, since two
 // accuracy numbers from different judges are not comparable.
+//
+// the resume key carries every axis that changes what a row means: the dataset bytes,
+// the system set, both models, both prompt versions, the budget and top-k, the vector
+// regime that was really in effect, the sampled question set, and the code revision.
+// a checkpoint written under a different key is not a prefix of this run — its rows are
+// left where they are and the run says which field differed, so a lexical run can never
+// silently resume a vector one (or the reverse).
+import { resumeIdentityIssue } from './run-identity.js'
 import { JsonlCheckpoint } from './checkpoint.js'
 import { EvalSetupError } from './errors.js'
 import { callChat } from './llm.js'
@@ -14,7 +22,7 @@ import {
   type ReaderSpec,
 } from './readers.js'
 import { round3, summarizeLatencies, type TokenizerInfo } from './metrics.js'
-import type { TimingSummary } from './types.js'
+import type { TimingSummary, VectorMode } from './types.js'
 import type { ChatMessage } from '../../src/llm/client.js'
 
 export const READER_CHAT_OPTIONS = { temperature: 0, maxTokens: 64 } as const
@@ -55,6 +63,10 @@ export interface QaRow {
   judge_prompt: string
   reader_model: string
   judge_model: string
+  /** the vector regime in effect, from `vectorIdentity` */
+  vectors: string
+  /** the sampled question set, from the suite: which questions, drawn how */
+  question_set: string
   predicted: string
   correct: boolean
   verdict: string
@@ -104,9 +116,22 @@ export interface QaRunInput {
   costCeilingCalls: number
   confirmed: boolean
   totalQuestions: number
+  /** engine/code revision, recorded on every row and inside the key */
   gitSha: string
+  /** the vector regime, recorded on every row: a changed regime is a different run */
+  vectors: string
+  /** the sampled question set, recorded on every row: a changed sample is a different run */
+  questionSet: string
   tokenizer: TokenizerInfo
   log: (message: string) => void
+}
+
+/** checkpoint rows that belong to another run identity, kept but never reused */
+export interface QaForeignKey {
+  key: string
+  rows: number
+  /** `field: this run vs that run`, from `qaKeyDiff` */
+  differences: string[]
 }
 
 export interface QaRunOutput {
@@ -116,13 +141,11 @@ export interface QaRunOutput {
   failures: QaFailure[]
   calls: number
   resumedQuestions: number
+  /** rows the checkpoint held under another key: not a resumable prefix of this run */
+  foreignKeys: QaForeignKey[]
 }
 
-/**
- * identity of a run: any change here makes old rows unusable. a system enters as
- * `name@adapter-hash`, so editing an adapter config invalidates the rows it produced.
- */
-export function qaKey(input: {
+export interface QaKeyInput {
   split: string
   datasetSha: string
   systems: string[]
@@ -130,25 +153,110 @@ export function qaKey(input: {
   judgeModel: string
   budgetChars: number
   topK: number
-}): string {
+  /** the vector regime, from `vectorIdentity` */
+  vectors: string
+  /** the sampled question set, from the suite: which questions, drawn how */
+  questionSet: string
+  /** engine/code revision; '' when the checkout could not be identified */
+  engineRevision: string
+}
+
+// how a vector regime enters an identity: the requested mode *and* whether vectors were
+// really available, so `--vectors cached` on a machine with the model is not the same run
+// as `--vectors cached` on a machine without it. `fts` is a regime of its own, never a
+// degraded one, and a request that could not be honoured is recorded as a fallback.
+export function vectorIdentity(
+  mode: VectorMode,
+  state: { vectorsAvailable: boolean; modelCacheReady: boolean }
+): string {
+  if (mode === 'fts') return 'fts'
+  if (!state.vectorsAvailable) return `${mode}+fts-fallback`
+  // `on` with an incomplete model loads the pipeline but degrades the channel at run time
+  return state.modelCacheReady ? `${mode}+vectors` : `${mode}+model-incomplete`
+}
+
+// identity of a run: any change here makes old rows unusable. a system enters as
+// `name@adapter-hash`, so editing an adapter config invalidates the rows it produced.
+// every segment is labelled, so a key mismatch can name the field instead of printing
+// two opaque strings.
+export function qaKey(input: QaKeyInput): string {
   return [
-    input.split,
-    input.datasetSha.slice(0, 16),
-    input.systems.join('+'),
-    input.readerModel,
-    input.judgeModel,
-    READER_PROMPT_VERSION,
-    ANSCHECK_PROMPT_VERSION,
+    `split=${input.split}`,
+    `dataset=${input.datasetSha.slice(0, 16)}`,
+    `systems=${input.systems.join('+')}`,
+    `reader=${input.readerModel}`,
+    `judge=${input.judgeModel}`,
+    `reader-prompt=${READER_PROMPT_VERSION}`,
+    `judge-prompt=${ANSCHECK_PROMPT_VERSION}`,
     `budget=${input.budgetChars}`,
     `topk=${input.topK}`,
+    `vectors=${input.vectors}`,
+    `questions=${input.questionSet}`,
+    `engine=${input.engineRevision === '' ? 'unknown' : input.engineRevision}`,
   ].join('|')
+}
+
+interface KeySegment {
+  /** null for a key written before the segments were labelled */
+  label: string | null
+  value: string
+}
+
+function keySegments(key: string): KeySegment[] {
+  return key.split('|').map((segment) => {
+    const eq = segment.indexOf('=')
+    return eq > 0
+      ? { label: segment.slice(0, eq), value: segment.slice(eq + 1) }
+      : { label: null, value: segment }
+  })
+}
+
+/**
+ * `field: this vs that` for every segment two keys disagree on, in key order. an older key
+ * without labels still lines up: the order of the fields never changed, so position names
+ * the field, and the three identity fields this run adds read as `(absent)` on its side.
+ */
+export function qaKeyDiff(current: string, other: string): string[] {
+  const mine = keySegments(current)
+  const theirs = keySegments(other)
+  const out: string[] = []
+  for (let i = 0; i < Math.max(mine.length, theirs.length); i++) {
+    const a = mine[i]
+    const b = theirs[i]
+    if (a === undefined && b === undefined) continue
+    if (a?.value === b?.value) continue
+    const label = a?.label ?? b?.label ?? `segment ${i + 1}`
+    out.push(`${label}: ${a?.value ?? '(absent)'} vs ${b?.value ?? '(absent)'}`)
+  }
+  return out
 }
 
 export async function runQa(input: QaRunInput): Promise<QaRunOutput> {
   const concurrency = Math.max(1, Math.floor(input.concurrency))
   const done = new Map<string, QaRow>()
+  const resumeIssue = resumeIdentityIssue(input.vectors, input.gitSha)
+  if (resumeIssue !== null) input.log(`qa resume disabled: ${resumeIssue}`)
+  const foreign = new Map<string, number>()
   for (const line of input.checkpoint.load()) {
-    if (line.key === input.key) done.set(`${line.question_id}|${line.reader}`, line)
+    if (resumeIssue === null && line.key === input.key) done.set(`${line.question_id}|${line.reader}`, line)
+    else foreign.set(line.key, (foreign.get(line.key) ?? 0) + 1)
+  }
+  // a row under another key was answered under another regime (or another code revision);
+  // it is not reused and it is not deleted, but the run must not stay quiet about it
+  const foreignKeys: QaForeignKey[] = [...foreign.entries()]
+    .sort((a, b) => (a[1] !== b[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : 1))
+    .map(([key, rows]) => ({
+      key, rows, differences: [
+        ...qaKeyDiff(input.key, key),
+        ...(key === input.key && resumeIssue !== null ? [resumeIssue] : []),
+      ],
+    }))
+  if (foreignKeys.length > 0) {
+    const total = foreignKeys.reduce((sum, entry) => sum + entry.rows, 0)
+    input.log(
+      `qa resume: ${total} checkpoint row(s) have an unverified or different identity and are not ` +
+        `reused — ${foreignKeys[0].differences.join('; ') || foreignKeys[0].key}`
+    )
   }
 
   const rows: QaRow[] = []
@@ -231,7 +339,7 @@ export async function runQa(input: QaRunInput): Promise<QaRunOutput> {
     if (qa !== qb) return qa - qb
     return (readerOrder.get(a.reader) ?? 0) - (readerOrder.get(b.reader) ?? 0)
   })
-  return { rows, estimate, failures, calls, resumedQuestions }
+  return { rows, estimate, failures, calls, resumedQuestions, foreignKeys }
 }
 
 interface OneAnswer {
@@ -265,6 +373,8 @@ async function answerOne(
     judge_prompt: answered.judgePrompt,
     reader_model: input.readerModel,
     judge_model: input.judgeModel,
+    vectors: input.vectors,
+    question_set: input.questionSet,
     predicted: answered.predicted,
     correct: answered.correct,
     verdict: answered.verdict,

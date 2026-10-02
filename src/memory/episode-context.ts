@@ -314,6 +314,10 @@ export async function retrieveEpisodeContext(
   const scope: EpisodeNamespaceScope = {
     namespace: input.namespace,
     namespace_subtree: input.namespace_subtree,
+    exclude_namespace: input.exclude_namespace,
+    caller: input.caller,
+    // evidence assembly is always current; raw history is a separate explicit read.
+    include_source_history: false,
   }
 
   const found = await searchEpisodes(input.db, input.vectorsAvailable === true, input.query, {
@@ -330,7 +334,11 @@ export async function retrieveEpisodeContext(
     now,
     input.include_expired === true
   )
-  const hits: EpisodeHitRef[] = found.hits.map((hit) => ({
+  // search may have buffered lexical hits before an async embedding/host await.
+  // return only hits still present in the freshly authorized/current session rows.
+  const liveIds = new Set([...sessions.values()].flatMap((session) => session.turns.map((turn) => turn.episodeId)))
+  const currentHits = found.hits.filter((hit) => liveIds.has(hit.episode.id))
+  const hits: EpisodeHitRef[] = currentHits.map((hit) => ({
     episodeId: hit.episode.id,
     sessionId: hit.episode.session_id,
   }))
@@ -346,7 +354,7 @@ export async function retrieveEpisodeContext(
   return {
     ...assembled,
     query: input.query,
-    hits: found.hits,
+    hits: currentHits,
     retrievalMs: Date.now() - startedAt,
     degraded: found.degraded,
     note:

@@ -1,7 +1,11 @@
-import { describe, it, expect, beforeEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { getDatabase, resetDatabase } from '../src/db/init.js'
 import { createServer } from '../src/server.js'
 import { normalizeIdentifiers } from '../src/db/lexical-index.js'
+import { renderHook } from '../src/delivery/hook.js'
 
 const NS = '/work/engram'
 const CHILD = '/work/engram/packages/api'
@@ -85,5 +89,138 @@ describe('delivery routes', () => {
   it('answers an unparseable body with 400, not a 500', async () => {
     const { status } = await post('/delivery/roster', 'not json')
     expect(status).toBe(400)
+  })
+})
+
+/** the hook posts to a daemon over http; here the same payloads go to this server */
+function hookFetch(requests: string[] = []): typeof fetch {
+  return (async (url: string | URL, init?: RequestInit) => {
+    const path = new URL(String(url)).pathname
+    requests.push(path)
+    return createServer().request(path, init)
+  }) as unknown as typeof fetch
+}
+
+const stateDirs: string[] = []
+
+function stateDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'engram-cue-window-'))
+  stateDirs.push(dir)
+  return dir
+}
+
+/** an empty token is no token, so the hook reaches the loopback server as its owner */
+const HOOK_ENV: NodeJS.ProcessEnv = { ENGRAM_DEFAULT_NAMESPACE: NS, ENGRAM_AUTH_TOKEN: '' }
+const SESSION = { cwd: NS, session_id: 'session-a' }
+const EDIT = { ...SESSION, tool_name: 'Edit', tool_input: { file_path: `${NS}/src/delivery/hook.ts` } }
+const CUE = 'the retry loop in src/delivery/hook.ts double-counts on abort'
+
+describe('cue continuity across a compaction', () => {
+  beforeEach(() => {
+    resetDatabase()
+    getDatabase(':memory:')
+  })
+
+  afterEach(() => {
+    for (const dir of stateDirs.splice(0)) rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('re-delivers the cue the compaction dropped, once per window', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch() }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+
+    await renderHook('post-compact', SESSION, options)
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+  })
+
+  it('opens one window for the boundary pair a single compaction reports', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch() }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+
+    await renderHook('post-compact', SESSION, options)
+    await renderHook('session-start', { ...SESSION, source: 'compact' }, options)
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+  })
+
+  it('leaves the window alone for a source that did not rebuild the context', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const requests: string[] = []
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch(requests) }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    const cuesBefore = requests.filter((path) => path === '/delivery/cue').length
+
+    await renderHook('session-start', { ...SESSION, source: 'startup' }, options)
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+    expect(requests.filter((path) => path === '/delivery/cue').length).toBe(cuesBefore + 1)
+  })
+
+  it('reopens only the window of the session that compacted', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch() }
+    const other = { ...EDIT, session_id: 'session-b' }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', other, options)).toContain('double-counts')
+
+    await renderHook('post-compact', SESSION, options)
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', other, options)).toBe('')
+  })
+
+  it('re-delivers for a second compaction that closes inside the pair delay', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch() }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+
+    await renderHook('post-compact', SESSION, options)
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+
+    await renderHook('post-compact', SESSION, options)
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+  })
+
+  it('re-delivers for a second compaction the host reports as a session start', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch() }
+    const compacted = { ...SESSION, source: 'compact' }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+
+    await renderHook('session-start', compacted, options)
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+
+    await renderHook('session-start', compacted, options)
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+  })
+
+  it('re-delivers when a second session start follows the pair of the first compaction', async () => {
+    seed('m1', CUE, { type: 'gotcha' })
+    const options = { env: HOOK_ENV, stateDir: stateDir(), fetchImpl: hookFetch() }
+    const compacted = { ...SESSION, source: 'compact' }
+
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+
+    await renderHook('post-compact', SESSION, options)
+    await renderHook('session-start', compacted, options)
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
+    expect(await renderHook('pre-tool-use', EDIT, options)).toBe('')
+
+    await renderHook('session-start', compacted, options)
+    expect(await renderHook('pre-tool-use', EDIT, options)).toContain('double-counts')
   })
 })

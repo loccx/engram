@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest'
 import { getDatabase, resetDatabase } from '../src/db/init.js'
 import { handleTool, resetServicesForTests } from '../src/mcp/handlers.js'
 import { refreshDigest } from '../src/memory/digest.js'
+import { seedClusterMembers } from './helpers.js'
 
 const TEST_PROJECT = '/home/user/handlers-project'
 
@@ -149,6 +150,7 @@ describe('get_context handler', () => {
 
   it('returns full cluster membership by default and caps only with compact_topics', async () => {
     const memberIds = Array.from({ length: 700 }, (_, i) => `mem-${i}`)
+    seedClusterMembers(getDatabase().db, TEST_PROJECT, memberIds)
     getDatabase().db
       .prepare(
         `INSERT INTO memory_clusters (project_path, member_ids, summary, is_extractive, created_at, updated_at)

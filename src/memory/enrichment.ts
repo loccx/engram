@@ -1,6 +1,19 @@
 import type Database from 'better-sqlite3'
 import type { Memory, MemoryCluster, SearchResult } from './types.js'
 import { SUPERSEDES_FILTER_THRESHOLD } from '../contradictions/supersession.js'
+import { namespaceFilter, type NamespaceFilterOptions } from './search/scope.js'
+
+/** edge counts remain present-state metadata, restricted to readable query endpoints */
+export type EnrichmentScope = NamespaceFilterOptions
+
+function edgeReadFilter(options: EnrichmentScope): { sql: string; params: unknown[] } {
+  const source = namespaceFilter('edge_source', options)
+  const target = namespaceFilter('edge_target', options)
+  return {
+    sql: `${source.sql} AND ${target.sql}`,
+    params: [...source.params, ...target.params],
+  }
+}
 
 export type Tier = 'pinned' | 'hot' | 'warm' | 'cold'
 export type RecallSignal = 'fts' | 'vec' | 'recency' | 'access' | 'importance' | 'reranker'
@@ -98,10 +111,12 @@ interface SupersedesRow {
 
 export function fetchSupersedesCounts(
   db: Database.Database,
-  memoryIds: string[]
+  memoryIds: string[],
+  options: EnrichmentScope = {}
 ): Map<string, SupersedesCounts> {
   const result = new Map<string, SupersedesCounts>()
   if (memoryIds.length === 0) return result
+  const scope = edgeReadFilter(options)
 
   const rows = db
     .prepare(
@@ -109,16 +124,20 @@ export function fetchSupersedesCounts(
        SELECT
          ids.id AS memory_id,
          (SELECT COUNT(*) FROM memory_links sl
+          JOIN memories edge_source ON edge_source.id = sl.source_id
+          JOIN memories edge_target ON edge_target.id = sl.target_id
           WHERE sl.source_id = ids.id
             AND sl.link_type = 'supersedes'
-            AND sl.confidence >= ?) AS supersedes,
+            AND sl.confidence >= ? AND ${scope.sql}) AS supersedes,
          (SELECT COUNT(*) FROM memory_links sl
+          JOIN memories edge_source ON edge_source.id = sl.source_id
+          JOIN memories edge_target ON edge_target.id = sl.target_id
           WHERE sl.target_id = ids.id
             AND sl.link_type = 'supersedes'
-            AND sl.confidence >= ?) AS superseded_by
+            AND sl.confidence >= ? AND ${scope.sql}) AS superseded_by
        FROM ids`
     )
-    .all(...memoryIds, SUPERSEDES_FILTER_THRESHOLD, SUPERSEDES_FILTER_THRESHOLD) as SupersedesRow[]
+    .all(...memoryIds, SUPERSEDES_FILTER_THRESHOLD, ...scope.params, SUPERSEDES_FILTER_THRESHOLD, ...scope.params) as SupersedesRow[]
 
   for (const row of rows) {
     result.set(row.memory_id, {
@@ -137,20 +156,25 @@ interface ConflictRow {
 // kept out of fetchSupersedesCounts so that struct's shape stays unchanged
 export function fetchConflictCounts(
   db: Database.Database,
-  memoryIds: string[]
+  memoryIds: string[],
+  options: EnrichmentScope = {}
 ): Map<string, number> {
   const result = new Map<string, number>()
   if (memoryIds.length === 0) return result
+  const scope = edgeReadFilter(options)
   const rows = db
     .prepare(
       `WITH ids(id) AS (VALUES ${memoryIds.map(() => '(?)').join(',')})
        SELECT ids.id AS memory_id,
          (SELECT COUNT(*) FROM memory_links cl
+          JOIN memories edge_source ON edge_source.id = cl.source_id
+          JOIN memories edge_target ON edge_target.id = cl.target_id
           WHERE cl.link_type = 'conflicts'
-            AND (cl.source_id = ids.id OR cl.target_id = ids.id)) AS conflicts
+            AND (cl.source_id = ids.id OR cl.target_id = ids.id)
+            AND ${scope.sql}) AS conflicts
        FROM ids`
     )
-    .all(...memoryIds) as ConflictRow[]
+    .all(...memoryIds, ...scope.params) as ConflictRow[]
   for (const row of rows) result.set(row.memory_id, Number(row.conflicts))
   return result
 }
@@ -188,11 +212,12 @@ export function fetchEnrichmentColumns(
 export function enrichMemories(
   db: Database.Database,
   memories: Memory[],
-  now: number = Date.now()
+  now: number = Date.now(),
+  options: EnrichmentScope = {}
 ): EnrichedMemory[] {
   const ids = memories.map((m) => m.id)
-  const counts = fetchSupersedesCounts(db, ids)
-  const conflicts = fetchConflictCounts(db, ids)
+  const counts = fetchSupersedesCounts(db, ids, options)
+  const conflicts = fetchConflictCounts(db, ids, options)
   const cols = fetchEnrichmentColumns(db, ids)
 
   return memories.map((m) => {
@@ -215,14 +240,15 @@ export function enrichSearchResults(
   db: Database.Database,
   results: SearchResult[],
   signalBreakdown: Map<string, Record<RecallSignal, number>>,
-  now: number = Date.now()
+  now: number = Date.now(),
+  options: EnrichmentScope = {}
 ): EnrichedSearchResult[] {
   const baseMemories: Memory[] = results.map((r) => {
     const { score: _score, ...rest } = r
     void _score
     return rest as Memory
   })
-  const enriched = enrichMemories(db, baseMemories, now)
+  const enriched = enrichMemories(db, baseMemories, now, options)
 
   return enriched.map((mem, i) => {
     const breakdown = signalBreakdown.get(mem.id)

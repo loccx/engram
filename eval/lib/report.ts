@@ -8,7 +8,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { redactSecrets } from './llm.js'
 import type { TokenizerInfo } from './metrics.js'
-import type { ComparisonReport, LatencyPercentiles, PairStats } from './stats.js'
+import { COMPARABILITY_FIELDS, type ComparisonReport, type LatencyPercentiles, type PairStats } from './stats.js'
 import type { RunHeader, SuiteResult, TimingSummary, VectorMode } from './types.js'
 
 /** the checkout that contains eval/ */
@@ -227,6 +227,8 @@ export function renderComparisonReport(
   const sections: string[] = [
     `### paired comparison\n\n${comparisonHeader(report)}\n\n${guardLine(report)}`,
   ]
+  const interventions = renderInterventions(report)
+  if (interventions !== '') sections.push(interventions)
   const pairs = report.pairs.map((pair) => pairProse(pair, report.alpha))
   const unpaired = unpairedLines(report)
   sections.push([...pairs, ...unpaired].filter(Boolean).join('\n\n'))
@@ -287,6 +289,11 @@ export function renderComparisonReport(
   return sections.filter((section) => section !== '').join('\n\n')
 }
 
+function renderInterventions(report: ComparisonReport): string {
+  return report.interventions.length === 0 ? '' :
+    `deliberate interventions:\n${report.interventions.map((entry) => `- ${entry}`).join('\n')}`
+}
+
 function renderWithheld(report: ComparisonReport): string {
   return [
     '### paired comparison',
@@ -294,9 +301,10 @@ function renderWithheld(report: ComparisonReport): string {
     'comparison withheld: the rows are not comparable, so no delta is printed.',
     '',
     ...report.differences.map((difference) => `- ${difference}`),
+    ...(report.interventions.length > 0 ? ['', renderInterventions(report)] : []),
     '',
     'Two accuracy numbers that disagree on a field above are not a measurement of either ' +
-      'system; re-run both sides under the same dataset sha, models, prompt versions and budget.',
+      'system; re-run both sides under the same dataset sha, models, prompt versions, budget, vector regime and question set, or declare an intentional engine intervention.',
   ].join('\n')
 }
 
@@ -310,8 +318,10 @@ function comparisonHeader(report: ComparisonReport): string {
 }
 
 function guardLine(report: ComparisonReport): string {
-  const fields = ['dataset sha', 'reader model', 'judge model', 'reader prompt', 'judge prompt', 'budget']
-  const checked = fields.filter((field) => !report.unverified.includes(field))
+  const checked = COMPARABILITY_FIELDS.filter(
+    ({ key, label }) => !report.unverified.includes(label) &&
+      !(key === 'engine_revision' && report.interventions.length > 0)
+  ).map((field) => field.label)
   const line = `comparability: matched on ${checked.join(', ')}`
   return report.unverified.length === 0
     ? `${line}.`

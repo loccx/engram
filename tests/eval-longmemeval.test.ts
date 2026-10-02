@@ -192,6 +192,14 @@ function suiteContext(dir: string, overrides: Partial<SuiteContext> = {}): Suite
   }
 }
 
+/** the qa rows of a run, whatever config key they landed under */
+function qaRows(output: Awaited<ReturnType<typeof runLongMemEvalSuite>>): Array<Record<string, unknown>> {
+  const entry = (output.result.details as Array<{ qa?: { rows: Array<Record<string, unknown>> } }>).find(
+    (detail) => detail.qa !== undefined
+  )
+  return entry?.qa?.rows ?? []
+}
+
 interface QaMetrics {
   status: string
   questions_answered?: number
@@ -376,6 +384,89 @@ describe('longmemeval qa (stub llm)', () => {
       expect(second.metrics.readers![name].accuracy).toBe(first.metrics.readers![name].accuracy)
       expect(second.metrics.readers![name].resumed).toBe(QUESTIONS.length)
     }
+  }, 120_000)
+
+  it('records the achieved vector regime and the sampled question set on every row', async () => {
+    const dir = tempDir()
+    const { result } = await runQa({ dir, checkpoint: join(dir, 'run.jsonl'), stub: stubLlm() })
+
+    const rows = qaRows(result)
+    expect(rows).toHaveLength(QUESTIONS.length * READERS.length)
+    for (const row of rows) {
+      // this file is seeded on the fts path, so the regime is `fts` and not a fallback
+      expect(row.vectors).toBe('fts')
+      expect(row.question_set).toBe(`all,limit=${QUESTIONS.length},stride=1`)
+      expect(row.git_sha).toBe('testsha')
+      expect(String(row.key)).toContain('vectors=fts')
+      expect(String(row.key)).toContain(`questions=all,limit=${QUESTIONS.length},stride=1`)
+      expect(String(row.key)).toContain('engine=testsha')
+    }
+  }, 120_000)
+
+  it('never resumes a checkpoint written under another code revision, and keeps it', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    const first = await runQa({ dir, checkpoint, stub: stubLlm(), overrides: { gitSha: 'sha-a' } })
+    expect(first.metrics.calls).toBe(QUESTIONS.length * READERS.length * 2)
+
+    const second = await runQa({ dir, checkpoint, stub: stubLlm(), overrides: { gitSha: 'sha-b' } })
+    expect(second.metrics.resumed_questions).toBe(0)
+    expect(second.metrics.resumed_rows).toBe(0)
+    expect(second.metrics.calls).toBe(QUESTIONS.length * READERS.length * 2)
+    const notes = second.result.result.notes ?? []
+    expect(notes.some((note) => note.includes('engine: sha-b vs sha-a'))).toBe(true)
+    expect(notes.some((note) => note.includes('NOT reused'))).toBe(true)
+
+    // the old rows are kept: two identities, both runs, nothing deleted
+    const lines = readFileSync(checkpoint, 'utf8').trim().split('\n')
+    expect(lines).toHaveLength(2 * QUESTIONS.length * READERS.length)
+    const keys = new Set(lines.map((line) => JSON.parse(line).key as string))
+    expect(keys.size).toBe(2)
+    expect([...keys].some((key) => key.includes('engine=sha-a'))).toBe(true)
+    expect([...keys].some((key) => key.includes('engine=sha-b'))).toBe(true)
+  }, 120_000)
+
+  it('never resumes a lexical checkpoint as a vector run', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await runQa({ dir, checkpoint, stub: stubLlm(), overrides: { vectors: 'fts' } })
+
+    const second = await runQa({
+      dir,
+      checkpoint,
+      stub: stubLlm(),
+      overrides: { vectors: 'cached' },
+    })
+    expect(second.metrics.resumed_rows).toBe(0)
+    expect(second.metrics.calls).toBe(QUESTIONS.length * READERS.length * 2)
+    const notes = second.result.result.notes ?? []
+    expect(notes.some((note) => /vectors: cached(\+vectors|\+fts-fallback) vs fts/.test(note))).toBe(true)
+    // the regime that was really in effect, not the flag that was typed
+    for (const row of qaRows(second.result)) {
+      expect(String(row.vectors).startsWith('cached')).toBe(true)
+      expect(row.vectors).not.toBe('fts')
+    }
+  }, 120_000)
+
+  it('never resumes a checkpoint that sampled different questions', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await runQa({ dir, checkpoint, stub: stubLlm() })
+
+    // the suite samples evenly, so a smaller limit also changes the stride
+    const sampled = 3
+    const stride = Math.max(1, Math.floor(QUESTIONS.length / sampled))
+    const second = await runQa({ dir, checkpoint, stub: stubLlm(), overrides: { limit: sampled } })
+    expect(second.metrics.resumed_rows).toBe(0)
+    expect(second.metrics.calls).toBe(sampled * READERS.length * 2)
+    const notes = second.result.result.notes ?? []
+    expect(
+      notes.some((note) =>
+        note.includes(
+          `questions: all,limit=${sampled},stride=${stride} vs all,limit=${QUESTIONS.length},stride=1`
+        )
+      )
+    ).toBe(true)
   }, 120_000)
 
   it('refuses to spend above the call ceiling until --yes is passed', async () => {

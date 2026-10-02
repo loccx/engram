@@ -4,13 +4,20 @@
 // to a jsonl checkpoint before aggregating, and refuses to spend above the call ceiling.
 // the same safety rails as the longmemeval qa loop: pinned model recorded per row, cost
 // estimate before the first call, resume by key.
+//
+// the caller builds that key from every axis that changes what a row means: the dataset
+// bytes, the systems, the model, the prompt and the scorer versions, the budget and top-k,
+// the vector regime that was in effect, the effective sample selection, the code revision
+// and the seed. a checkpoint written under another key is not a prefix of this run: its
+// rows are left where they are and the run names the part that differed.
 import { EvalSetupError } from './errors.js'
+import { resumeIdentityIssue } from './run-identity.js'
 import { JsonlCheckpoint } from './checkpoint.js'
 import { callChat, gatewayStatus, qaMissingGateway } from './llm.js'
 import { round3, summarizeLatencies, type TokenizerInfo } from './metrics.js'
 import type { ReaderSpec } from './readers.js'
-import type { TimingSummary } from './types.js'
-import type { QaContextPlan } from './qa-run.js'
+import type { TimingSummary, VectorMode } from './types.js'
+import { vectorIdentity, type QaContextPlan } from './qa-run.js'
 
 export const DEFAULT_BENCH_CONCURRENCY = 2
 export const DEFAULT_BENCH_COST_CEILING_CALLS = 100
@@ -64,6 +71,10 @@ export interface BenchQaRow {
   retrieval_ms: number
   reader_ms: number
   git_sha: string
+  /** the vector regime in effect, from `benchVectorIdentity` */
+  vectors: string
+  /** the effective selection this run asked about, from `selectionIdentity` */
+  selection: string
   resumed: boolean
   [field: string]: unknown
 }
@@ -102,9 +113,22 @@ export interface BenchQaInput {
   costCeilingCalls: number
   confirmed: boolean
   totalQuestions: number
+  /** engine/code revision, recorded on every row and inside the key */
   gitSha: string
+  /** the vector regime, recorded on every row: a changed regime is a different run */
+  vectors: string
+  /** the effective selection, recorded on every row: a changed sample is a different run */
+  selection: string
   tokenizer: TokenizerInfo
   log: (message: string) => void
+}
+
+/** checkpoint rows that belong to another run identity, kept but never reused */
+export interface BenchForeignKey {
+  key: string
+  rows: number
+  /** `field: this run vs that run`, from `benchKeyDiff` */
+  differences: string[]
 }
 
 export interface BenchQaOutput {
@@ -113,6 +137,8 @@ export interface BenchQaOutput {
   failures: BenchQaFailure[]
   calls: number
   resumedQuestions: number
+  /** rows the checkpoint held under another key: not a resumable prefix of this run */
+  foreignKeys: BenchForeignKey[]
 }
 
 /** identity of a run: any change here retires the recorded rows */
@@ -121,6 +147,52 @@ export function benchQaKey(parts: Record<string, string | number>): string {
     .sort()
     .map((name) => `${name}=${parts[name]}`)
     .join('|')
+}
+
+// the vector regime a bench run records. the shared helper names the regime that was
+// really in effect; the one case it cannot settle up front is `on` with an incomplete
+// model, where the pipeline may reach vectors or fall back to lexical at run time, so
+// that regime is named uncertain rather than promising a channel.
+export function benchVectorIdentity(
+  mode: VectorMode,
+  state: { vectorsAvailable: boolean; modelCacheReady: boolean }
+): string {
+  const identity = vectorIdentity(mode, state)
+  return identity === 'on+model-incomplete' ? 'on+model-incomplete(uncertain)' : identity
+}
+
+/**
+ * the effective selection a run used, as `unit=used/available`: a `--limit` above what the
+ * file holds collapses to the whole file, and a smaller one can never resume the larger run
+ */
+export function selectionIdentity(unit: string, used: number, available: number): string {
+  return `${unit}=${used}/${available}`
+}
+
+function keyParts(key: string): Map<string, string> {
+  const out = new Map<string, string>()
+  for (const part of key.split('|')) {
+    const at = part.indexOf('=')
+    if (at <= 0) continue
+    out.set(part.slice(0, at), part.slice(at + 1))
+  }
+  return out
+}
+
+// `field: this vs that` for the labelled parts of two bench keys. a bench key is built
+// from a sorted map, so parts are matched by name: a key from before `vectors=` existed
+// reports that part as absent instead of shifting every later part by one.
+export function benchKeyDiff(current: string, other: string): string[] {
+  const mine = keyParts(current)
+  const theirs = keyParts(other)
+  const out: string[] = []
+  for (const field of [...new Set([...mine.keys(), ...theirs.keys()])].sort()) {
+    const a = mine.get(field)
+    const b = theirs.get(field)
+    if (a === b) continue
+    out.push(`${field}: ${a ?? '(absent)'} vs ${b ?? '(absent)'}`)
+  }
+  return out
 }
 
 /** `--qa` needs a gateway, a pinned reader model and a system; the official scorer is local, so no judge */
@@ -148,8 +220,29 @@ export function preflightBenchQa(
 export async function runBenchQa(input: BenchQaInput): Promise<BenchQaOutput> {
   const concurrency = Math.max(1, Math.floor(input.concurrency))
   const done = new Map<string, BenchQaRow>()
+  const resumeIssue = resumeIdentityIssue(input.vectors, input.gitSha)
+  if (resumeIssue !== null) input.log(`qa resume disabled: ${resumeIssue}`)
+  const foreign = new Map<string, number>()
   for (const line of input.checkpoint.load()) {
-    if (line.key === input.key) done.set(`${line.question_id}|${line.reader}`, line)
+    if (resumeIssue === null && line.key === input.key) done.set(`${line.question_id}|${line.reader}`, line)
+    else foreign.set(line.key, (foreign.get(line.key) ?? 0) + 1)
+  }
+  // a row under another key was answered under another regime (or another code revision);
+  // it is not reused and it is not deleted, but the run must not stay quiet about it
+  const foreignKeys: BenchForeignKey[] = [...foreign.entries()]
+    .sort((a, b) => (a[1] !== b[1] ? b[1] - a[1] : a[0] < b[0] ? -1 : 1))
+    .map(([key, rows]) => ({
+      key, rows, differences: [
+        ...benchKeyDiff(input.key, key),
+        ...(key === input.key && resumeIssue !== null ? [resumeIssue] : []),
+      ],
+    }))
+  if (foreignKeys.length > 0) {
+    const total = foreignKeys.reduce((sum, entry) => sum + entry.rows, 0)
+    input.log(
+      `qa resume: ${total} checkpoint row(s) have an unverified or different identity and are not ` +
+        `reused — ${foreignKeys[0].differences.join('; ') || foreignKeys[0].key}`
+    )
   }
 
   const rows: BenchQaRow[] = []
@@ -228,7 +321,7 @@ export async function runBenchQa(input: BenchQaInput): Promise<BenchQaOutput> {
     if (qa !== qb) return qa - qb
     return (readerOrder.get(a.reader) ?? 0) - (readerOrder.get(b.reader) ?? 0)
   })
-  return { rows, estimate, failures, calls, resumedQuestions }
+  return { rows, estimate, failures, calls, resumedQuestions, foreignKeys }
 }
 
 async function answerOne(
@@ -271,6 +364,8 @@ async function answerOne(
     retrieval_ms: plan.retrievalMs,
     reader_ms: readerMs,
     git_sha: input.gitSha,
+    vectors: input.vectors,
+    selection: input.selection,
     resumed: false,
   }
 }
@@ -331,6 +426,8 @@ export interface BenchQaBlock {
   key?: string
   resumed_questions?: number
   estimated_rows?: number
+  /** checkpoint rows under another run identity: kept, never reused */
+  foreign_keys?: BenchForeignKey[]
   failures?: BenchQaFailure[]
   estimate?: BenchCostEstimate | null
   readers?: Record<string, BenchReaderAggregate>
@@ -367,6 +464,7 @@ export function describeBenchQa(
     key: meta.key,
     resumed_questions: output.resumedQuestions,
     estimated_rows: output.rows.filter((row) => row.token_source === 'estimated').length,
+    foreign_keys: output.foreignKeys,
     failures: output.failures,
     estimate: output.estimate,
     readers: aggregateBenchRows(output.rows),

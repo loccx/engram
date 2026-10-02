@@ -208,6 +208,7 @@ const NAMESPACE_READS: Array<{ tool: string; args: Record<string, unknown> }> = 
   { tool: 'recall_context', args: { query: MARKER_MEMORY, budget_chars: 4000 } },
   { tool: 'recall_context', args: { query: MARKER_EPISODE, budget_chars: 4000 } },
   { tool: 'get_state', args: {} },
+  { tool: 'query_assertions', args: {} },
   { tool: 'session_start', args: {} },
   { tool: 'list_sessions', args: {} },
   { tool: 'consolidate_memories', args: { threshold: 0.5 } },

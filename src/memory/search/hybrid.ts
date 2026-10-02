@@ -2,13 +2,9 @@ import type Database from 'better-sqlite3'
 import type { Memory, SearchResult, MemoryType } from '../types.js'
 import { getEmbedding } from '../../embeddings/pipeline.js'
 import { rerank as rerankCrossEncoder } from '../../embeddings/reranker.js'
-import {
-  notSupersededClause,
-  notSupersededAtClause,
-  validityAtClause,
-} from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
-import { visibilityClause, type CallerScope } from '../access.js'
+import type { CallerScope } from '../access.js'
+import { namespaceFilter, temporalFilter } from './scope.js'
 import {
   ebbinghaus,
   classifyQuery,
@@ -405,51 +401,22 @@ function memoryPredicates(options: SearchOptions): { conditions: string[]; value
   const conditions: string[] = []
   const values: unknown[] = []
 
-  if (options.namespace_subtree) {
-    const ns = options.namespace_subtree
-    // _ and % are LIKE wildcards: escape them or a namespace matches sibling prefixes
-    const esc = ns.replace(/[\\%_]/g, '\\$&')
-    conditions.push(
-      '(COALESCE(m.namespace, m.project_path) = ?' +
-        " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\'" +
-        " OR COALESCE(m.namespace, m.project_path) LIKE ? ESCAPE '\\')"
-    )
-    values.push(ns, `${esc}/%`, `${esc}//%`)
-  } else if (options.project_path) {
-    // namespace + project_path coexist during the backfill window
-    conditions.push('COALESCE(m.namespace, m.project_path) = ?')
-    values.push(options.project_path)
-  }
+  // _ and % are LIKE wildcards: escape them or a namespace matches sibling prefixes
+  // namespace + project_path coexist during the backfill window
   // the ranker and the vector rowid set share these predicates, so the visibility rule
   // lands on both or neither
-  const visibility = visibilityClause('m', options.caller)
-  conditions.push(visibility.sql)
-  values.push(...visibility.params)
+  const scope = namespaceFilter('m', options)
+  conditions.push(scope.sql)
+  values.push(...scope.params)
   if (options.type) {
     conditions.push('m.type = ?')
     values.push(options.type)
   }
-  if (options.as_of !== undefined) {
-    conditions.push(validityAtClause('m', '?'))
-    values.push(options.as_of, options.as_of)
-  } else if (options.before !== undefined) {
-    conditions.push('m.valid_from <= ?')
-    values.push(options.before)
-  }
-  if (!options.include_superseded) {
-    if (options.as_of !== undefined) {
-      conditions.push(
-        notSupersededAtClause('m.id', '?', { includeArchived: options.include_archived === true })
-      )
-      values.push(options.as_of)
-    } else {
-      conditions.push(notSupersededClause('m.id', { includeArchived: options.include_archived === true }))
-    }
-  } else if (!options.include_archived) {
-    // archived is not superseded: an audit read of superseded rows never resurrects a
-    // retired one, only include_archived opts in (the rule store.list already applies)
-    conditions.push('m.archived_at IS NULL')
-  }
+  // archived is not superseded: an audit read of superseded rows never resurrects a
+  // retired one, only include_archived opts in (the rule store.list already applies)
+  const temporal = temporalFilter('m', options)
+  if (temporal.sql) conditions.push(temporal.sql)
+  values.push(...temporal.params)
   return { conditions, values }
 }
 

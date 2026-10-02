@@ -30,9 +30,11 @@ import {
   DEFAULT_BENCH_COST_CEILING_CALLS,
   benchQaKey,
   benchQaTimings,
+  benchVectorIdentity,
   describeBenchQa,
   preflightBenchQa,
   runBenchQa,
+  selectionIdentity,
   type BenchQaBlock,
   type BenchQaRow,
   type BenchQuestion,
@@ -319,6 +321,15 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
     const checkpoint = new JsonlCheckpoint<BenchQaRow>(
       ctx.checkpointPath ?? defaultCheckpointPath(systems.map((system) => system.name))
     )
+    // the regime that is really in effect, not the flag that was typed: a `cached`
+    // request on a machine without the model runs fts, and resuming it as a vector run
+    // would mix two regimes into one number
+    const vectorRegime = benchVectorIdentity(harness.vectorMode, {
+      vectorsAvailable: harness.vectorsAvailable,
+      modelCacheReady: harness.modelCacheReady,
+    })
+    // the conversations that were really asked, not the limit that was passed
+    const selection = selectionIdentity('samples', samples.length, records.length)
     const key = benchQaKey({
       dataset: LOCOMO_DATASET_ID,
       sha: fileSha256.slice(0, 16),
@@ -328,6 +339,12 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
       scorer: `${LOCOMO_SCORER_NAME}@${LOCOMO_SCORER_VERSION}`,
       topk: LOCOMO_READER_TOP_K,
       budget: budgetChars,
+      vectors: vectorRegime,
+      engine: ctx.gitSha || 'unknown',
+      selection,
+      // the seed decides the option order of every category-5 item, so it changes both
+      // the prompt the reader sees and the answer the official rule expects
+      seed: ctx.seed,
     })
 
     async function* streamQuestions(): AsyncGenerator<BenchQuestion> {
@@ -434,6 +451,8 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
         confirmed: ctx.yes === true,
         totalQuestions: sampleSummaries.reduce((sum, sample) => sum + sample.questions, 0),
         gitSha: ctx.gitSha ?? '',
+        vectors: vectorRegime,
+        selection,
         tokenizer,
         log: ctx.log,
       })
@@ -466,6 +485,23 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
       readerModel,
     })
   )
+    if (qaBlock.status === 'ok') {
+      notes.push(
+        `qa identity: vectors=${vectorRegime}, selection=${selection}, engine=` +
+          `${ctx.gitSha || 'unknown'}, seed=${ctx.seed} — a changed regime, sample, revision ` +
+          'or seed is a different run, not a resume'
+      )
+      if ((qaBlock.foreign_keys?.length ?? 0) > 0) {
+        const kept = qaBlock.foreign_keys!.reduce((sum, entry) => sum + entry.rows, 0)
+        notes.push(
+        `qa resume: ${kept} checkpoint row(s) have an unverified or different identity and ` +
+            `were NOT reused (${qaBlock.foreign_keys!
+              .map((entry) => entry.differences.join('; ') || entry.key)
+              .join(' | ')}); they are kept, and this run appends its own rows under the ` +
+            'current key'
+        )
+      }
+    }
 
     const metrics: Record<string, unknown> = {}
     const thresholds: Record<string, Record<string, number>> = {}

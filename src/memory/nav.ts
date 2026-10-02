@@ -4,6 +4,7 @@ import { chat, isLlmConfigured } from '../llm/client.js'
 import { getDigest } from './digest.js'
 import { logger } from '../utils/logger.js'
 import { children } from '../namespace/tree.js'
+import { readSourceGeneration } from '../sources/index.js'
 
 // thin navigation layer over the namespace tree (docs/architecture.md): a node
 // carries a compact digest — pinned facts, topic summaries, child digests — that
@@ -63,6 +64,7 @@ export async function refreshNavDigest(
       return { content: '', changed: false }
     }
 
+    const sourceGeneration = readSourceGeneration(db)
     const sources = collectSources(db, namespace)
     const lines = buildSourceLines(sources)
     const hash = hashSources(sources, lines)
@@ -90,13 +92,23 @@ export async function refreshNavDigest(
       content = packExtractive(lines, budget)
     }
 
-    db.prepare(
-      `UPDATE namespace_nodes
-       SET digest = ?, digest_source_hash = ?, updated_at = ?
-       WHERE path = ?`
-    ).run(content, hash, Date.now(), namespace)
-
-    return { content, changed: content !== (node.digest ?? '') }
+    // never republish a pre-revocation navigation snapshot after an async
+    // condensation. The transaction also serializes with external source writers.
+    return db.transaction(() => {
+      if (readSourceGeneration(db) !== sourceGeneration) {
+        return { content: '', changed: false }
+      }
+      const currentSources = collectSources(db, namespace)
+      if (hashSources(currentSources, buildSourceLines(currentSources)) !== hash) {
+        return { content: '', changed: false }
+      }
+      db.prepare(
+        `UPDATE namespace_nodes
+         SET digest = ?, digest_source_hash = ?, updated_at = ?
+         WHERE path = ?`
+      ).run(content, hash, Date.now(), namespace)
+      return { content, changed: content !== (node.digest ?? '') }
+    }).immediate()
   } catch (e) {
     logger.warn(
       { err: e instanceof Error ? e.message : String(e), namespace },

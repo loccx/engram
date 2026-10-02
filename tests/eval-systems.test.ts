@@ -194,6 +194,7 @@ describe('systems registry', () => {
       'engram-episodes-breadth-reserve',
       'engram-episodes-statements',
       'engram-episodes-routed',
+      'no-memory',
       'full-context',
       'naive-rag',
     ])

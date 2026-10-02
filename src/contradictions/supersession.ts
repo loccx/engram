@@ -7,6 +7,8 @@
 export interface SupersessionClauseOptions {
   /** audit reads only */
   includeArchived?: boolean
+  /** optional read predicate over the joined `superseder`; the caller binds its parameters */
+  successorFilter?: string
 }
 
 export const SUPERSEDES_FILTER_THRESHOLD = 0.8
@@ -19,6 +21,7 @@ function rowAlias(aliasIdExpr: string): string | null {
 }
 
 // bound-parameter free: a `?` here would shift every caller's parameter index
+// (the optional successorFilter is supplied and bound by the read-path caller)
 function archivedAtClause(aliasIdExpr: string, includeArchived: boolean): string {
   if (includeArchived) return ''
   const alias = rowAlias(aliasIdExpr)
@@ -32,10 +35,10 @@ export function notSupersededClause(
   opts: SupersessionClauseOptions = {}
 ): string {
   return `NOT EXISTS (
-    SELECT 1 FROM memory_links sl
+    SELECT 1 FROM memory_links sl${opts.successorFilter ? ' JOIN memories superseder ON superseder.id = sl.source_id' : ''}
     WHERE sl.target_id = ${aliasIdExpr}
       AND sl.link_type = 'supersedes'
-      AND sl.confidence >= ${SUPERSEDES_FILTER_THRESHOLD}
+      AND sl.confidence >= ${SUPERSEDES_FILTER_THRESHOLD}${opts.successorFilter ? ` AND ${opts.successorFilter}` : ''}
   )${archivedAtClause(aliasIdExpr, opts.includeArchived === true)}`
 }
 
@@ -48,11 +51,11 @@ export function notSupersededAtClause(
   opts: SupersessionClauseOptions = {}
 ): string {
   return `NOT EXISTS (
-    SELECT 1 FROM memory_links sl
+    SELECT 1 FROM memory_links sl${opts.successorFilter ? ' JOIN memories superseder ON superseder.id = sl.source_id' : ''}
     WHERE sl.target_id = ${aliasIdExpr}
       AND sl.link_type = 'supersedes'
       AND sl.confidence >= ${SUPERSEDES_FILTER_THRESHOLD}
-      AND COALESCE(sl.judged_at, sl.created_at) <= ${whenExpr}
+      AND COALESCE(sl.judged_at, sl.created_at) <= ${whenExpr}${opts.successorFilter ? ` AND ${opts.successorFilter}` : ''}
   )${archivedAtClause(aliasIdExpr, opts.includeArchived === true)}`
 }
 

@@ -1,12 +1,16 @@
 import type Database from 'better-sqlite3'
 import type { Memory } from '../memory/types.js'
 import { rowToMemory, type MemoryRow } from '../memory/row.js'
+import { namespaceFilter } from '../memory/search/scope.js'
+import type { CallerScope } from '../memory/access.js'
+import { vectorSearchScored } from '../memory/search/hybrid.js'
 
 export interface CandidateFinderOptions {
   vecTopK?: number
   ftsTopK?: number
   minCosineSim?: number
   maxCandidates?: number
+  caller?: CallerScope
 }
 
 export interface Candidate {
@@ -36,37 +40,24 @@ export function findContradictionCandidates(
 ): Candidate[] {
   const opts = { ...DEFAULTS, ...options }
   const candidates = new Map<string, Candidate>()
+  const scope = namespaceFilter('m', { project_path: params.namespace, caller: options.caller })
 
   if (params.embedding && params.vectorsAvailable) {
     const distThreshold = Math.sqrt(2 * (1 - opts.minCosineSim))
     // a binary blob, as in store.ts and reembed.ts, which is much smaller than
     // compact than JSON and avoids per-search float-array serialization overhead.
-    const queryVec = Buffer.from(params.embedding.buffer)
-    try {
-      const vecRows = db
-        .prepare(
-          `SELECT m.*, knn.distance
-           FROM (SELECT rowid, distance FROM memory_vectors WHERE embedding MATCH ? LIMIT ?) knn
-           JOIN memories m ON m.vec_rowid = knn.rowid
-           WHERE COALESCE(m.namespace, m.project_path) = ?
-             AND m.id != ?
-             AND knn.distance <= ?`
-        )
-        .all(queryVec, opts.vecTopK, params.namespace, params.excludeMemoryId, distThreshold) as Array<
-        MemoryRow & { distance: number }
-      >
-      for (const row of vecRows) {
-        const sim = Math.max(0, 1 - (row.distance * row.distance) / 2)
-        candidates.set(row.id, {
-          memory: rowToMemory(row),
-          source: 'vec',
-          vecSimilarity: sim,
-        })
-      }
-    } catch {}
+    const vecRows = vectorSearchScored(db, params.embedding, {
+      project_path: params.namespace, caller: options.caller,
+      include_superseded: true, include_archived: true,
+    }, opts.vecTopK + 1).filter((row) => row.memory.id !== params.excludeMemoryId).slice(0, opts.vecTopK)
+    for (const { memory, distance } of vecRows) {
+      if (distance > distThreshold) continue
+      const sim = Math.max(0, 1 - (distance * distance) / 2)
+      candidates.set(memory.id, { memory, source: 'vec', vecSimilarity: sim })
+    }
   }
 
-  const ftsRows = ftsCandidateLookup(db, params.contentForFts, params.namespace, params.excludeMemoryId, opts.ftsTopK)
+  const ftsRows = ftsCandidateLookup(db, params.contentForFts, scope, params.excludeMemoryId, opts.ftsTopK)
   for (let i = 0; i < ftsRows.length; i++) {
     const row = ftsRows[i]
     const existing = candidates.get(row.id)
@@ -89,7 +80,7 @@ export function findContradictionCandidates(
 function ftsCandidateLookup(
   db: Database.Database,
   content: string,
-  namespace: string,
+  scope: { sql: string; params: unknown[] },
   excludeId: string,
   topK: number
 ): MemoryRow[] {
@@ -107,12 +98,12 @@ function ftsCandidateLookup(
         `SELECT m.* FROM memories_fts fts
          JOIN memories m ON fts.rowid = m.rowid
          WHERE memories_fts MATCH ?
-           AND COALESCE(m.namespace, m.project_path) = ?
+           AND ${scope.sql}
            AND m.id != ?
          ORDER BY bm25(memories_fts, 10.0, 5.0)
          LIMIT ?`
       )
-      .all(q, namespace, excludeId, topK) as MemoryRow[]
+      .all(q, ...scope.params, excludeId, topK) as MemoryRow[]
 
   try {
     const andRows = stmt(tokens.join(' '))

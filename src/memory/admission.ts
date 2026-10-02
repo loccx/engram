@@ -2,6 +2,7 @@ import type Database from 'better-sqlite3'
 import type { MemoryType } from './types.js'
 import { clusterLexicalFamilies, prunePrefixChars, type LexicalMember } from '../maintenance/prune.js'
 import { notSupersededClause } from '../contradictions/supersession.js'
+import { namespaceFilter } from './search/scope.js'
 
 // admission: the checks a write must pass before it becomes a row; the write gate
 // (store.ts) then reconciles it against its neighbours. a rule that cannot run
@@ -192,27 +193,35 @@ interface BurstFamily {
 function burstFamily(input: AdmissionInput, ctx: AdmissionContext): BurstFamily | null {
   const prefixChars = prunePrefixChars()
   const prefix = input.content.slice(0, prefixChars)
+  const scope = namespaceFilter('memories', { project_path: input.namespace })
+  const successor = namespaceFilter('superseder', { project_path: input.namespace })
+  const endpoint = namespaceFilter('endpoint', { project_path: input.namespace })
   const rows = ctx.db
     .prepare(
       `SELECT id, content, COALESCE(namespace, project_path) AS namespace, type, importance,
               access_count, pinned, created_at,
-              (SELECT COUNT(*) FROM memory_links ml
-                WHERE ml.source_id = memories.id OR ml.target_id = memories.id) AS link_degree
+              (SELECT COUNT(*) FROM memory_links ml JOIN memories endpoint
+                ON endpoint.id = CASE WHEN ml.source_id = memories.id THEN ml.target_id ELSE ml.source_id END
+                WHERE (ml.source_id = memories.id OR ml.target_id = memories.id) AND ${endpoint.sql}) AS link_degree
        FROM memories
        WHERE COALESCE(namespace, project_path) = ?
          AND type = ?
          AND created_at >= ?
          AND substr(content, 1, ?) = ?
-         AND ${notSupersededClause('memories.id')}
+         AND ${scope.sql}
+         AND ${notSupersededClause('memories.id', { successorFilter: successor.sql })}
        ORDER BY created_at ASC, id ASC
        LIMIT ?`
     )
     .all(
+      ...endpoint.params,
       input.namespace,
       input.type,
       ctx.now - admissionBurstWindowMs(),
       prefixChars,
       prefix,
+      ...scope.params,
+      ...successor.params,
       BURST_SCAN_LIMIT
     ) as Array<LexicalMember & { created_at: number }>
   if (rows.length === 0) return null

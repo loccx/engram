@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import { computeClusters } from './clustering.js'
 import { chat, isLlmConfigured } from '../llm/client.js'
+import { readSourceGeneration } from '../sources/index.js'
 
 interface StoredClusterRow {
   id: number
@@ -60,6 +61,7 @@ export async function runClusterWorker(
     if (newLinks.n === 0) return 0
   }
 
+  const sourceGeneration = readSourceGeneration(db)
   const clusters = computeClusters(db, projectPath)
   if (clusters.length === 0) return 0
 
@@ -98,25 +100,34 @@ export async function runClusterWorker(
     const memberIds = cluster.memberIds
     const now = Date.now()
 
-    const overlap = [...existing.entries()].find(([, ids]) => hasOverlap(ids, memberIds))
-    if (overlap) {
-      const [clusterId] = overlap
-      updateStmt.run(JSON.stringify(memberIds), summary, isExtractive ? 1 : 0, now, clusterId)
-      existing.set(clusterId, memberIds)
-      written++
-      continue
-    }
-
-    const info = insertStmt.run(
-      projectPath,
-      JSON.stringify(memberIds),
-      summary,
-      isExtractive ? 1 : 0,
-      now,
-      now
-    )
-    const newId = Number(info.lastInsertRowid)
-    existing.set(newId, memberIds)
+    // summary generation may yield while source ingestion invalidates its
+    // inputs. Keep the check and write atomic across database connections.
+    const committed = db.transaction(() => {
+      if (readSourceGeneration(db) !== sourceGeneration) return false
+      const present = db.prepare(
+        'SELECT id FROM memories WHERE COALESCE(namespace, project_path) = ?'
+      ).all(projectPath) as Array<{ id: string }>
+      const presentIds = new Set(present.map((row) => row.id))
+      if (memberIds.some((id) => !presentIds.has(id))) return false
+      const overlap = [...existing.entries()].find(([, ids]) => hasOverlap(ids, memberIds))
+      if (overlap) {
+        const [clusterId] = overlap
+        updateStmt.run(JSON.stringify(memberIds), summary, isExtractive ? 1 : 0, now, clusterId)
+        existing.set(clusterId, memberIds)
+      } else {
+        const info = insertStmt.run(
+          projectPath,
+          JSON.stringify(memberIds),
+          summary,
+          isExtractive ? 1 : 0,
+          now,
+          now
+        )
+        existing.set(Number(info.lastInsertRowid), memberIds)
+      }
+      return true
+    }).immediate()
+    if (!committed) return written
     written++
   }
 

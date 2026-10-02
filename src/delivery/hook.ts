@@ -3,7 +3,7 @@ import { PROTOCOL_SLIM } from './protocol.js'
 import { daemonBaseUrl, daemonPost } from './daemon.js'
 import { authHeaders } from '../mcp/auth.js'
 import { resolveWorkspaceNamespace } from './workspace.js'
-import { cueStatePath, forgetSeen, markSeen } from './cue-state.js'
+import { beginWindow, cueStatePath, forgetSeen, markSeen } from './cue-state.js'
 import {
   POST_COMPACT_BRIEF_CHARS,
   SUBAGENT_BRIEF_CHARS,
@@ -154,8 +154,17 @@ function briefText(entries: TaskBriefPayload[]): string {
     .join('\n\n')
 }
 
+/** compaction rebuilds the model's context, so what it was shown is gone from it: the
+ *  cues of the previous window are deliverable again, once, in the next one */
+function reopenCueWindow(input: HookInput, options: HookOptions, kind: string): void {
+  const sessionId = input.session_id ?? ''
+  if (!sessionId) return
+  beginWindow(cueStatePath(sessionId, options.stateDir), kind)
+}
+
 async function renderSessionStart(input: HookInput, options: HookOptions): Promise<string> {
   const env = options.env ?? process.env
+  if (input.source === 'compact') reopenCueWindow(input, options, 'session-start-compact')
   const namespace = namespaceFor(input, env)
   const [roster, briefs] = await Promise.all([
     postTo<{ entries: RosterHit[] }>('/delivery/roster', { namespace }, env, options),
@@ -213,6 +222,7 @@ async function renderPreCompact(input: HookInput, options: HookOptions): Promise
 }
 
 async function renderPostCompact(input: HookInput, options: HookOptions): Promise<string> {
+  reopenCueWindow(input, options, 'post-compact')
   const briefs = await fetchBriefs(input, options, {
     for: 'session',
     budgetChars: POST_COMPACT_BRIEF_CHARS,

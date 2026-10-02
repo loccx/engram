@@ -4,7 +4,7 @@
 // the stub llm replaces the network call only — gateway presence, model pinning, the
 // official substring scorer, the checkpoint and the cost gate all run for real.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -359,6 +359,143 @@ describe('memoryagentbench suite run', () => {
     const second = await runMemoryAgentBenchSuite(suiteContext(dir, { datasetPath: path }))
     expect(JSON.stringify(second.result.metrics)).toBe(JSON.stringify(first.result.metrics))
   })
+})
+
+describe('memoryagentbench run identity (stub llm)', () => {
+  const IDENTITY_READERS = ['engram', 'full-context']
+
+  /** one --qa run over the fixture pools, with a stub reader that answers from the facts */
+  async function qaRun(opts: {
+    dir: string
+    checkpoint: string
+    overrides?: Partial<SuiteContext>
+  }): Promise<{ metrics: MabSuiteMetrics; notes: string[]; rows: Array<Record<string, unknown>> }> {
+    useGateway()
+    setLlmTransport(async (call: LlmCall): Promise<ChatResult> => {
+      const text = call.messages.map((message) => message.content).join('\n')
+      return {
+        content: text.includes('1. The instrument Nimbus is a trumpet.') ? 'trumpet' : 'unknown',
+        model: call.model,
+      }
+    })
+    const path = writeFixture(opts.dir)
+    const output = await runMemoryAgentBenchSuite(
+      suiteContext(opts.dir, {
+        qa: true,
+        datasetPath: path,
+        readers: IDENTITY_READERS,
+        readerModel: 'stub-reader',
+        checkpointPath: opts.checkpoint,
+        envFile: join(opts.dir, 'no-such-env'),
+        yes: true,
+        concurrency: 2,
+        contextBudgetChars: 2000,
+        ...opts.overrides,
+      })
+    )
+    const metrics = (output.result.metrics as Record<string, MabSuiteMetrics>).baseline
+    const details = output.result.details as Array<{ qa?: { rows: Array<Record<string, unknown>> } }>
+    return {
+      metrics,
+      notes: output.result.notes ?? [],
+      rows: details.find((detail) => detail.qa !== undefined)?.qa?.rows ?? [],
+    }
+  }
+
+  it('stamps the identity on every row and resumes an unchanged run', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    const first = await qaRun({ dir, checkpoint })
+    expect(first.metrics.qa.calls).toBe(4 * IDENTITY_READERS.length)
+    for (const row of first.rows) {
+      // this fixture is seeded on the fts path, over both pools, at the test seed
+      expect(row.vectors).toBe('fts')
+      expect(row.selection).toBe('rows=2/2')
+      expect(row.git_sha).toBe('testsha')
+      const key = String(row.key)
+      expect(key).toContain('vectors=fts')
+      expect(key).toContain('selection=rows=2/2')
+      expect(key).toContain('engine=testsha')
+      expect(key).toContain('seed=7')
+    }
+    expect(first.notes.some((note) => note.includes('qa identity: vectors=fts'))).toBe(true)
+
+    const second = await qaRun({ dir, checkpoint })
+    expect(second.metrics.qa.calls).toBe(0)
+    expect(second.metrics.qa.resumed_questions).toBe(4)
+    expect(second.metrics.qa.readers!['full-context'].score).toBe(
+      first.metrics.qa.readers!['full-context'].score
+    )
+  }, 120_000)
+
+  it('never resumes a lexical checkpoint as a vector run', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint, overrides: { vectors: 'fts' } })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { vectors: 'cached' } })
+    expect(second.metrics.qa.calls).toBe(4 * IDENTITY_READERS.length)
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(
+      second.notes.some((note) => /vectors: cached(\+vectors|\+fts-fallback) vs fts/.test(note))
+    ).toBe(true)
+    for (const row of second.rows) expect(row.vectors).not.toBe('fts')
+    // the old rows are kept: two identities in one file, nothing deleted
+    const keys = new Set(
+      readFileSync(checkpoint, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line).key as string)
+    )
+    expect(keys.size).toBe(2)
+  }, 120_000)
+
+  it('never resumes a checkpoint that asked fewer pools', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { limit: 1 } })
+    // the first pool holds three of the four questions
+    expect(second.metrics.qa.calls).toBe(3 * IDENTITY_READERS.length)
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(second.notes.some((note) => note.includes('selection: rows=1/2 vs rows=2/2'))).toBe(true)
+    for (const row of second.rows) expect(row.selection).toBe('rows=1/2')
+  }, 120_000)
+
+  it('never resumes across a code revision', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint, overrides: { gitSha: 'sha-a' } })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { gitSha: 'sha-b' } })
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(second.metrics.qa.calls).toBe(4 * IDENTITY_READERS.length)
+    expect(second.notes.some((note) => note.includes('engine: sha-b vs sha-a'))).toBe(true)
+  }, 120_000)
+
+  it('treats a limit above the file size as the same selection', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint })
+
+    // both pools are on offer, so asking for more than two is the same run
+    const second = await qaRun({ dir, checkpoint, overrides: { limit: 9 } })
+    expect(second.metrics.qa.calls).toBe(0)
+    expect(second.metrics.qa.resumed_questions).toBe(4)
+    for (const row of second.rows) expect(row.selection).toBe('rows=2/2')
+  }, 120_000)
+
+  it('never resumes across a seed, which names a different corpus', async () => {
+    const dir = tempDir()
+    const checkpoint = join(dir, 'run.jsonl')
+    await qaRun({ dir, checkpoint, overrides: { seed: 7 } })
+
+    const second = await qaRun({ dir, checkpoint, overrides: { seed: 8 } })
+    expect(second.metrics.qa.resumed_questions).toBe(0)
+    expect(second.metrics.qa.calls).toBe(4 * IDENTITY_READERS.length)
+    expect(second.notes.some((note) => note.includes('seed: 8 vs 7'))).toBe(true)
+  }, 120_000)
 })
 
 interface MabSuiteMetrics {
