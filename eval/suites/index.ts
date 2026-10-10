@@ -6,6 +6,7 @@ import { runAbSuite } from './ab.js'
 import { runBudgetSuite } from './budget.js'
 import { runContinuitySuite } from './continuity.js'
 import { runContradictionSuite } from './contradiction.js'
+import { runFunnelSuite } from './funnel.js'
 import { runLongMemEvalSuite } from './longmemeval.js'
 import { runLocomoSuite } from './locomo.js'
 import { runMemoryAgentBenchSuite } from './memoryagentbench.js'
@@ -25,6 +26,7 @@ export const SUITES: SuiteEntry[] = [
   { name: 'budget', run: runBudgetSuite },
   { name: 'ab', run: runAbSuite },
   { name: 'state', run: runStateSuite },
+  { name: 'funnel', run: runFunnelSuite },
   { name: 'continuity', run: runContinuitySuite },
   { name: 'longmemeval', run: runLongMemEvalSuite },
   { name: 'locomo', run: runLocomoSuite },

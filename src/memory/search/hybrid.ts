@@ -17,6 +17,7 @@ import {
   rerankBlendAlpha,
   RERANK_NORM_NEUTRAL,
   resolveAccessSignalMode,
+  resolveRecencyWeightScale,
   identChannelEnabled,
   entityChannelEnabled,
   type SignalKey,
@@ -171,13 +172,14 @@ export async function hybridSearch(
   const byCandidateOrder = (a: { id: string }, b: { id: string }): number =>
     (candidateOrder.get(a.id) ?? 0) - (candidateOrder.get(b.id) ?? 0)
 
+  const recencyWeightScale = resolveRecencyWeightScale()
   const results: SearchResult[] = [...candidates.values()].map(({ lex, vec, memory }) => {
     const recency = ebbinghaus(memory, now)
     // 100 accesses saturates to 1.0; log-scale prevents single hot memories from dominating
     const access = Math.min(Math.log(memory.access_count + 1) / Math.log(100), 1.0)
     const contribFts = w.fts * lex
     const contribVec = w.vec * vec
-    const contribRecency = w.recency * recency
+    const contribRecency = w.recency * recency * recencyWeightScale
     const contribAccess = w.access * access
     const contribImportance = w.importance * memory.importance
     if (signalBreakdown) {

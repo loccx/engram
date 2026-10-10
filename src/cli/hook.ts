@@ -35,11 +35,12 @@ function readStdin(timeoutMs: number): Promise<string> {
 export function registerHookCommands(program: Command): void {
   program
     .command('hook <event>')
-    .description(`Host hook entry point (${HOOK_EVENTS.join(', ')}); reads the host payload on stdin`)
+    .description(`Host hook entry point (${HOOK_EVENTS.join(', ')}); reads the host payload on stdin or --payload`)
     .option('--host <host>', 'output format for this host (claude-code, or omit for plain text)')
-    .action(async (event: string, opts: { host?: string }) => {
+    .option('--payload <json>', 'host payload as a json argument, for hosts that cannot pipe stdin')
+    .action(async (event: string, opts: { host?: string; payload?: string }) => {
       try {
-        const stdin = await readStdin(HOOK_TIMEOUT_MS)
+        const stdin = opts.payload ?? (await readStdin(HOOK_TIMEOUT_MS))
         const out = await runHookProcess(event, { host: opts.host, stdin })
         if (out) process.stdout.write(`${out}\n`)
       } catch {

@@ -5,9 +5,11 @@ import { HOOK_EVENTS } from '../delivery/hook.js'
 import {
   applyPlan,
   defaultContext,
+  detectHosts,
   hookCommand,
   mcpServerEntry,
   planSetup,
+  probeHosts,
   type ApplyResult,
   type PlanOp,
   type SetupContext,
@@ -62,24 +64,84 @@ export function renderPlan(plan: SetupPlan, applied: ApplyResult[] | null): stri
 }
 
 export function renderAgents(): string {
-  const lines = ['engram setup <agent> [--apply] [--uninstall]', '']
+  const lines = ['engram setup [agent] [--apply] [--uninstall]', '']
   for (const agent of AGENTS) lines.push(`  ${agent.name.padEnd(12)} ${agent.summary}`)
   lines.push(
     '',
+    'With no agent, setup probes this machine for these hosts and wires every one it finds.',
     'Nothing is written without --apply; a dry run prints the exact lines that would change.',
     'Other hosts: `engram setup print <agent>` prints the config to paste by hand.'
   )
   return `${lines.join('\n')}\n`
 }
 
+/** the empty-detection report: every path that was probed, so the answer is checkable */
+export function renderNoHosts(ctx: SetupContext): string {
+  const lines = ['no agent hosts detected', '']
+  for (const probe of probeHosts(ctx)) lines.push(`  ${probe.agent.name.padEnd(12)} ${probe.path}`)
+  lines.push(
+    '',
+    'nothing was written. those are the paths setup probes; a host installed somewhere else is',
+    'wired by naming it: `engram setup <agent>`, listed by `engram setup --list`.'
+  )
+  return `${lines.join('\n')}\n`
+}
+
+interface SetupOptions {
+  apply?: boolean
+  uninstall?: boolean
+  json?: boolean
+  list?: boolean
+}
+
+interface HostRun {
+  plan: SetupPlan
+  applied: ApplyResult[] | null
+  error: string | null
+}
+
+/** wire every host found on this machine: each is planned and applied on its own, so one
+ *  host that is refused or cannot be written never stops the rest */
+function runDetected(ctx: SetupContext, opts: SetupOptions): void {
+  const hosts = detectHosts(ctx)
+  if (hosts.length === 0) {
+    process.stdout.write(opts.json === true ? '[]\n' : renderNoHosts(ctx))
+    return
+  }
+
+  const runs: HostRun[] = hosts.map((host) => {
+    const plan = planSetup(host.agent, ctx, { uninstall: opts.uninstall === true })
+    if (opts.apply !== true) return { plan, applied: null, error: null }
+    try {
+      return { plan, applied: applyPlan(plan), error: null }
+    } catch (cause) {
+      return { plan, applied: null, error: cause instanceof Error ? cause.message : String(cause) }
+    }
+  })
+
+  if (opts.json === true) {
+    const payload = runs.map((run) => ({ plan: run.plan, applied: opts.apply === true, error: run.error }))
+    process.stdout.write(`${JSON.stringify(payload, null, 2)}\n`)
+  } else {
+    const blocks = runs.map((run) =>
+      run.error ? `${renderPlan(run.plan, null)}failed: ${run.error}\n` : renderPlan(run.plan, run.applied)
+    )
+    process.stdout.write(`${hosts.length} host${hosts.length === 1 ? '' : 's'} detected\n\n${blocks.join('\n')}`)
+  }
+
+  if (runs.some((run) => run.error !== null || run.plan.ops.some((op) => op.status === 'refused'))) {
+    process.exitCode = 1
+  }
+}
+
 export function renderSnippets(agent: string, ctx: SetupContext): string {
   const entry = findAgent(agent)
-  const mcp = mcpServerEntry(ctx)
+  const mcp = { ...mcpServerEntry(ctx), ...(entry?.mcp?.entry ?? {}) }
   const json = JSON.stringify({ mcpServers: { engram: mcp } }, null, 2)
   const toml = ['[mcp_servers.engram]', `command = "${mcp.command}"`, `args = [${mcp.args.map((a) => `"${a}"`).join(', ')}]`].join('\n')
 
   const lines = entry ? [`${entry.name} — ${entry.summary}`] : [`${agent} — no registry entry; paste whichever block this host reads`]
-  lines.push('', 'MCP server, JSON hosts (claude code, cursor, most mcp.json readers):', json)
+  lines.push('', 'MCP server, JSON hosts (claude code, cursor, pi, most mcp.json readers):', json)
   lines.push('', 'MCP server, TOML hosts (codex):', toml)
   lines.push(
     '',
@@ -98,15 +160,23 @@ export function renderSnippets(agent: string, ctx: SetupContext): string {
 export function registerSetupCommands(program: Command): void {
   const setup = program
     .command('setup [agent]')
-    .description('Wire engram into an agent (dry run unless --apply)')
+    .description('Wire engram into an agent, or into every host found on this machine (dry run unless --apply)')
     .option('--apply', 'write the planned changes')
     .option('--uninstall', 'remove only what setup added')
     .option('--json', 'print the plan as json')
-    .action((agent: string | undefined, opts: { apply?: boolean; uninstall?: boolean; json?: boolean }) => {
-      if (!agent) {
+    .option('--list', 'list the agents setup knows, without probing or writing')
+    .action((agent: string | undefined, opts: SetupOptions) => {
+      if (opts.list === true) {
         process.stdout.write(renderAgents())
         return
       }
+
+      const ctx = defaultContext()
+      if (!agent) {
+        runDetected(ctx, opts)
+        return
+      }
+
       const entry = findAgent(agent)
       if (!entry) {
         process.stderr.write(`unknown agent: ${agent}. Known: ${AGENTS.map((a) => a.name).join(', ')}\n`)
@@ -114,7 +184,6 @@ export function registerSetupCommands(program: Command): void {
         return
       }
 
-      const ctx = defaultContext()
       const plan = planSetup(entry, ctx, { uninstall: opts.uninstall === true })
       if (opts.json) {
         process.stdout.write(`${JSON.stringify({ plan, applied: opts.apply === true }, null, 2)}\n`)

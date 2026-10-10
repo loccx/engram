@@ -87,6 +87,7 @@ import {
   authorizeNamespace,
   coveredAncestors,
   currentCaller,
+  currentNow,
   currentTool,
   derivedVisible,
   holdsVerb,
@@ -187,6 +188,12 @@ export interface RequestContext {
   urlNamespace?: string
   /** the credential the request arrived with; absent is the local owner */
   caller?: CallerScope
+  /**
+   * pin the clock that derived values are stamped from, so a caller can get a
+   * reproducible reply. absent in production, where every derived value reads the
+   * real wall clock exactly as it did before this field existed.
+   */
+  now?: number
 }
 
 /** a store-wide tool acts on every namespace, so no grant can cover it */
@@ -421,7 +428,7 @@ function readableMutationMemory(db: import('better-sqlite3').Database, store: Me
     const namespace = trimNamespace(row.namespace)
     auditCrossOwnerRead(db, { tool: currentTool(), namespace, ids: [id], channel: 'by-id' })
     const scope = currentCaller().localOwner ? {} : { namespace_subtree: namespace }
-    return enrichMemories(db, [memory], Date.now(), scope)[0] ?? null
+    return enrichMemories(db, [memory], currentNow(), scope)[0] ?? null
   }).deferred()
 }
 
@@ -525,8 +532,11 @@ export async function handleTool(
   ctx: RequestContext = {}
 ): Promise<ToolResult> {
   // every read below runs inside this scope, so a query that builds the shared namespace
-  // clause inherits the caller's visibility predicate without being handed the caller
-  return withRequest(ctx.caller ?? currentCaller(), name, () => runTool(name, args, ctx))
+  // clause inherits the caller's visibility predicate without being handed the caller.
+  // the clock rides the same scope so an injected one reaches every derived value.
+  return withRequest(ctx.caller ?? currentCaller(), name, () => runTool(name, args, ctx), {
+    now: ctx.now,
+  })
 }
 
 async function runTool(
@@ -778,7 +788,7 @@ async function runTool(
           const packed = packWithinBudget({
             budget_chars: budgetChars,
             digest: null,
-            memories: enrichSearchResults(db, results, breakdown, Date.now(), { project_path }),
+            memories: enrichSearchResults(db, results, breakdown, currentNow(), { project_path }),
             topics: [],
           })
           response.results = packed.memories
@@ -787,7 +797,7 @@ async function runTool(
           response.truncated = packed.truncated
           budgetAccounting = asBudgetAccounting(packed)
         } else {
-          response.results = enrichSearchResults(db, results, breakdown, Date.now(), { project_path })
+          response.results = enrichSearchResults(db, results, breakdown, currentNow(), { project_path })
         }
 
         // cold rows in the served set are faults: the caller reached into the archive.
@@ -936,7 +946,7 @@ async function runTool(
             }
           }
 
-          const enrichedResults = enrichSearchResults(db, results, breakdown, Date.now(), searchOptions)
+          const enrichedResults = enrichSearchResults(db, results, breakdown, currentNow(), searchOptions)
           // the same packer as recall_context (digest → memories → topics), so a
           // small budget starves nothing silently; without budget_chars the shape is
           // unchanged
@@ -1131,7 +1141,7 @@ async function runTool(
           ids: results.map((r) => r.id),
           channel: 'entity',
         })
-        return ok({ namespace: project_path, results: enrichMemories(db, results, Date.now(), { project_path }) })
+        return ok({ namespace: project_path, results: enrichMemories(db, results, currentNow(), { project_path }) })
       }
 
       case 'get_related': {
@@ -1152,13 +1162,13 @@ async function runTool(
         const walkScope = currentCaller().localOwner
           ? {}
           : { namespace_subtree: trimNamespace(memory.namespace ?? memory.project_path) }
-        const [enrichedMemory] = enrichMemories(db, [memory], Date.now(), walkScope)
+        const [enrichedMemory] = enrichMemories(db, [memory], currentNow(), walkScope)
         if (depth <= 1) {
           const related = store.getLinked(memory_id, limit, { include_superseded, ...walkScope })
           metrics.recordRelated(related, memory.project_path)
           return ok({
             memory: enrichedMemory,
-            related: enrichMemories(db, related, Date.now(), walkScope).map(
+            related: enrichMemories(db, related, currentNow(), walkScope).map(
               (m, i) => ({ ...m, similarity: related[i].similarity, link_type: related[i].link_type })
             ),
           })
@@ -1167,7 +1177,7 @@ async function runTool(
         metrics.recordRelated(related, memory.project_path)
         return ok({
           memory: enrichedMemory,
-          related: enrichMemories(db, related, Date.now(), walkScope).map(
+          related: enrichMemories(db, related, currentNow(), walkScope).map(
             (m, i) => ({
               ...m,
               similarity: related[i].similarity,
@@ -1278,7 +1288,7 @@ async function runTool(
           ids: memories.map((m) => m.id),
           channel: 'list',
         })
-        return ok({ namespace: project_path, memories: enrichMemories(db, memories, Date.now(), { project_path }) })
+        return ok({ namespace: project_path, memories: enrichMemories(db, memories, currentNow(), { project_path }) })
       }
 
       case 'forget_memory': {
@@ -1329,7 +1339,7 @@ async function runTool(
         // revision. search paths deliberately do not stamp: that would feed the
         // ranker its own output.
         if (recordsAccessOnExplicitFetch()) store.recordAccess(memory.id)
-        const [enriched] = enrichMemories(db, [memory], Date.now(), currentCaller().localOwner
+        const [enriched] = enrichMemories(db, [memory], currentNow(), currentCaller().localOwner
           ? {} : { namespace_subtree: trimNamespace(memory.namespace ?? memory.project_path) })
         // the evidence this fact was distilled from, when a distillation path cited it
         return ok({ ...enriched, episodes: citedEpisodes(db, memory.id) })
@@ -1498,7 +1508,7 @@ async function runTool(
           id: history.id,
           // each version carries the episodes it cites, so a revision chain shows
           // where every step of it came from
-          versions: enrichMemories(db, history.versions, Date.now(), historyScope).map((version) => ({
+          versions: enrichMemories(db, history.versions, currentNow(), historyScope).map((version) => ({
             ...version,
             episodes: citedEpisodes(db, version.id),
           })),

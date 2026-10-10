@@ -1,0 +1,82 @@
+name: ci
+
+# The repository had no CI at all, so a change that broke the suite could be
+# committed and merged unnoticed. Two merges during the decay work left main red
+# on the comment-style gate before anyone ran the suite by hand.
+#
+# The eval datasets are gitignored and absent here, so the suites that need them
+# refuse rather than run. The unit and harness tests do not need them.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ['20', '24']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # prepare runs the build, and it needs the source present, which is why
+      # the whole tree is checked out above rather than a manifest-only layer
+      - run: npm ci
+
+      - name: typecheck
+        run: |
+          npx tsc -p tsconfig.json --noEmit
+          npx tsc -p eval/tsconfig.json --noEmit
+
+      - name: test
+        run: npx vitest run
+
+  # the daemon refuses to bind non-loopback without a bearer token, so the image
+  # is exercised with one and the refusal is checked without one
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build
+        run: docker build -t engram:ci .
+
+      - name: container starts and authenticates
+        run: |
+          set -euo pipefail
+          TOKEN=ci-throwaway-token
+          docker run -d --name engram-ci -p 18888:8888 \
+            -v engram-ci-data:/data \
+            -e ENGRAM_ALLOW_NONLOCAL=1 \
+            -e ENGRAM_AUTH_TOKEN=$TOKEN \
+            engram:ci
+
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $TOKEN" http://127.0.0.1:18888/health || true)
+            [ "$code" = "200" ] && break
+            sleep 2
+          done
+          [ "$code" = "200" ] || { docker logs engram-ci; exit 1; }
+
+          anon=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:18888/health)
+          [ "$anon" = "401" ] || { echo "unauthenticated health returned $anon, expected 401"; exit 1; }
+
+          docker rm -f engram-ci
+
+      - name: refuses to start without a token
+        run: |
+          set -euo pipefail
+          if docker run --rm -e ENGRAM_ALLOW_NONLOCAL=1 engram:ci; then
+            echo "expected a non-zero exit on a non-loopback bind without a token"
+            exit 1
+          fi

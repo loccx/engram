@@ -1,6 +1,7 @@
 import type Database from 'better-sqlite3'
 import type { Memory, MemoryCluster, SearchResult } from './types.js'
 import { SUPERSEDES_FILTER_THRESHOLD } from '../contradictions/supersession.js'
+import { currentNow } from './access.js'
 import { namespaceFilter, type NamespaceFilterOptions } from './search/scope.js'
 
 /** edge counts remain present-state metadata, restricted to readable query endpoints */
@@ -79,7 +80,7 @@ export function summarizeClusters(
  */
 export function compositeScore(
   memory: Pick<Memory, 'importance' | 'access_count' | 'last_accessed' | 'created_at'>,
-  now: number = Date.now()
+  now: number = currentNow()
 ): number {
   const importance = memory.importance
   const accessNorm = Math.min(Math.log(memory.access_count + 1) / Math.log(100), 1.0)
@@ -94,7 +95,7 @@ export function computeTier(
   memory: Pick<Memory, 'importance' | 'access_count' | 'last_accessed' | 'created_at'> & {
     pinned?: boolean | number
   },
-  now: number = Date.now()
+  now: number = currentNow()
 ): Tier {
   if (memory.pinned) return 'pinned'
   const score = compositeScore(memory, now)
@@ -212,7 +213,7 @@ export function fetchEnrichmentColumns(
 export function enrichMemories(
   db: Database.Database,
   memories: Memory[],
-  now: number = Date.now(),
+  now: number = currentNow(),
   options: EnrichmentScope = {}
 ): EnrichedMemory[] {
   const ids = memories.map((m) => m.id)
@@ -240,7 +241,7 @@ export function enrichSearchResults(
   db: Database.Database,
   results: SearchResult[],
   signalBreakdown: Map<string, Record<RecallSignal, number>>,
-  now: number = Date.now(),
+  now: number = currentNow(),
   options: EnrichmentScope = {}
 ): EnrichedSearchResult[] {
   const baseMemories: Memory[] = results.map((r) => {

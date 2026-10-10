@@ -10,6 +10,8 @@ import {
   bm25Relevance,
   classifyQuery,
   distanceRelevance,
+  resolveDecayScaleDays,
+  resolveRecencyWeightScale,
   WEIGHT_PROFILES,
   type SignalKey,
 } from './scoring.js'
@@ -81,10 +83,14 @@ export interface EpisodeSearchResult {
 let knnRowidFilterSupported: boolean | null = null
 
 /** the ebbinghaus curve of a memory with the default importance and no accesses */
-export function episodeRecency(occurredAt: number | null, now: number): number {
+export function episodeRecency(
+  occurredAt: number | null,
+  now: number,
+  scaleDays: number = resolveDecayScaleDays()
+): number {
   const at = occurredAt ?? now
   const strength = Math.max(EPISODE_IMPORTANCE + 0.3 * Math.log(EPISODE_ACCESS_COUNT + 1), 0.1)
-  return Math.exp(-((now - at) / DAY_MS) / (30 * strength))
+  return Math.exp(-((now - at) / DAY_MS) / (scaleDays * strength))
 }
 
 function expiredClause(options: EpisodeSearchOptions, alias: string, now: number): {
@@ -455,13 +461,14 @@ export async function searchEpisodes(
   const candidateOrder = new Map<string, number>()
   for (const id of candidates.keys()) candidateOrder.set(id, candidateOrder.size)
 
+  const recencyWeightScale = resolveRecencyWeightScale()
   const out: EpisodeHit[] = [...candidates.values()].map(({ lex, vec, episode, bm25, distance }) => {
     const recency = episodeRecency(episode.occurred_at, now)
     const access = Math.min(Math.log(EPISODE_ACCESS_COUNT + 1) / Math.log(100), 1)
     const signals: Record<SignalKey, number> = {
       fts: weights.fts * lex,
       vec: weights.vec * vec,
-      recency: weights.recency * recency,
+      recency: weights.recency * recency * recencyWeightScale,
       access: weights.access * access,
       importance: weights.importance * EPISODE_IMPORTANCE,
       reranker: 0,

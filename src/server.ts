@@ -8,6 +8,14 @@ import { getDatabase } from './db/init.js'
 import { cueHits } from './delivery/cue.js'
 import { rosterHits } from './delivery/roster.js'
 import {
+  INTEGRATION_CAPABILITIES,
+  INTEGRATION_HOST,
+  INTEGRATION_PROTOCOL_VERSION,
+  integrationStatus,
+  recordIntegrationReceipt,
+  writeIntegrationPreferences,
+} from './delivery/integration.js'
+import {
   POST_COMPACT_BRIEF_CHARS,
   SUBAGENT_BRIEF_CHARS,
   checkpointOpenTasks,
@@ -20,7 +28,7 @@ import { HANDOFF_AUDIENCES, type HandoffAudience } from './tasks/types.js'
 import { embeddingState } from './embeddings/pipeline.js'
 import { getMetricsTracker } from './metrics/tracker.js'
 import { logger } from './utils/logger.js'
-import { ENGRAM_VERSION } from './version.js'
+import { ENGRAM_BUILD_SHA, ENGRAM_VERSION } from './version.js'
 
 const startTime = Date.now()
 
@@ -138,6 +146,7 @@ export function createServer(options: ServerOptions = {}): Hono {
         memoryCount: row.count,
         sessionCount: sessionRow.count,
         version: ENGRAM_VERSION,
+        build_sha: ENGRAM_BUILD_SHA,
         embeddings: {
           model: embeddings.model,
           ready: embeddings.ready,
@@ -325,6 +334,132 @@ export function createServer(options: ServerOptions = {}): Hono {
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e)
       logger.error({ error: message, namespace }, 'delivery session-end failed')
+      return c.json({ error: message }, 500)
+    }
+  })
+
+  // the host-facing automatic-memory protocol: capabilities once, then status and
+  // settings per repository, with receipts the host reports back. loopback callers are
+  // the local owner; once a principal exists the same bearer gate as every route applies.
+  app.get('/delivery/integration/capabilities', (c) =>
+    c.json({
+      protocol_version: INTEGRATION_PROTOCOL_VERSION,
+      capabilities: [...INTEGRATION_CAPABILITIES],
+      hosts: [INTEGRATION_HOST],
+    })
+  )
+
+  app.post('/delivery/integration/status', async (c) => {
+    const body = await deliveryBody(c.req)
+    const namespace = body ? stringField(body, 'namespace') : ''
+    const host = body ? stringField(body, 'host') : ''
+    if (!namespace || host !== INTEGRATION_HOST)
+      return c.json({ error: `namespace and host ${INTEGRATION_HOST} are required` }, 400)
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'read')
+    if (refusal) return c.json({ error: refusal }, 403)
+    const canConfigure = refuseNamespace(caller, namespace, 'write') === null
+    try {
+      return c.json(
+        withRequest(caller, 'delivery/integration/status', () =>
+          integrationStatus(getDatabase().db, namespace, canConfigure, host)
+        )
+      )
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      logger.error({ error: message, namespace }, 'delivery integration status failed')
+      return c.json({ error: message }, 500)
+    }
+  })
+
+  app.post('/delivery/integration/settings', async (c) => {
+    const body = await deliveryBody(c.req)
+    const namespace = body ? stringField(body, 'namespace') : ''
+    const host = body ? stringField(body, 'host') : ''
+    const recall = body?.recall
+    const capture = body?.capture
+    const expected = numberField(body, 'expected_revision')
+    if (
+      !namespace ||
+      host !== INTEGRATION_HOST ||
+      typeof recall !== 'boolean' ||
+      typeof capture !== 'boolean' ||
+      expected === undefined ||
+      !Number.isSafeInteger(expected) ||
+      expected < 0
+    )
+      return c.json(
+        {
+          error: `namespace, host ${INTEGRATION_HOST}, boolean recall/capture and integer expected_revision are required`,
+        },
+        400
+      )
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'write')
+    if (refusal) return c.json({ error: refusal }, 403)
+    try {
+      const written = withRequest(caller, 'delivery/integration/settings', () =>
+        writeIntegrationPreferences(
+          getDatabase().db,
+          namespace,
+          host,
+          { recall, capture },
+          expected,
+          Date.now()
+        )
+      )
+      if (!written.ok)
+        return c.json({ error: 'revision conflict', preferences: written.preferences }, 409)
+      return c.json(integrationStatus(getDatabase().db, namespace, true, host))
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      logger.error({ error: message, namespace }, 'delivery integration settings failed')
+      return c.json({ error: message }, 500)
+    }
+  })
+
+  app.post('/delivery/integration/receipt', async (c) => {
+    const body = await deliveryBody(c.req)
+    const namespace = body ? stringField(body, 'namespace') : ''
+    const host = body ? stringField(body, 'host') : ''
+    const kind = body ? stringField(body, 'kind') : ''
+    const at = numberField(body, 'at')
+    const status = body && typeof body.status === 'string' ? body.status.trim() : ''
+    if (
+      !namespace ||
+      host !== INTEGRATION_HOST ||
+      (kind !== 'recall' && kind !== 'capture') ||
+      (at !== undefined && (!Number.isSafeInteger(at) || at < 0)) ||
+      status.length > 64
+    )
+      return c.json(
+        {
+          error: `namespace, host ${INTEGRATION_HOST}, kind recall|capture and an optional integer at are required`
+        },
+        400
+      )
+    const caller = callerOf(c.req.header('authorization'))
+    if (!caller) return c.json({ error: 'unauthorized' }, 401)
+    const refusal = refuseNamespace(caller, namespace, 'write')
+    if (refusal) return c.json({ error: refusal }, 403)
+    try {
+      return c.json({
+        receipt: withRequest(caller, 'delivery/integration/receipt', () =>
+          recordIntegrationReceipt(
+            getDatabase().db,
+            namespace,
+            host,
+            kind,
+            at ?? Date.now(),
+            status || null
+          )
+        ),
+      })
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e)
+      logger.error({ error: message, namespace }, 'delivery integration receipt failed')
       return c.json({ error: message }, 500)
     }
   })

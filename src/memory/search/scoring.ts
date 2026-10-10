@@ -1,14 +1,50 @@
 import type { Memory } from '../types.js'
 
+// the decay scale is policy, like the access signal: the curve's stability constant
+// is a property of the store's expected lifetime, not of the formula, so it is
+// overridable rather than frozen. 365 days suits a durable store: a memory's age
+// keeps some weight for months instead of collapsing to nothing within two weeks.
+
+export const DECAY_SCALE_ENV = 'ENGRAM_DECAY_SCALE_DAYS'
+export const DEFAULT_DECAY_SCALE_DAYS = 365
+
+/** a non-numeric, non-positive or absent override falls back to the default */
+export function resolveDecayScaleDays(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[DECAY_SCALE_ENV]?.trim()
+  if (raw === undefined || raw === '') return DEFAULT_DECAY_SCALE_DAYS
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_DECAY_SCALE_DAYS
+  return parsed
+}
+
+// the recency term's share is attenuated where it is contributed, so the profile
+// keeps its sum-to-1.0 invariant
+
+export const RECENCY_WEIGHT_ENV = 'ENGRAM_RECENCY_WEIGHT'
+export const DEFAULT_RECENCY_WEIGHT_SCALE = 1
+
+/** a non-numeric, negative or absent override falls back to the default */
+export function resolveRecencyWeightScale(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env[RECENCY_WEIGHT_ENV]?.trim()
+  if (raw === undefined || raw === '') return DEFAULT_RECENCY_WEIGHT_SCALE
+  const parsed = Number(raw)
+  if (!Number.isFinite(parsed) || parsed < 0) return DEFAULT_RECENCY_WEIGHT_SCALE
+  return parsed
+}
+
 /**
  * ebbinghaus forgetting curve R = exp(-t / S), with S scaled by importance and
  * access: repeated use slows decay (spacing effect)
  */
-export function ebbinghaus(memory: Memory, now: number): number {
+export function ebbinghaus(
+  memory: Memory,
+  now: number,
+  scaleDays: number = resolveDecayScaleDays()
+): number {
   const t = now - (memory.last_accessed ?? memory.created_at)
   const tDays = t / (24 * 60 * 60 * 1000)
   const strength = memory.importance + 0.3 * Math.log(memory.access_count + 1)
-  const S = 30 * Math.max(strength, 0.1)
+  const S = scaleDays * Math.max(strength, 0.1)
   return Math.exp(-tDays / S)
 }
 

@@ -1,0 +1,11 @@
+# keep the build context small: node_modules is reinstalled in the image, and the
+# eval datasets are hundreds of megabytes of benchmark corpora that the daemon
+# never reads at runtime
+node_modules
+dist
+.git
+.gitignore
+eval/datasets
+eval/reports
+*.log
+.DS_Store

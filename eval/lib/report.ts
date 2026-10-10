@@ -33,6 +33,8 @@ export interface HeaderInput {
   vectorsAvailable: boolean
   vectorMode: VectorMode
   now: number
+  /** overrides the rendered scoring-clock line when the clock moves per record */
+  nowNote?: string
   tokenizer: TokenizerInfo
   featureFlags: Record<string, string>
   git?: GitInfo
@@ -59,6 +61,7 @@ export function buildHeader(input: HeaderInput): RunHeader {
     tokenizer: input.tokenizer.name,
     now: input.now,
     nowIso: new Date(input.now).toISOString(),
+    ...(input.nowNote === undefined ? {} : { nowNote: input.nowNote }),
     engramVersion: engramVersion(),
     nodeVersion: process.version,
     featureFlags: input.featureFlags,
@@ -115,7 +118,7 @@ export function renderHeaderBlock(header: RunHeader, extras: Record<string, stri
     ['vectorsAvailable', String(header.vectorsAvailable)],
     ['vector mode', header.vectorMode],
     ['tokenizer', header.tokenizer],
-    ['scoring clock', `${header.now} (${header.nowIso})`],
+    ['scoring clock', header.nowNote ?? `${header.now} (${header.nowIso})`],
     ['engram version', header.engramVersion],
     ['node', header.nodeVersion],
     [

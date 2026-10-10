@@ -7,7 +7,7 @@
 // committed; a missing file is a setup refusal with the fetch command, not an empty run.
 import { existsSync, readFileSync } from 'node:fs'
 import { DatasetMissingError } from '../lib/errors.js'
-import { EvalHarness } from '../lib/harness.js'
+import { CORPUS_EPOCH, EvalHarness } from '../lib/harness.js'
 import { sha256File } from '../lib/json-stream.js'
 import { corpusHash, resolveTokenizer, summarizeLatencies } from '../lib/metrics.js'
 import { markdownTable, renderTimings } from '../lib/report.js'
@@ -314,6 +314,9 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
   const sampleSummaries: Array<{ sample_id: string; questions: number; turns: number }> = []
   let indexedTurns = 0
   let indexedChars = 0
+  let clockFirst: number | null = null
+  let clockMin = Number.POSITIVE_INFINITY
+  let clockMax = 0
 
   try {
     systems = await createSystems(systemSpecs, { harness, topK: LOCOMO_READER_TOP_K, seed: ctx.seed })
@@ -364,6 +367,23 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
           questions: built.queries.length,
           turns: built.memories.length,
         })
+
+        // measure the shipped ranking, not a degenerate one: the turns carry the
+        // conversation's real session dates, so the fixed epoch leaves every one of
+        // them ~590 days old and exp(-age / S) collapses to ~1e-17, small enough to
+        // decide only an exact tie. ask each conversation's questions at the moment
+        // its last session was written, so the age signal stays live and graduated.
+        // set after seedCorpus, so the rows are stamped exactly as before and only
+        // the clock the reads use changes.
+        const newest = built.memories.reduce(
+          (max, memory) => Math.max(max, memory.created_at),
+          Number.NEGATIVE_INFINITY
+        )
+        const sampleClock = Number.isFinite(newest) ? newest : CORPUS_EPOCH
+        harness.setScoringClock(sampleClock)
+        if (clockFirst === null) clockFirst = sampleClock
+        if (sampleClock < clockMin) clockMin = sampleClock
+        if (sampleClock > clockMax) clockMax = sampleClock
 
         const scorable = built.queries.filter((query) => query.target_ids.length > 0)
         for (const [configName, patch] of ctx.configs) {
@@ -573,7 +593,16 @@ export async function runLocomoSuite(ctx: SuiteContext): Promise<SuiteOutput> {
           corpusHash: corpusHashValue,
           vectorsAvailable: harness.vectorsAvailable,
           vectorMode: harness.vectorMode,
-          now: harness.now,
+          // the first sample's clock stands in for the run, and the note states the
+          // regime so no reader mistakes it for a single fixed epoch
+          now: clockFirst ?? harness.now,
+          ...(clockFirst === null
+            ? {}
+            : {
+                nowNote:
+                  `per-conversation from its last session date: ${new Date(clockMin).toISOString()} .. ` +
+                  `${new Date(clockMax).toISOString()} (${samples.length} conversation(s))`,
+              }),
           tokenizer,
           featureFlags: {},
         }),

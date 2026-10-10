@@ -657,12 +657,17 @@ export function validateAdapterConfig(raw: unknown, source: string): McpAdapterC
     placeholdersIn(env, ['tmp'], 'transport.env')
     parsedTransport = { kind: 'stdio', command, args, env, cwd: transport.cwd as string | undefined }
   } else if (transport.kind === 'http') {
+    const headers = isRecord(transport.headers)
+      ? Object.fromEntries(Object.entries(transport.headers).map(([k, v]) => [k, String(v)]))
+      : undefined
+    // a server that resolves its namespace from the request identity instead of a
+    // tool argument can only be isolated per namespace through a header, so headers
+    // carry ${namespace} the same way write and search args do.
+    if (headers) placeholdersIn(headers, ['namespace', 'tmp'], 'transport.headers')
     parsedTransport = {
       kind: 'http',
       url: requiredString(transport.url, 'transport.url'),
-      headers: isRecord(transport.headers)
-        ? Object.fromEntries(Object.entries(transport.headers).map(([k, v]) => [k, String(v)]))
-        : undefined,
+      headers,
     }
   } else {
     throw new EvalSetupError(
@@ -820,6 +825,25 @@ function pluckOne(payload: unknown, path: string): unknown {
   return pluckValues(payload, path)[0]
 }
 
+/**
+ * a write reply the adapter cannot map back to a session: the server refused it
+ * (engram answers a refusal with `{status:'rejected', rule, reason}` and no id) or
+ * accepted it without one. either way the session is unscorable, so say so.
+ */
+function missingWriteIdError(tool: string, idPath: string, payload: unknown): EvalSetupError {
+  const parts = ['status', 'rule', 'reason', 'hint']
+    .map((key) => {
+      const value = pluckOne(payload, key)
+      return typeof value === 'string' && value !== '' ? `${key}=${value}` : null
+    })
+    .filter((part): part is string => part !== null)
+  return new EvalSetupError(
+    `mcp adapter: ${tool} replied without '${idPath}'` +
+      (parts.length > 0 ? ` (${parts.join('; ')})` : '') +
+      ' — the session cannot be mapped, so it would be silently unscorable'
+  )
+}
+
 function slug(text: string): string {
   return text.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-|-$/g, '').toLowerCase() || 'mcp'
 }
@@ -833,6 +857,16 @@ export interface CreateMcpSystemInput {
 export async function createMcpSystem(input: CreateMcpSystemInput): Promise<MemorySystem> {
   const { config, adapter, topK } = input
   const tmpDir = mkdtempSync(join(tmpdir(), `engram-eval-mcp-${slug(config.name)}-`))
+  // the wire re-reads this object on every request, so a header that names the
+  // namespace is resolved in place per namespace rather than once at startup.
+  // that holds as long as one namespace's calls are awaited before the next
+  // namespace's headers are set, which is how the suites drive a system (one
+  // question at a time, torn down before the next). before any namespace is
+  // known — the handshake — ${namespace} resolves to the empty string.
+  const headerTemplates = config.transport.kind === 'http' ? config.transport.headers : undefined
+  const liveHeaders = headerTemplates
+    ? (fillTemplates(headerTemplates, { namespace: '', tmp: tmpDir }) as Record<string, string>)
+    : undefined
   const wire: Wire =
     config.transport.kind === 'stdio'
       ? StdioWire.spawn({
@@ -841,7 +875,16 @@ export async function createMcpSystem(input: CreateMcpSystemInput): Promise<Memo
           cwd: config.transport.cwd,
           env: fillTemplates(config.transport.env ?? {}, { tmp: tmpDir }) as Record<string, string>,
         })
-      : new HttpWire({ url: config.transport.url, headers: config.transport.headers })
+      : new HttpWire({ url: config.transport.url, headers: liveHeaders })
+
+  /** resolve the templated headers for one namespace, in place on the live object */
+  const useNamespace = (ns: string): void => {
+    if (!headerTemplates || !liveHeaders) return
+    for (const [key, template] of Object.entries(headerTemplates)) {
+      const filled = fillTemplates(template, { namespace: ns, tmp: tmpDir })
+      liveHeaders[key] = typeof filled === 'string' ? filled : String(filled ?? '')
+    }
+  }
 
   const cleanup = async (): Promise<void> => {
     await wire.close()
@@ -905,6 +948,7 @@ export async function createMcpSystem(input: CreateMcpSystemInput): Promise<Memo
     adapter,
 
     async reset(ns) {
+      useNamespace(ns)
       refs.delete(ns)
       if (config.reset) {
         const args = fillTemplates(config.reset.args ?? {}, { namespace: ns, tmp: tmpDir })
@@ -913,6 +957,7 @@ export async function createMcpSystem(input: CreateMcpSystemInput): Promise<Memo
     },
 
     async ingest(ns, sessions) {
+      useNamespace(ns)
       const byId = refs.get(ns) ?? new Map<string, string>()
       refs.set(ns, byId)
       for (const session of sessions) {
@@ -920,11 +965,18 @@ export async function createMcpSystem(input: CreateMcpSystemInput): Promise<Memo
         const payload = await client.callTool(config.write.tool, args as Record<string, unknown>)
         writeCalls++
         const id = config.write.idPath ? pluckOne(payload, config.write.idPath) : undefined
-        if (typeof id === 'string' && id !== '') byId.set(id, session.id)
+        if (typeof id === 'string' && id !== '') {
+          byId.set(id, session.id)
+        } else if (config.write.idPath) {
+          // a configured idPath that resolves to nothing means this session can never be
+          // scored: fail loudly with the server's reason rather than dropping it
+          throw missingWriteIdError(config.write.tool, config.write.idPath, payload)
+        }
       }
     },
 
     async retrieve(ns, query, budgetChars) {
+      useNamespace(ns)
       const args = fillTemplates(config.search.args ?? {}, {
         namespace: ns,
         tmp: tmpDir,

@@ -9,7 +9,7 @@
 import { createReadStream, existsSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { DatasetMissingError, EvalSetupError } from '../lib/errors.js'
-import { EvalHarness } from '../lib/harness.js'
+import { CORPUS_EPOCH, EvalHarness } from '../lib/harness.js'
 import { sha256File } from '../lib/json-stream.js'
 import { corpusHash, resolveTokenizer, summarizeLatencies } from '../lib/metrics.js'
 import { markdownTable, renderTimings } from '../lib/report.js'
@@ -243,6 +243,9 @@ export async function runMemoryAgentBenchSuite(ctx: SuiteContext): Promise<Suite
   let indexedFacts = 0
   let indexedChars = 0
   let qaOutput: Awaited<ReturnType<typeof runBenchQa>> | null = null
+  let clockFirst: number | null = null
+  let clockMin = Number.POSITIVE_INFINITY
+  let clockMax = 0
 
   const harness = await EvalHarness.create({ seed: ctx.seed, vectors: ctx.vectors })
   try {
@@ -291,6 +294,22 @@ export async function runMemoryAgentBenchSuite(ctx: SuiteContext): Promise<Suite
         await harness.seedCorpus(corpus, { mode: 'raw', embed: harness.vectorsAvailable })
         indexedFacts += built.memories.length
         indexedChars += built.memories.reduce((sum, memory) => sum + memory.content.length, 0)
+
+        // the facts carry the pool's own time base, so the fixed epoch leaves them
+        // ~413 days old and exp(-age / S) collapses to ~1e-17. ask each pool's
+        // questions at the moment its last fact was written, so the age signal is
+        // live. note this base spaces a pool's facts one second apart, so the whole
+        // pool spans a few hours and the decay scale barely separates them; the note
+        // on the report says so rather than implying a graduated age.
+        const newest = built.memories.reduce(
+          (max, memory) => Math.max(max, memory.created_at),
+          Number.NEGATIVE_INFINITY
+        )
+        const poolClock = Number.isFinite(newest) ? newest : CORPUS_EPOCH
+        harness.setScoringClock(poolClock)
+        if (clockFirst === null) clockFirst = poolClock
+        if (poolClock < clockMin) clockMin = poolClock
+        if (poolClock > clockMax) clockMax = poolClock
         poolSummaries.push({
           source: row.source,
           facts: built.memories.length,
@@ -515,7 +534,19 @@ export async function runMemoryAgentBenchSuite(ctx: SuiteContext): Promise<Suite
           corpusHash: corpusHashValue,
           vectorsAvailable: harness.vectorsAvailable,
           vectorMode: harness.vectorMode,
-          now: harness.now,
+          // the first pool's clock stands in for the run, and the note states the
+          // regime. a pool's facts are one second apart, so the span is hours and
+          // the decay scale barely separates them -- say so rather than implying a
+          // graduated age signal.
+          now: clockFirst ?? harness.now,
+          ...(clockFirst === null
+            ? {}
+            : {
+                nowNote:
+                  `per-pool from its last fact: ${new Date(clockMin).toISOString()} .. ` +
+                  `${new Date(clockMax).toISOString()} (${selected.length} pool(s); a pool's facts ` +
+                  `are one second apart, so the span is hours, not weeks)`,
+              }),
           tokenizer,
           featureFlags: {},
         }),

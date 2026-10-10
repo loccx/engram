@@ -2,7 +2,7 @@ import type Database from 'better-sqlite3'
 import type { Memory, MemoryCluster } from '../types.js'
 import { notSupersededClause } from '../../contradictions/supersession.js'
 import { rowToMemory, type MemoryRow } from '../row.js'
-import { currentCaller, derivedVisible, holdsVerb, visibilityClause, type CallerScope } from '../access.js'
+import { currentCaller, currentNow, derivedVisible, holdsVerb, visibilityClause, type CallerScope } from '../access.js'
 import { namespaceFilter, temporalFilter } from './scope.js'
 
 interface ClusterRow {
@@ -55,7 +55,7 @@ export function getContext(
     caller?: CallerScope
   } = {}
 ): Memory[] {
-  const now = Date.now()
+  const now = currentNow()
   const thirtyDaysAgo = now - THIRTY_DAYS_MS
 
   // the caller rides as the visibility parameter, so the prepared statement stays reused

@@ -43,6 +43,11 @@ interface RequestScope {
   caller: CallerScope
   /** the tool being served, so a resolved namespace can be authorized for its verb */
   tool: string
+  // the clock this request's derived values are stamped from. absent in production,
+  // where currentNow() falls through to the real wall clock; a caller that needs a
+  // reproducible reply (a test, or the evaluation harness) pins it per request.
+  // request-scoped rather than a module global, so production cannot leave it set.
+  now?: number
 }
 
 const storage = new AsyncLocalStorage<RequestScope>()
@@ -56,8 +61,22 @@ export function currentTool(): string {
   return storage.getStore()?.tool ?? ''
 }
 
-export function withRequest<T>(caller: CallerScope | undefined, tool: string, fn: () => T): T {
-  return storage.run({ caller: caller ?? LOCAL_OWNER, tool }, fn)
+export function withRequest<T>(
+  caller: CallerScope | undefined,
+  tool: string,
+  fn: () => T,
+  options: { now?: number } = {}
+): T {
+  return storage.run({ caller: caller ?? LOCAL_OWNER, tool, now: options.now }, fn)
+}
+
+// the clock a derived value is stamped from: the request's injected one when
+// present, the real wall clock otherwise. use this instead of Date.now() anywhere
+// a served value is derived from the time, so a caller can make the reply
+// reproducible. not for a latency measurement: how long something took is
+// genuinely a wall-clock fact, and pinning it would report a fake duration.
+export function currentNow(): number {
+  return storage.getStore()?.now ?? Date.now()
 }
 
 export function withCaller<T>(caller: CallerScope | undefined, fn: () => T): T {

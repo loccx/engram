@@ -124,7 +124,7 @@ export class EvalHarness {
     readonly vectorMode: VectorMode,
     /** true when a complete model was cached before the run started */
     readonly modelCacheReady: boolean,
-    readonly now: number,
+    private clock: number,
     private readonly keepDir: boolean,
     /** one call per text, the vector a stored row must carry */
     readonly embedder: (text: string) => Promise<Float32Array | null>
@@ -194,6 +194,20 @@ export class EvalHarness {
     // restored on dispose, so a caller can make one harness after another.
     harness.restoreEnv = restore
     return harness
+  }
+
+  /** the scoring clock every read uses; `setScoringClock` moves it */
+  get now(): number {
+    return this.clock
+  }
+
+  /**
+   * move the scoring clock. a recency term is `exp(-age / S)`, so rows dated years
+   * before a fixed epoch land at ~1e-17 against relevance terms of order 1: the term
+   * can only decide an exact tie and the ranking quietly degrades to lexical-only.
+   */
+  setScoringClock(now: number): void {
+    this.clock = now
   }
 
   /** the seeded db id, undefined when it was never seeded */
@@ -601,9 +615,13 @@ export class EvalHarness {
     }
   }
 
-  /** the mcp read surface, smoke checks only (it uses Date.now) */
+  /**
+   * the mcp read surface, driven through the shipped handler with this harness's
+   * scoring clock pinned, so a reply that stamps a derived value (a tier, an age)
+   * is reproducible across runs instead of following the wall clock.
+   */
   async toolCall(name: string, args: Record<string, unknown>): Promise<Record<string, unknown>> {
-    return parseToolResult<Record<string, unknown>>(await handleTool(name, args))
+    return parseToolResult<Record<string, unknown>>(await handleTool(name, args, { now: this.now }))
   }
 
   stats(): HarnessStats {

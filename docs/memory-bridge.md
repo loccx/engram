@@ -155,6 +155,47 @@ publication. A host must inspect persisted outbox state and drain results, handl
 those cases, and never interpret a returned envelope as delivery success. This
 example's successful branch is not a retry loop or authorization UI.
 
+## Authoring a destination adapter
+
+A destination is one object implementing `DestinationAdapter` (see `src/bridge/types.ts`):
+`capabilities()`, `publish`, `retract`, `verifyVisibility`, `verifyAbsence`. It is bound to one
+`DestinationRef` at construction, and it must:
+
+- refuse an envelope whose `destination` is not the one it is bound to, and never acknowledge it;
+- treat the envelope as read-only;
+- return a receipt only for the exact bytes it accepted, with `destination` equal to the
+  envelope's and `payloadSha256` equal to the envelope's;
+- return the identical receipt when the same idempotency key is replayed, if it declares
+  `idempotentPublish` / `idempotentRetract`;
+- prove visibility and absence from bytes it reads back, never from the receipt it was handed;
+- return `unsupported` for an observation its capabilities declare false, and never claim
+  `visible` or `absent` without a matching publication.
+
+The shipped conformance kit checks those points without this repository's tests:
+
+```ts
+import { runDestinationConformance } from './src/bridge/index.js'
+import type { DestinationConformanceHarness } from './src/bridge/index.js'
+
+const results = await runDestinationConformance(async (): Promise<DestinationConformanceHarness> => {
+  // a fresh migrated coordinator and store, the adapter under test, a publish proposal for
+  // its bound destination, and the host's inert grant function
+  return { coordinator, store, adapter, proposal, grant }
+})
+// results: { name, status: 'passed' | 'failed' | 'skipped', detail }[]
+```
+
+Cases a destination declares inapplicable are reported `skipped`, so a read-only sink can
+still run the kit. Passing it is local evidence about the adapter's contract, not live
+destination durability, authorization or visibility.
+
+## Operability
+
+`engram bridge status [--json]` reports envelope counts, outbox counts by state, the age of
+the oldest unfinished export and the last recorded error. It reads the bridge tables and
+writes nothing; delivery, visibility and absence are still only proven by the destination.
+
+
 ## Trust boundaries: deny by default
 
 - **Requester/source:** `BridgeRequester.principalId` comes from trusted host

@@ -26,6 +26,7 @@ import {
   McpClient,
   McpTimeoutError,
   parseSseFrames,
+  validateAdapterConfig,
   type McpAdapterConfig,
 } from '../eval/adapters/mcp.js'
 import { resetGatewayForTests, setLlmTransport, type LlmCall } from '../eval/lib/llm.js'
@@ -92,6 +93,8 @@ interface SeenRequest {
   session: string
   protocol: string
   name: string
+  /** the identity header a server may resolve its namespace from */
+  userId: string
 }
 
 async function scriptedServer(
@@ -108,6 +111,7 @@ async function scriptedServer(
         session: String(req.headers['mcp-session-id'] ?? ''),
         protocol: String(req.headers['mcp-protocol-version'] ?? ''),
         name: String(req.headers['mcp-name'] ?? ''),
+        userId: String(req.headers['x-user-id'] ?? ''),
       })
       const scripted = reply(message)
       if (scripted.silent) return
@@ -458,6 +462,89 @@ describe('mcp system in a suite run', () => {
   }, 120_000)
 })
 
+// a server that derives its namespace from the request identity (resolving a
+// `user-<slug>` out of the caller's own header) can only be isolated per question
+// through a header, so
+// the adapter has to resolve templated headers per namespace, not once at startup.
+describe('per-namespace identity headers', () => {
+  const NS_A = '/longmemeval/q-identity-a'
+  const NS_B = '/longmemeval/q-identity-b'
+
+  function identityConfig(url: string, headers: Record<string, string>): Record<string, unknown> {
+    return {
+      name: 'scripted-identity',
+      transport: { kind: 'http', url, headers },
+      write: { tool: 'store_memory', args: { content: '${session.text}' }, idPath: 'id' },
+      search: { tool: 'recall_context', args: { query: '${query}' } },
+      context: { items: { path: 'memories[]', text: 'content', id: 'id' } },
+    }
+  }
+
+  function identityServer(): ReturnType<typeof scriptedServer> {
+    return scriptedServer((message) => {
+      const params = (message.params ?? {}) as { name?: string }
+      if (message.method === 'server/discover') {
+        return {
+          body: {
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { supportedVersions: ['2026-07-28'], capabilities: { tools: {} } },
+          },
+        }
+      }
+      if (message.method === 'tools/list') {
+        return answer(message, { tools: [{ name: 'store_memory' }, { name: 'recall_context' }] })
+      }
+      if (params.name === 'store_memory') return answer(message, { id: 'db-1' })
+      return answer(message, { memories: [] })
+    })
+  }
+
+  it('resolves the identity header per namespace and never leaks one into another', async () => {
+    const { url, seen } = await identityServer()
+    const system = await createMcpSystem({
+      config: validateAdapterConfig(identityConfig(url, { 'x-user-id': '${namespace}' }), 'inline'),
+      adapter: { kind: 'mcp', configHash: 'inline', source: 'inline' },
+      topK: 10,
+    })
+    try {
+      await system.ingest(NS_A, [FIXTURE[0]])
+      await system.retrieve(NS_A, QUESTION, 2000)
+      await system.ingest(NS_B, [FIXTURE[1]])
+      await system.retrieve(NS_B, QUESTION, 2000)
+
+      const calls = seen.filter((entry) => entry.method === 'tools/call')
+      expect(calls.map((entry) => entry.userId)).toEqual([NS_A, NS_A, NS_B, NS_B])
+      // the handshake runs before any namespace is known, so it carries none
+      const handshake = seen.filter((entry) => entry.method !== 'tools/call')
+      expect(handshake.length).toBeGreaterThan(0)
+      expect(handshake.every((entry) => entry.userId === '')).toBe(true)
+    } finally {
+      await system.close()
+    }
+  }, 60_000)
+
+  it('leaves a literal header alone and rejects a placeholder that is not available there', async () => {
+    const { url, seen } = await identityServer()
+    const system = await createMcpSystem({
+      config: validateAdapterConfig(identityConfig(url, { 'x-user-id': 'literal-fixture' }), 'inline'),
+      adapter: { kind: 'mcp', configHash: 'inline', source: 'inline' },
+      topK: 10,
+    })
+    try {
+      await system.ingest(NS_A, [FIXTURE[0]])
+      expect(seen.length).toBeGreaterThan(0)
+      expect(seen.every((entry) => entry.userId === 'literal-fixture')).toBe(true)
+    } finally {
+      await system.close()
+    }
+
+    expect(() =>
+      validateAdapterConfig(identityConfig(url, { 'x-user-id': '${query}' }), 'inline')
+    ).toThrow(/transport\.headers/)
+  }, 60_000)
+})
+
 describe('adapter against engram', () => {
   it('retrieves the evidence through engram own http server in a temp data dir', async () => {
     const dir = tempDir()
@@ -540,4 +627,78 @@ describe('adapter against engram', () => {
       await mcp.close()
     }
   }, 180_000)
+})
+
+// a write the server refused leaves the session unmappable, so swallowing the reply
+// would drop it from every later metric without a word: the run would report a system
+// that never stored the session as if it had. engram's `store_memory` answers a refusal
+// with `{status:'rejected', rule, reason, hint}` and no id; another server refuses the
+// same way with no slug. The adapter must carry the server's own explanation.
+describe('a refused write is surfaced, not swallowed', () => {
+  function refusalServer(reply: Record<string, unknown>): ReturnType<typeof scriptedServer> {
+    return scriptedServer((message) => {
+      const params = (message.params ?? {}) as { name?: string }
+      if (message.method === 'server/discover') {
+        return {
+          body: {
+            jsonrpc: '2.0',
+            id: message.id,
+            result: { supportedVersions: ['2026-07-28'], capabilities: { tools: {} } },
+          },
+        }
+      }
+      if (message.method === 'tools/list') {
+        return answer(message, { tools: [{ name: 'store_memory' }, { name: 'recall_context' }] })
+      }
+      if (params.name === 'store_memory') return answer(message, reply)
+      return answer(message, { memories: [] })
+    })
+  }
+
+  /** ingest one session against a server that replies with `reply`; resolves to the error */
+  async function ingestError(reply: Record<string, unknown>): Promise<Error | null> {
+    const { url } = await refusalServer(reply)
+    const system = await createMcpSystem({
+      config: validateAdapterConfig(
+        {
+          name: 'refusing',
+          transport: { kind: 'http', url },
+          write: { tool: 'store_memory', args: { content: '${session.text}' }, idPath: 'id' },
+          search: { tool: 'recall_context', args: { query: '${query}' } },
+          context: { items: { path: 'memories[]', text: 'content', id: 'id' } },
+        },
+        'inline'
+      ),
+      adapter: { kind: 'mcp', configHash: 'inline', source: 'inline' },
+      topK: 10,
+    })
+    try {
+      await system.ingest(NS, [FIXTURE[0]])
+      return null
+    } catch (err) {
+      return err as Error
+    } finally {
+      await system.close()
+    }
+  }
+
+  it('names the tool, the missing id and the reason the server gave', async () => {
+    const error = await ingestError({
+      status: 'rejected',
+      rule: 'burst',
+      reason: '5 memories in /ns already open with the same 48 characters',
+      hint: 'call revise_memory on the family holder',
+    })
+
+    expect(error).toBeInstanceOf(Error)
+    const message = String(error?.message)
+    expect(message).toContain('store_memory')
+    expect(message).toContain("without 'id'")
+    expect(message).toContain('rule=burst')
+    expect(message).toContain('same 48 characters')
+  })
+
+  it('accepts a reply that does carry the id', async () => {
+    expect(await ingestError({ id: 'db-9' })).toBeNull()
+  })
 })

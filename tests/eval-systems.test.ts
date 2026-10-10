@@ -319,8 +319,8 @@ describe('engram system', () => {
       expect(retrieved.blocks).toEqual([
         '- [note] the deploy window for the golden fixture is 09:00-11:30 utc',
         'the deploy window for the golden fixture is 09:00-11:30 utc',
-        'the golden fixture rollback drill runs right after the deploy window',
         'the pricing table for the golden fixture lives in a spreadsheet',
+        'the golden fixture rollback drill runs right after the deploy window',
         'golden fixture deploy logistics: window and drill',
       ])
       expect(retrieved.context).toBe(retrieved.blocks.join('\n\n'))

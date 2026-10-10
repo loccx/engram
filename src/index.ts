@@ -8,6 +8,7 @@ import { registerHookCommands } from './cli/hook.js'
 import { authHeaders } from './mcp/auth.js'
 import { registerLifecycleCommands } from './cli/lifecycle.js'
 import { registerSetupCommands } from './cli/setup.js'
+import { registerBridgeCommands } from './cli/bridge.js'
 import { ENGRAM_VERSION } from './version.js'
 
 const program = new Command()
@@ -362,5 +363,6 @@ registerBrainCommands(program)
 registerLifecycleCommands(program)
 registerSetupCommands(program)
 registerHookCommands(program)
+registerBridgeCommands(program)
 
 program.parse()

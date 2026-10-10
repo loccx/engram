@@ -13,7 +13,8 @@ import { fileURLToPath } from 'node:url'
 import { PROTOCOL_RULES } from './protocol.js'
 import { HASH_MARKERS, MARKDOWN_MARKERS, removeBlock, upsertBlock, type Markers } from './markers.js'
 import { hookEventName, type HookEvent } from './hook.js'
-import type { AgentEntry, HookBinding, HookTarget, McpTarget } from './registry.js'
+import { PI_EXTENSION_MARKER, piHooksExtension } from './pi-hooks.js'
+import { AGENTS, type AgentEntry, type HookBinding, type HookTarget, type McpTarget } from './registry.js'
 
 /**
  * `engram setup <agent>` turns a registry entry into a plan and a plan into writes.
@@ -28,6 +29,8 @@ export interface SetupContext {
   home: string
   /** how a hook invokes the CLI; `engram` when it is on PATH */
   cli: string
+  /** the same command as argv, for hosts that spawn it without a shell */
+  cliArgv: string[]
   /** absolute path of the stdio shim the MCP entry launches */
   stdioServer: string
 }
@@ -64,15 +67,41 @@ export function stdioServerPath(moduleUrl: string = import.meta.url): string {
 }
 
 export function defaultContext(): SetupContext {
+  const argv1 = process.argv[1]
   return {
     home: process.env.HOME ?? '',
-    cli: engramCli(process.argv[1]),
+    cli: engramCli(argv1),
+    cliArgv: argv1 && argv1.endsWith('.js') ? [process.execPath, argv1] : [SERVER_NAME],
     stdioServer: stdioServerPath(),
   }
 }
 
 export function hookCommand(ctx: SetupContext, event: HookEvent, host: string): string {
   return `${ctx.cli} hook ${event} --host ${host}`
+}
+
+export interface HostProbe {
+  agent: AgentEntry
+  /** absolute path this host is probed at, under the context's home */
+  path: string
+  found: boolean
+}
+
+/**
+ * every registry host beside the path that decides whether it is installed. a host is
+ * present when its probe exists, which is the whole answer to "what is this machine
+ * running?"; `engram setup` with no agent wires the entries this marks found.
+ */
+export function probeHosts(ctx: SetupContext): HostProbe[] {
+  return AGENTS.map((agent) => {
+    const path = join(ctx.home, agent.probe)
+    return { agent, path, found: existsSync(path) }
+  })
+}
+
+/** the installed hosts only, in registry order */
+export function detectHosts(ctx: SetupContext): HostProbe[] {
+  return probeHosts(ctx).filter((host) => host.found)
 }
 
 export function mcpServerEntry(ctx: SetupContext): { command: string; args: string[] } {
@@ -143,7 +172,7 @@ function planMcp(target: McpTarget, ctx: SetupContext, uninstall: boolean): Plan
   }
 
   const servers = isRecord(doc.mcpServers) ? { ...doc.mcpServers } : {}
-  const desired = mcpServerEntry(ctx)
+  const desired = { ...mcpServerEntry(ctx), ...(target.entry ?? {}) }
 
   if (uninstall) {
     if (!(SERVER_NAME in servers)) return unchanged(path, before, 'no engram server registered')
@@ -196,11 +225,31 @@ function planMarkerFile(
     : update(path, before, result.text, 'replace the engram block')
 }
 
+function planPiExtension(ctx: SetupContext, path: string, before: string | null, uninstall: boolean): PlanOp {
+  const body = piHooksExtension(ctx.cliArgv)
+  if (uninstall) {
+    if (before === null) return unchanged(path, before, 'file does not exist')
+    if (!before.includes(PI_EXTENSION_MARKER)) {
+      return refused(path, before, 'this extension was not written by engram; leaving it untouched')
+    }
+    return { path, status: 'delete', action: 'remove the engram pi extension', before, after: '' }
+  }
+  if (before !== null && !before.includes(PI_EXTENSION_MARKER)) {
+    return refused(path, before, 'a different pi extension already uses this path')
+  }
+  if (before === body) return unchanged(path, before, 'the engram pi extension is up to date')
+  return before === null
+    ? create(path, body, 'write the engram pi extension')
+    : update(path, before, body, 'update the engram pi extension')
+}
+
 function planHooks(target: HookTarget, ctx: SetupContext, uninstall: boolean): PlanOp {
   const path = join(ctx.home, target.path)
   const before = readText(path)
   const guard = symlinkGuard(ctx.home, path)
   if (guard) return refused(path, before, guard)
+
+  if (target.style === 'pi-extension') return planPiExtension(ctx, path, before, uninstall)
 
   let doc: Record<string, unknown> = {}
   if (before) {

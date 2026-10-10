@@ -129,9 +129,19 @@ export interface RunHeader {
   vectorMode: VectorMode
   /** the dev-only tokenizer when importable, else 'chars/4' */
   tokenizer: string
-  /** the scoring clock every query used */
+  /**
+   * the clock of the first scored record. a suite with real per-record timestamps
+   * moves the clock per record, so read `nowNote` for the regime and range rather than
+   * treating this as the clock every query used.
+   */
   now: number
   nowIso: string
+  /**
+   * set when the scoring clock is not one fixed value for the run, e.g. a suite that
+   * takes it from each record's own timestamp. Rendered in place of the single clock
+   * so the header never claims a fixed epoch the run did not use.
+   */
+  nowNote?: string
   /** the package version under test */
   engramVersion: string
   nodeVersion: string

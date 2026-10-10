@@ -16,7 +16,7 @@
 import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { countTopLevelElements, scanJsonArray, sha256File } from '../lib/json-stream.js'
-import { EvalHarness } from '../lib/harness.js'
+import { CORPUS_EPOCH, EvalHarness } from '../lib/harness.js'
 import { corpusHash, resolveTokenizer, round3, summarizeLatencies } from '../lib/metrics.js'
 import { markdownTable, renderComparisonReport, REPO_ROOT, renderTimings } from '../lib/report.js'
 import { DEFAULT_KS, MEASUREMENT_DEFAULTS, aggregate, scoreQueries, type QueryDetail } from '../lib/score.js'
@@ -456,6 +456,13 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
   const ks = DEFAULT_KS
   let indexedSessions = 0
   let indexedChars = 0
+  // the scoring clock moves to each record's own question_date, so a run reports the
+  // range it actually used instead of implying one fixed epoch
+  let clockFirst: number | null = null
+  let clockMin = Number.POSITIVE_INFINITY
+  let clockMax = Number.NEGATIVE_INFINITY
+  let clockFromQuestionDate = 0
+  let clockFallback = 0
 
   const harness = await EvalHarness.create({ seed: ctx.seed, vectors: ctx.vectors })
   let systems: MemorySystem[] = []
@@ -525,6 +532,21 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
           question_type: record.question_type ?? 'unknown',
           sessions: built.memories.length,
         })
+
+        // measure the shipped ranking, not a degenerate one: rows carry the dataset's
+        // real session dates, so a fixed epoch puts every memory ~590 days old and
+        // exp(-age / S) drops to ~1e-17, small enough to decide only an exact tie.
+        // asking each question at its own question_date keeps the age signal live and
+        // graduated (0 to ~60 days). set after seedCorpus, so the rows are stamped
+        // exactly as before and only the clock the reads use changes.
+        const questionDate = parseLmeDate(record.question_date)
+        const clock = questionDate ?? CORPUS_EPOCH
+        if (questionDate === null) clockFallback++
+        else clockFromQuestionDate++
+        harness.setScoringClock(clock)
+        if (clockFirst === null) clockFirst = clock
+        if (clock < clockMin) clockMin = clock
+        if (clock > clockMax) clockMax = clock
 
         if (scorable) {
           for (const [configName, patch] of ctx.configs) {
@@ -888,7 +910,18 @@ export async function runLongMemEvalSuite(ctx: SuiteContext): Promise<SuiteOutpu
           corpusHash: corpusHashValue,
           vectorsAvailable: harness.vectorsAvailable,
           vectorMode: harness.vectorMode,
-          now: harness.now,
+          // the header records the first scored record's clock as the representative
+          // value, and the note states the regime so no reader mistakes it for a
+          // single fixed epoch
+          now: clockFirst ?? harness.now,
+          ...(clockFirst === null
+            ? {}
+            : {
+                nowNote:
+                  `per-question from question_date: ${new Date(clockMin).toISOString()} .. ` +
+                  `${new Date(clockMax).toISOString()} (${clockFromQuestionDate} record(s) from ` +
+                  `question_date, ${clockFallback} fallback to the corpus epoch)`,
+              }),
           tokenizer,
           featureFlags,
         }),

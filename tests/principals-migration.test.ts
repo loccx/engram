@@ -41,7 +41,7 @@ describe('migration 025: principals, ownership and tenant-scoped episode identit
     const db = new Database(':memory:')
     baseline(db)
     const result = runMigrations(db, ':memory:', migrations, () => undefined)
-    expect(result.finalVersion).toBe(28)
+    expect(result.finalVersion).toBe(29)
     expect(tableExists(db, 'bridge_envelopes')).toBe(true)
     expect(tableExists(db, 'bridge_outbox')).toBe(true)
     expect(db.prepare("SELECT COUNT(*) AS n FROM bridge_events").get()).toEqual({ n: 0 })

@@ -265,6 +265,24 @@ the daemon refuses to start without a usable token, and then every request — `
 
 the llm paths are optional and nothing is sent anywhere without `ENGRAM_LLM_BASE_URL` and `ENGRAM_LLM_API_KEY`. with no llm configured those paths are either off or deterministic.
 
+### container
+
+the same daemon, self-hosted:
+
+```bash
+docker build -t engram .
+docker run -d -p 8888:8888 -v engram-data:/data \
+  -e ENGRAM_ALLOW_NONLOCAL=1 \
+  -e ENGRAM_AUTH_TOKEN=<a long random token> \
+  engram
+```
+
+`/data` holds the database, the vector cache and the pid file, so it is the only thing worth a volume. the container binds off loopback, which is why it needs the token above; [off loopback](#off-loopback) explains the same rule without a container.
+
+the image carries a `healthcheck` on `/health`. docker runs it. podman builds oci by default and drops the directive with a warning, so pass `--format docker` there, or let the orchestrator probe instead.
+
+storage is sqlite, so one instance owns the volume. pointing two daemons at the same file is not supported, and putting it on a shared network volume will corrupt it.
+
 ## how it works
 
 a namespace is a path, so the directory tree is the memory tree: retrieval searches the session's deepest scope first and ascends through parent layers only when that leaf is thin. `/projects/app-a` never sees `/projects/app-b`.
