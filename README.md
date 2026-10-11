@@ -4,15 +4,58 @@ engram is local memory for coding tools. it keeps memories scoped to a project i
 
 nothing leaves the machine unless you configure an llm endpoint yourself.
 
+## when to use it
+
+engram earns its place when a fact has to survive a context window. the test is whether you would otherwise explain the same thing again next week, in a new session, to an agent that has never seen this repository.
+
+worth storing:
+
+- a decision and the reason behind it, so a later session does not relitigate it
+- a gotcha — the flag that silently does nothing, the service that must be restarted, the ordering that matters
+- a convention the code does not enforce and a reviewer would not catch
+- a non-obvious constraint that came from outside the repository
+- a task's plan and progress, when the work will span more sessions than one context window
+
+not worth storing:
+
+- anything the repository already records — the code, the diff, the git history, the existing docs. an agent can read those, and a copy of them goes stale
+- transient state that is true for an hour
+- secrets. admission refuses credential-shaped content outright, and nothing should depend on that as the only guard
+- a single short session. the store pays off across sessions, not within one
+
+two things make the difference larger in practice. scope is a path, so memories written under a repository stay with that repository and `/projects/app-a` never sees `/projects/app-b`. and the push surfaces below mean the agent often does not have to decide to look — in a host that takes a session-start hook, the rules and the relevant cues arrive on their own.
+
+agents on the machine already share the one store through the daemon, so a namespace covers all of them. a [brain](#brains) is for the other direction: an encrypted snapshot published over git, so a teammate's agent on another machine can read what you marked shareable.
+
 ## install
 
+one paste. this is what the plugin's setup card runs:
+
 ```bash
-npm install && npm link     # from a checkout: the package is not on a registry yet
+export PATH="$(npm prefix -g)/bin:$PATH" && (engram_tmp="$(mktemp -d)" && trap 'rm -rf "$engram_tmp"' EXIT && cd "$engram_tmp" && npm pack --global=false --allow-git=all --pack-destination . github:loccx/engram >/dev/null && npm i -g --allow-scripts=better-sqlite3,onnxruntime-node,sharp,protobufjs ./*.tgz) && engram warm && bash "$(npm root -g)/@loccx/engram/scripts/install-service.sh" --uninstall && bash "$(npm root -g)/@loccx/engram/scripts/install-service.sh" && (engram setup --apply >/dev/null 2>&1 || true)
+```
+
+what each part does:
+
+| step | why |
+|---|---|
+| `npm pack … github:loccx/engram` | builds the tarball from the public source in a temp directory. `npm i -g <git>` would propagate global config into the git prepare step and install dependencies into the wrong tree, so the pack and the install are separated. the temp directory is removed either way |
+| `npm i -g … ./*.tgz` | installs only the built tarball. the `--allow-scripts` list is per-command: no npm setting is changed permanently |
+| `engram warm` | fetches the embedding model once (~131 MB) into the daemon's data directory |
+| `install-service.sh --uninstall` then without | replaces a service this script owns. a service file it did not write is refused unless `--force` is passed, and `--force` backs it up first |
+| `engram setup --apply` | wires every agent host found on the machine — see [wire your agents](#wire-your-agents) |
+
+requires node 20.19 or newer (`engines` in `package.json`) and a writable npm global prefix.
+
+the package is the scoped `@loccx/engram`. the unscoped `engram` on npm is an unrelated package, so `npm install -g engram` installs something else. the scoped name is not on any registry yet, public or internal, so `npm install -g @loccx/engram` fails — resolving the public git repository is the way in.
+
+from a checkout, for development:
+
+```bash
+npm install && npm link     # prepare runs the build; npm link puts engram on PATH
 engram warm                 # fetch the local embedding model once (~131 MB)
 engram start                # daemon on 127.0.0.1:8888
 ```
-
-requires node 20.19 or newer. the package name is the scoped `@loccx/engram`; the unscoped `engram` on npm is a different project and `npm install -g engram` will not install this one. it is not published to a registry yet, so `npm install -g @loccx/engram` fails and a checkout is the way in.
 
 without installing it globally:
 
@@ -22,11 +65,88 @@ npm install && npm run build && node dist/index.js
 
 `engram start` runs in the foreground. `engram stop` stops it, `engram status` reports whether it is up. bringing an existing database forward is [upgrade](#upgrade).
 
+## wire your agents
+
+an mcp server is pull-only: it does nothing until the agent decides to call a tool. `engram setup` is the other half — it writes the mcp server entry, the standing rules, and the lifecycle hooks into each host's own config. what that buys depends on the host: `claude-code` and `pi` take a session-start hook, so their sessions open with the rules and the namespace's brief already in context; `codex` and `cursor` have no hook surface, so there the rules block sets the expectation and the agent still has to call `get_context` itself.
+
+**with no agent argument, setup probes the machine and wires every host it finds.** each host is planned and applied on its own, so one that is refused or cannot be written never stops the rest.
+
+```bash
+engram setup                      # detect hosts, print the plan for each. no host config written
+engram setup --apply              # detect hosts and write them all
+engram setup --uninstall --apply  # remove only what setup added, for every host found
+engram setup claude-code          # one named host, dry run
+engram setup codex --apply        # one named host, written
+engram setup --list               # the agent table, without probing or writing
+engram setup print <agent>        # the config to paste by hand, for a host not in the registry
+```
+
+detection probes one path per host, relative to the home directory. a host installed somewhere else is wired by naming it.
+
+| host | probe | mcp server | rules block | hooks |
+|---|---|---|---|---|
+| `claude-code` | `~/.claude` | `~/.claude.json` → `mcpServers.engram` | `~/.claude/CLAUDE.md` | `~/.claude/settings.json`, all seven events |
+| `codex` | `~/.codex` | `~/.codex/config.toml` → `[mcp_servers.engram]` | `~/.codex/AGENTS.md` | none — codex documents no hook surface |
+| `cursor` | `~/.cursor` | `~/.cursor/mcp.json` → `mcpServers.engram` | none — rules live in the app | none — no verified hook surface |
+| `pi` | `~/.pi` | `~/.pi/agent/mcp.json` → `mcpServers.engram` | `~/.pi/agent/AGENTS.md` | `~/.pi/agent/extensions/engram-hooks.ts` |
+
+the registry is data (`src/delivery/registry.ts`), one entry per host; adding one is adding an entry.
+
+when nothing is detected, setup prints every path it probed and writes no host config:
+
+```
+no agent hosts detected
+
+  claude-code  /Users/you/.claude
+  codex        /Users/you/.codex
+  cursor       /Users/you/.cursor
+  pi           /Users/you/.pi
+
+nothing was written. those are the paths setup probes; a host installed somewhere else is
+wired by naming it: `engram setup <agent>`, listed by `engram setup --list`.
+```
+
+each path is the home directory joined with that host's probe, so the list names the home setup actually read.
+
+**every write is reversible and idempotent.** the file is backed up first (`<file>.engram.bak`, kept from the first run), a file that cannot be parsed is refused rather than overwritten, and re-running reports `unchanged` for everything already correct. the rules go between `<!-- engram:begin -->` and `<!-- engram:end -->`, so anything you wrote around them is untouched.
+
+**two symlink rules, and refusal is per file.** a target that is itself a symlink is refused outright, wherever it points, so a dotfile manager that links `~/.claude/CLAUDE.md` to a file inside home still gets a refusal there. separately, when the target does not exist, setup walks up to the nearest existing ancestor and refuses if that resolves outside the home directory; a symlinked directory that stays inside home is fine. a refused file does not stop the rest of that host: its other files are still written, so a host can end up partially wired, and the exit code is non-zero.
+
+**`--json` reports the plan as data.** with no agent it is an array, one entry per detected host, each `{ plan, applied, error }`; with a named agent it is a single `{ plan, applied }` and there is no `error` field at all. `applied` is a boolean in both shapes and means only that `--apply` was passed — it is not a write result, and `applied: true` is emitted next to a failed write. the per-op outcome is not serialized: `plan.ops[].status` is what setup planned, not what it did. in the detection shape `error` carries the message when applying that host threw.
+
+the exit code is non-zero when any host threw or any op was refused — **including on a dry run**, which needs no `--apply`. applying to several hosts still writes the others first.
+
+the `pi` entry needs two things worth knowing: it sets `exposure: codemode` with the five common tools marked `direct`, because pi's default exposure would otherwise hide every tool from the model while the rules block assumes they are callable; and its hooks are an extension module, since pi has no settings-file hook surface.
+
+## verify it worked
+
+```bash
+engram status                          # the daemon is up
+curl -s http://localhost:8888/health   # {"status":"ok",...}
+engram setup                           # what is wired, and what setup would still change
+```
+
+a second `engram setup` should report `unchanged` for every file, provided you invoke it the same way both times. the hook command and the `pi` extension embed how setup was called — an absolute `node <path>/dist/index.js` when it runs as a file, the bare `engram` from a global install — so re-running through a different entry point reports `update` and rewrites them even though everything landed. anything still listed as `create` or `update` after an identical rerun did not land.
+
+`health` should report `"status":"ok"` with `embeddings.ready: true`. [health and data](#health-and-data) has the full response and what each field means.
+
+then check it from the agent side. in a wired host, start a session in a repository and call `get_context` — it returns the memories for that namespace plus the pinned-fact digest. an empty store answers empty rather than erroring, so an empty result on a fresh install is the expected first answer, not a failure.
+
+once something is stored, the cli reads the same store the agent does:
+
+```bash
+engram search "wal mode" --namespace "$PWD"
+engram ls --type decision
+engram stats
+```
+
+if `embeddings.ready` is false, run `engram warm`. without the model the daemon still works: hybrid search loses its vector leg, a new memory gets no distance-based links, and near-duplicate detection goes quiet. nothing is lost permanently — `engram warm` followed by `engram rebuild-vectors` recomputes what is missing.
+
 ## upgrade
 
 get the new source, `npm install`, `npm run build`, restart the daemon. the database migrates itself — there is no migration command and none is needed.
 
-**the database migrates on open.** `DatabaseManager.init()` (`src/db/init.ts`) runs the numbered migrations in `src/db/migrations/` through `src/db/migrations/runner.ts` every time the file is opened, before the daemon answers a request. the set currently spans 001 to 022. a database written by any earlier build is brought forward on the next start; one already current does nothing.
+**the database migrates on open.** `DatabaseManager.init()` (`src/db/init.ts`) runs the numbered migrations in `src/db/migrations/` through `src/db/migrations/runner.ts` every time the file is opened, before the daemon answers a request. the set currently spans 001 to 029. a database written by any earlier build is brought forward on the next start; one already current does nothing.
 
 what the runner guarantees, and why an unattended upgrade is safe:
 
@@ -63,6 +183,8 @@ the database is `<data dir>/engram.db`; `ENGRAM_DB_PATH` names the file directly
 
 ## point a client at it
 
+`engram setup` covers the hosts in its registry. for anything else, the config is two lines.
+
 an http mcp server cannot see the client's working directory, so the url carries the project:
 
 ```json
@@ -89,22 +211,9 @@ an mcp server is pull-only: it does nothing until the agent decides to call a to
 
 **server instructions.** the `initialize` result and the `server/discover` result both carry a short standing-rules text. clients that honour the mcp `instructions` field put it in the system prompt. nothing to install.
 
-**an instruction block.** `engram setup <agent>` writes the same rules into the host's own instruction file, between `<!-- engram:begin -->` and `<!-- engram:end -->`, so anything you wrote around it is untouched.
+**an instruction block.** `engram setup` writes the same rules into the host's own instruction file, between `<!-- engram:begin -->` and `<!-- engram:end -->`, so anything you wrote around it is untouched. [wire your agents](#wire-your-agents) covers which file each host reads.
 
-```bash
-engram setup                          # list the agents it knows
-engram setup claude-code              # dry run: print the exact lines it would change
-engram setup claude-code --apply      # mcp server + rules block + hooks
-engram setup codex --apply            # config.toml + ~/.codex/AGENTS.md
-engram setup claude-code --apply --uninstall    # remove only what setup added
-engram setup print <agent>            # print the config to paste by hand
-```
-
-`claude-code`, `codex` and `cursor` come from a registry (`src/delivery/registry.ts`), one entry per agent. for any other host, `engram setup print <agent>` prints the mcp entry and the rules text; `engram setup` on its own lists the known names.
-
-every write backs the file up first (`<file>.engram.bak`, kept from the first run), refuses to follow a symlink out of your home directory, refuses a file it cannot parse instead of overwriting it, and re-running changes nothing.
-
-**hooks.** `engram hook <event>` is the process a host runs at a lifecycle event: it reads that host's json on stdin and prints what the host expects on stdout. `--host claude-code` wraps the text in that host's envelope; without it, plain text.
+**hooks.** `engram hook <event>` is the process a host runs at a lifecycle event: it reads that host's json on stdin and prints what the host expects on stdout. `--host claude-code` wraps the text in that host's envelope; without it, plain text. `--payload <json>` takes the same input as an argument, for hosts that cannot pipe stdin — which is how the pi extension calls it.
 
 | event | what it injects |
 |---|---|
@@ -116,9 +225,11 @@ every write backs the file up first (`<file>.engram.bak`, kept from the first ru
 | `subagent-stop` | nothing on stdout. records the subagent's returned summary as a progress note on the parent task. |
 | `session-end` | nothing on stdout. closes the namespace's session and queues its consolidation. |
 
+which hosts get them: `claude-code` gets all seven through `~/.claude/settings.json`. `pi` gets five — `session-start`, `pre-tool-use`, `pre-compact`, `post-compact` and `session-end` — through the extension `engram setup pi` writes. `codex` and `cursor` document no lifecycle hook surface, so nothing is registered and the tools are the whole working tier there (`engram setup codex` says so).
+
 cue windows are keyed by the session and the compaction notification kinds. a repeated kind opens a new window even inside 30 s; `post-compact` and `session-start` with `source: compact` may pair once inside that delay. without a host compaction id, different-kind notifications for two distinct compactions can still look like one pair. a pair delayed beyond 30 s can re-deliver a cue twice. this is a bounded compatibility heuristic, not a complete context-residency guarantee.
 
-hooks fail open. daemon down, slower than 1.5 s, or unreadable input means no output and exit 0 — a hook must never break a session, so an unreachable store costs a cue, not a reply. to turn delivery off, run `engram setup <agent> --apply --uninstall`, or leave the hooks installed and set `"disableAllHooks": true` in the host's settings.
+hooks fail open. daemon down, slower than 1.5 s, or unreadable input means no output and exit 0 — a hook must never break a session, so an unreachable store costs a cue, not a reply. the pi extension holds the same 1.5 s budget and resolves to an empty string on any error. to turn delivery off, run `engram setup --uninstall --apply`, or leave the hooks installed and set `"disableAllHooks": true` in the host's settings.
 
 ## protocol
 
@@ -187,7 +298,7 @@ every update is a delta, and every delta lands in an append-only event log with 
 
 the brief is the portable part. `brief(task, budget_chars)` renders goal, plan with status, the last five progress notes, open questions and artifacts as a pure function of the stored task, so the same task renders the same bytes every time. `handoff` renders the same state for a reader with no history: `for: "subagent"` keeps the unfinished steps and the newest note, `for: "new-session"` keeps the full plan and the recent notes.
 
-hooks re-inject it. `pre-compact` checkpoints and queues consolidation without ever blocking the compaction, `post-compact` puts the brief back, `subagent-start`/`subagent-stop` hand work out and take the answer back, `session-end` closes the session. `claude-code` gets all seven hooks; codex and cursor document no lifecycle hook surface, so there they are the tools alone (`engram setup codex --apply` says so).
+hooks re-inject it. `pre-compact` checkpoints and queues consolidation without ever blocking the compaction, `post-compact` puts the brief back, `subagent-start`/`subagent-stop` hand work out and take the answer back, `session-end` closes the session. which hosts receive them is the table in [deliver the rules and the context](#deliver-the-rules-and-the-context).
 
 ## episodes
 
@@ -353,6 +464,7 @@ curl -s http://localhost:8888/health
   "memoryCount": 128,
   "sessionCount": 9,
   "version": "0.3.0",
+  "build_sha": null,
   "embeddings": {
     "model": "nomic-ai/nomic-embed-text-v1.5",
     "ready": true,
@@ -363,6 +475,8 @@ curl -s http://localhost:8888/health
 ```
 
 `embeddings.ready` means the whole model cache a load reads is on disk, so a load needs no download. `embeddings.loaded` means the embedder is warm in this process right now. `embeddings.vectorsAvailable` means `sqlite-vec` loaded, so vectors can be stored and searched.
+
+`build_sha` is the source revision the build came from, read from an `engram-build.json` beside the package. nothing in this repository writes that file and this install path does not produce one, so it reads `null` here (`src/version.ts`).
 
 without the model, engram still works, degraded: hybrid search loses its vector leg (fts5 and fusion survive, semantic match does not), a new memory is not embedded and so gets no distance-based links, and near-duplicate detection goes quiet. nothing is lost permanently — `engram warm` followed by `engram rebuild-vectors` recomputes the missing embeddings.
 
@@ -379,4 +493,4 @@ engram start --port 8899
 
 `note`, `decision`, `bug`, `pattern`, `gotcha`, `todo`, `procedure`.
 
-a memory is a sentence someone can act on. durable decisions with the why, gotchas, conventions and non-obvious constraints are worth storing; anything the repo or the diff already records, transient state, and secrets are not — admission refuses credential-shaped content outright.
+a memory is a sentence someone can act on. durable decisions with the why, gotchas, conventions and non-obvious constraints are worth storing; anything the repo or the diff already records, transient state, and secrets are not — admission refuses credential-shaped content outright. [when to use it](#when-to-use-it) has the longer version.
